@@ -14,11 +14,10 @@ Interfaz:
 """
 
 import numpy as np
-from typing import Dict, Any, List, Optional # Ensure Optional is imported
-from scipy.stats import gaussian_kde, norm, rankdata, spearmanr # For KDE sampling and Copula
-import pandas as pd # Added for datetime operations
-
-# TensorFlow import will be attempted if 'from_encoder' method is used.
+import pandas as pd
+import tensorflow as tf # type: ignore
+from scipy.stats import norm, gaussian_kde # type: ignore
+from typing import Any, Dict, List, Optional, Union, Tuple, cast # Ensure this line is present and correct
 
 class FeederPlugin:
     plugin_name_prefix = "feeder"
@@ -415,7 +414,7 @@ class FeederPlugin:
         return self._real_fundamental_features_df_scaled.iloc[actual_idx].values.astype(np.float32)
 
 
-    def generate(self, n_ticks_to_generate: int, target_datetimes: Optional[pd.Series] = None) -> Union[List[Dict[str, np.ndarray]], Dict[str, np.ndarray]]: # MODIFIED return type
+    def generate(self, n_ticks_to_generate: int, target_datetimes: Optional[pd.Series] = None) -> Union[List[Dict[str, np.ndarray]], Dict[str, np.ndarray]]:
         if target_datetimes is not None and len(target_datetimes) != n_ticks_to_generate:
             raise ValueError("Length of target_datetimes must match n_ticks_to_generate when provided.")
 
