@@ -66,8 +66,8 @@ setup(
             "default_feeder=tsg_plugins.feeder_plugin:FeederPlugin",
         ],
         "generator.plugins": [
-            "vae_generator = tsg_plugins.generator_plugin:VAEGeneratorPlugin",
-            "default_generator = tsg_plugins.generator_plugin:VAEGeneratorPlugin" # A default alias
+            "vae_generator = tsg_plugins.generator_plugin:GeneratorPlugin",
+            "default_generator = tsg_plugins.generator_plugin:GeneratorPlugin" # A default alias
         ],
         "trainer.plugins": [
             "gan_trainer = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
