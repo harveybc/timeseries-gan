@@ -150,5 +150,19 @@ DEFAULT_VALUES = {
     "target_column_order": [],
     "num_base_features_generated": 6, # Example, adjust if necessary
     "preprocessor_plugin": "stl_preprocessor", # Example, adjust if necessary
-    "gan_training_mode": False # Example, adjust if necessary
+    "gan_training_mode": False, # Example, adjust if necessary
+
+    # --- Parameters for GANTrainerPlugin ---
+    "trainer": "gan_trainer", # Default trainer plugin
+    "gan_epochs": 10000,
+    "gan_batch_size": 32,
+    "generator_lr": 1e-4, # Learning rate for the GAN's generator
+    "generator_beta1": 0.5, # Beta1 for Adam optimizer for GAN's generator
+    "discriminator_lr": 1e-4, # Learning rate for the GAN's discriminator
+    "discriminator_beta1": 0.5, # Beta1 for Adam optimizer for GAN's discriminator
+    "gan_save_interval": 500,
+    "gan_model_dir": "models/gan_trained", # Directory to save trained GAN models
+    "discriminator_lstm_units": 64, # LSTM units in the discriminator
+    "discriminator_dense_units": 128, # Dense units in the discriminator
+    "gan_loss_plot_file": "models/gan_trained/gan_loss_plot.png" # Default path for saving loss plot
 }

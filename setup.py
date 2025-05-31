@@ -70,7 +70,7 @@ setup(
             "default_generator = tsg_plugins.generator_plugin:VAEGeneratorPlugin" # A default alias
         ],
         "trainer.plugins": [
-            "gan_trainer = tsg_plugins.gan_plugin:GANTrainerPlugin",
+            "gan_trainer = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
             # Placeholder for a VAE trainer if you create one and want to register it
             # "vae_trainer = tsg_plugins.vae_trainer_plugin:VAETrainerPlugin"
         ],
