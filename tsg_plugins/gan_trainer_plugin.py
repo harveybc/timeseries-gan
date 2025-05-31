@@ -255,6 +255,10 @@ class GANTrainerPlugin:
         if self.generator is None or self.discriminator is None or self.gan is None:
             logger.error("Models not built. Cannot start training.")
             return
+
+        logger.info("--- Discriminator Model Summary (at start of training) ---")
+        self.discriminator.summary(print_fn=logger.info)
+        logger.info("--- End Discriminator Model Summary ---")
         
         # Ensure model directory exists for plots even before first save_models call
         os.makedirs(self.gan_model_dir, exist_ok=True)
@@ -279,55 +283,84 @@ class GANTrainerPlugin:
         # The preprocessor should use 'generator_decoder_output_feature_names' for feature selection (now target_n_features)
         # And its 'window_size' or equivalent should be set to self.discriminator_target_seq_len (which is 1)
         # This assumes preprocessor can be configured this way.
-        # Example: if preprocessor uses 'seq_len' key for windowing:
+        
         preprocess_config_for_gan['seq_len'] = self.discriminator_target_seq_len
-        # Or if it uses 'window_size':
         preprocess_config_for_gan['window_size'] = self.discriminator_target_seq_len
-        # Ensure feature names used by preprocessor align with self.discriminator_target_n_features
-        # preprocess_config_for_gan['feature_names_to_use'] = self.params.get("generator_decoder_output_feature_names")
+        # The line for 'feature_names_to_use' is removed/kept commented as preprocessor cannot be changed.
 
+
+        real_data_numpy: Optional[np.ndarray] = None # Initialize to ensure it's defined
 
         if data is None and x_train_file is not None:
-            logger.info(f"Loading training data from: {x_train_file} for GAN.")
+            logger.info(f"Loading training data from: {x_train_file} for GAN using preprocessor.")
             if not self.preprocessor_plugin:
                 logger.error("Preprocessor plugin not available.")
                 raise ValueError("Preprocessor plugin required for x_train_file.")
             
             processed_data_dict = self.preprocessor_plugin.run_preprocessing(config=preprocess_config_for_gan)
-            real_data = processed_data_dict.get("x_train")
+            real_data_from_preprocessor = processed_data_dict.get("x_train")
+            all_feature_names_from_preprocessor = processed_data_dict.get("feature_names")
             
-            if real_data is None:
+            if real_data_from_preprocessor is None:
                 logger.error(f"Preprocessor did not return 'x_train' data from {x_train_file}.")
-                raise ValueError("Failed to load/process training data.")
-            if isinstance(real_data, pd.DataFrame):
-                real_data = real_data.values
+                raise ValueError("Failed to load/process training data via preprocessor.")
+            if not all_feature_names_from_preprocessor:
+                logger.error(f"Preprocessor did not return 'feature_names'. Cannot select features for discriminator.")
+                raise ValueError("Preprocessor must return 'feature_names'.")
+
+            if isinstance(real_data_from_preprocessor, pd.DataFrame):
+                real_data_from_preprocessor = real_data_from_preprocessor.values
+            if not isinstance(real_data_from_preprocessor, np.ndarray):
+                real_data_from_preprocessor = np.array(real_data_from_preprocessor)
+
+            # Ensure data from preprocessor is 3D: (samples, seq_len, features_all)
+            # The preprocessor output is (N, 1, 54), so it should be 3D.
+            if real_data_from_preprocessor.ndim == 2 and self.discriminator_target_seq_len == 1:
+                logger.info(f"Reshaping data from preprocessor from {real_data_from_preprocessor.shape} to 3D for GAN.")
+                real_data_from_preprocessor = np.reshape(real_data_from_preprocessor, (-1, 1, real_data_from_preprocessor.shape[1]))
+            elif real_data_from_preprocessor.ndim != 3:
+                logger.error(f"Data from preprocessor has unexpected shape {real_data_from_preprocessor.shape}. Expected 3D or 2D (if seq_len=1).")
+                raise ValueError("Preprocessor output shape not suitable for GAN.")
+
+            # --- Select specific features for the discriminator ---
+            discriminator_expected_feature_names = self.params.get("generator_decoder_output_feature_names")
+            if not discriminator_expected_feature_names:
+                logger.error("'generator_decoder_output_feature_names' not configured. Cannot select features for discriminator.")
+                raise ValueError("Missing 'generator_decoder_output_feature_names' in configuration.")
+
+            logger.info(f"Preprocessor output {real_data_from_preprocessor.shape[2]} features: {all_feature_names_from_preprocessor}")
+            logger.info(f"Discriminator expects {len(discriminator_expected_feature_names)} features: {discriminator_expected_feature_names}")
+
+            try:
+                selected_feature_indices = [all_feature_names_from_preprocessor.index(name) for name in discriminator_expected_feature_names]
+            except ValueError as e:
+                missing_feature = str(e).split("'")[1] # Extract missing feature name
+                logger.error(f"Feature selection error: A feature expected by the discriminator ('{missing_feature}') was not found in the preprocessor's output. ")
+                logger.error(f"Expected features by discriminator: {discriminator_expected_feature_names}")
+                logger.error(f"Available features from preprocessor: {all_feature_names_from_preprocessor}")
+                raise ValueError(f"Feature mismatch: '{missing_feature}' not in preprocessor output.") from e
+            
+            real_data_numpy = real_data_from_preprocessor[:, :, selected_feature_indices]
+            logger.info(f"Data sliced from {real_data_from_preprocessor.shape} to {real_data_numpy.shape} for discriminator based on 'generator_decoder_output_feature_names'.")
+
         elif data is not None:
-            logger.info("Using provided data for training.")
-            real_data = data
+            logger.info("Using provided 'data' array for training. Assuming it has the correct shape and features for the discriminator.")
+            real_data_numpy = data
+            if not isinstance(real_data_numpy, np.ndarray):
+                real_data_numpy = np.array(real_data_numpy)
         else:
-            logger.error("No training data provided.")
+            logger.error("No training data provided (neither x_train_file nor data array).")
             return
 
-        if not isinstance(real_data, np.ndarray):
-            real_data = np.array(real_data)
-
-        # Expected shape for real_data: (samples, self.discriminator_target_seq_len, self.discriminator_target_n_features)
-        # e.g., (samples, 1, 21)
-        logger.info(f"Shape of training data for GAN (real_data): {real_data.shape}")
-        if real_data.ndim != 3 or \
-           real_data.shape[1] != self.discriminator_target_seq_len or \
-           real_data.shape[2] != self.discriminator_target_n_features:
-            logger.error(f"Training data shape {real_data.shape} MISMATCHES discriminator input expectation ({self.discriminator_target_seq_len}, {self.discriminator_target_n_features}). Ensure preprocessor is configured correctly for GAN.")
-            # Depending on severity, you might raise an error or try to reshape/warn.
-            # For now, we proceed, but this is a critical point of failure if shapes don't match.
-            # Example: if real_data is (N, 21) and disc_target_seq_len is 1, reshape it.
-            if real_data.ndim == 2 and real_data.shape[1] == self.discriminator_target_n_features and self.discriminator_target_seq_len == 1:
-                logger.info(f"Reshaping real_data from {real_data.shape} to (N, 1, {self.discriminator_target_n_features})")
-                real_data = np.reshape(real_data, (-1, 1, self.discriminator_target_n_features))
-            else:
-                 raise ValueError("Real data shape mismatch for discriminator.")
-
-
+        # Validate the final shape of real_data_numpy before proceeding
+        logger.info(f"Shape of final training data for GAN (real_data_numpy): {real_data_numpy.shape}")
+        if real_data_numpy.ndim != 3 or \
+           real_data_numpy.shape[1] != self.discriminator_target_seq_len or \
+           real_data_numpy.shape[2] != self.discriminator_target_n_features:
+            logger.error(f"Final training data shape {real_data_numpy.shape} MISMATCHES discriminator input expectation (samples, {self.discriminator_target_seq_len}, {self.discriminator_target_n_features}).")
+            raise ValueError("Real data final shape mismatch for discriminator after processing.")
+        
+        # Use real_data_numpy for training from here onwards
         epochs = self.params["gan_epochs"]
         batch_size = self.params["gan_batch_size"]
         save_interval = self.params["gan_save_interval"]
@@ -339,8 +372,8 @@ class GANTrainerPlugin:
         for epoch in range(epochs):
             start_time_epoch = time.time()
             
-            idx = np.random.randint(0, real_data.shape[0], batch_size)
-            real_batch = real_data[idx] # Shape (batch_size, disc_target_seq_len, disc_target_n_features)
+            idx = np.random.randint(0, real_data_numpy.shape[0], batch_size)
+            real_batch = real_data_numpy[idx] # Shape (batch_size, disc_target_seq_len, disc_target_n_features)
 
             if not self.feeder_plugin:
                 logger.error("Feeder plugin not available.")
