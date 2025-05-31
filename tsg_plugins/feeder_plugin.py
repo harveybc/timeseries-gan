@@ -67,6 +67,7 @@ class FeederPlugin:
         self._copula_spearman_corr = None 
         self._real_datetimes_pd_series: Optional[pd.Series] = None
         self._real_fundamental_features_df_scaled: Optional[pd.DataFrame] = None
+        self._default_datetime_for_gan: Optional[pd.Timestamp] = None # ADDED for GAN mode
 
         self.set_params(**config) 
 
@@ -385,10 +386,11 @@ class FeederPlugin:
         """
         if self._real_datetimes_pd_series is None or self._real_fundamental_features_df_scaled is None or \
            self._real_fundamental_features_df_scaled.empty:
-            if len(self.params["fundamental_feature_names_for_conditioning"]) > 0:
+            num_fundamental_features = len(self.params.get("fundamental_feature_names_for_conditioning", []))
+            # if num_fundamental_features > 0:
                 # print(f"FeederPlugin: Warning - Real data for fundamentals not loaded. Returning NaNs for fundamentals for {datetime_obj}.")
-                pass # Avoid printing for every tick
-            return np.full(len(self.params["fundamental_feature_names_for_conditioning"]), np.nan, dtype=np.float32)
+                # pass # Avoid printing for every tick
+            return np.full(num_fundamental_features, np.nan, dtype=np.float32)
 
         # Find the index in _real_datetimes_pd_series that is closest to or before datetime_obj
         # `searchsorted` can find insertion point; use 'right' to get index of first element > datetime_obj
@@ -413,9 +415,13 @@ class FeederPlugin:
         return self._real_fundamental_features_df_scaled.iloc[actual_idx].values.astype(np.float32)
 
 
-    def generate(self, n_ticks_to_generate: int, target_datetimes: pd.Series) -> List[Dict[str, np.ndarray]]:
-        if len(target_datetimes) != n_ticks_to_generate:
-            raise ValueError("Length of target_datetimes must match n_ticks_to_generate.")
+    def generate(self, n_ticks_to_generate: int, target_datetimes: Optional[pd.Series] = None) -> Union[List[Dict[str, np.ndarray]], Dict[str, np.ndarray]]: # MODIFIED return type
+        if target_datetimes is not None and len(target_datetimes) != n_ticks_to_generate:
+            raise ValueError("Length of target_datetimes must match n_ticks_to_generate when provided.")
+
+        is_gan_mode = target_datetimes is None
+        if is_gan_mode and self._default_datetime_for_gan is None:
+            self._default_datetime_for_gan = pd.Timestamp(datetime.now()) # Cache a default datetime for GAN batch
 
         latent_s = self.params.get("latent_shape") # Should be [seq_len, features]
         if not (isinstance(latent_s, (list, tuple)) and len(latent_s) == 2):
@@ -430,7 +436,7 @@ class FeederPlugin:
         if latent_features <= 0 or latent_seq_len <=0 and n_ticks_to_generate > 0 :
             raise ValueError(f"FeederPlugin: Effective latent_shape is ({latent_seq_len}, {latent_features}), must be positive to generate samples.")
 
-        Z_samples = np.empty((n_ticks_to_generate, latent_seq_len, latent_features), dtype=np.float32)
+        Z_samples_batch = np.empty((n_ticks_to_generate, latent_seq_len, latent_features), dtype=np.float32)
 
         if method == "from_encoder":
             if self._empirical_z_means is None or self._empirical_z_log_vars is None:
@@ -438,54 +444,87 @@ class FeederPlugin:
             if self._empirical_z_means.ndim != 3 or self._empirical_z_log_vars.ndim != 3:
                  raise RuntimeError(f"FeederPlugin: Empirical z_mean/z_log_var must be 3D for sequential latent space. Got shapes: {self._empirical_z_means.shape}, {self._empirical_z_log_vars.shape}")
             
-            # For 3D latent spaces, 'direct' sampling of entire sequences is the primary supported method.
-            # KDE/Copula for 3D sequences is complex and not implemented here.
             if technique not in ["direct"]:
                 print(f"FeederPlugin: Warning (generate) - Encoder technique '{technique}' for 3D latent space is not fully supported. Using 'direct' sampling.")
             
             num_available_empirical = self._empirical_z_means.shape[0]
             indices = np.random.choice(num_available_empirical, size=n_ticks_to_generate, replace=True)
             
-            sampled_z_means_batch = self._empirical_z_means[indices] # Shape: (n_ticks, seq_len, features)
-            sampled_z_log_vars_batch = self._empirical_z_log_vars[indices] # Shape: (n_ticks, seq_len, features)
+            sampled_z_means_batch = self._empirical_z_means[indices] 
+            sampled_z_log_vars_batch = self._empirical_z_log_vars[indices]
 
             epsilon_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
-            Z_samples = sampled_z_means_batch + np.exp(0.5 * sampled_z_log_vars_batch) * epsilon_batch
+            Z_samples_batch = sampled_z_means_batch + np.exp(0.5 * sampled_z_log_vars_batch) * epsilon_batch
         
         elif method == "standard_normal":
-            Z_samples = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
+            Z_samples_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
         else:
             raise ValueError(f"FeederPlugin: Unknown sampling_method '{method}'.")
 
-        output_sequence = []
-        for i in range(n_ticks_to_generate):
-            datetime_obj = target_datetimes.iloc[i]
-            z_tick = Z_samples[i, :, :] # Shape (latent_seq_len, latent_features)
-
-            scaled_date_features_tick = self._get_scaled_date_features(datetime_obj)
-            scaled_fundamental_features_tick = self._get_scaled_fundamental_features(datetime_obj)
+        if is_gan_mode:
+            # GAN mode: return batches of Z, conditional_data, and context_h
+            conditional_data_list = []
+            context_h_list = []
             
-            conditional_data_for_tick = np.concatenate(
-                [scaled_date_features_tick, scaled_fundamental_features_tick]
-            ).reshape(1, -1)
+            # Use a single datetime for the whole batch if in GAN mode and target_datetimes is None
+            # This is a simplification; more advanced conditional GANs might need diverse conditional inputs.
+            dt_for_batch_conditioning = self._default_datetime_for_gan if self._default_datetime_for_gan else pd.Timestamp(datetime.now())
 
-            context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
-            # ... (context_strategy logic if any) ...
+            for i in range(n_ticks_to_generate):
+                scaled_date_features_tick = self._get_scaled_date_features(dt_for_batch_conditioning)
+                scaled_fundamental_features_tick = self._get_scaled_fundamental_features(dt_for_batch_conditioning)
+                
+                # Handle NaNs from fundamental features if real data wasn't loaded/aligned
+                if np.isnan(scaled_fundamental_features_tick).any():
+                    num_fund_feats = len(self.params.get("fundamental_feature_names_for_conditioning", []))
+                    scaled_fundamental_features_tick = np.zeros(num_fund_feats, dtype=np.float32) # Default to zeros if NaN
 
-            if context_strategy == "random":
-                context_h_tick = np.random.normal(loc=0.0, scale=1.0, size=(1, context_dim)).astype(np.float32)
-            elif context_strategy == "zeros":
+                conditional_data_for_tick = np.concatenate(
+                    [scaled_date_features_tick, scaled_fundamental_features_tick]
+                ).reshape(1, -1)
+                conditional_data_list.append(conditional_data_for_tick)
+
                 context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
-            else: # Default to zeros if unknown strategy
-                if context_strategy != "zeros": # Avoid warning if it's already 'zeros' due to default
+                if context_strategy == "random":
+                    context_h_tick = np.random.normal(loc=0.0, scale=1.0, size=(1, context_dim)).astype(np.float32)
+                elif context_strategy != "zeros":
                     print(f"FeederPlugin: Warning - Unknown context_vector_strategy '{context_strategy}'. Defaulting to 'zeros'.")
-                context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
+                context_h_list.append(context_h_tick)
 
-            output_sequence.append({
-                "Z": z_tick.astype(np.float32), # Now 2D: (seq_len, features)
-                "conditional_data": conditional_data_for_tick.astype(np.float32),
-                "context_h": context_h_tick.astype(np.float32),
-                "datetimes": datetime_obj
-            })
+            conditional_data_batch = np.concatenate(conditional_data_list, axis=0).astype(np.float32)
+            context_h_batch = np.concatenate(context_h_list, axis=0).astype(np.float32)
             
-        return output_sequence
+            return {
+                "latent_vector_batch": Z_samples_batch.astype(np.float32),
+                "conditional_data_batch": conditional_data_batch,
+                "context_h_batch": context_h_batch
+            }
+        else:
+            # Original mode: return list of dictionaries for each tick
+            output_sequence = []
+            for i in range(n_ticks_to_generate):
+                datetime_obj = target_datetimes.iloc[i] # target_datetimes is guaranteed to be non-None here
+                z_tick = Z_samples_batch[i, :, :] # Shape (latent_seq_len, latent_features)
+
+                scaled_date_features_tick = self._get_scaled_date_features(datetime_obj)
+                scaled_fundamental_features_tick = self._get_scaled_fundamental_features(datetime_obj)
+                
+                conditional_data_for_tick = np.concatenate(
+                    [scaled_date_features_tick, scaled_fundamental_features_tick]
+                ).reshape(1, -1)
+
+                context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
+                if context_strategy == "random":
+                    context_h_tick = np.random.normal(loc=0.0, scale=1.0, size=(1, context_dim)).astype(np.float32)
+                elif context_strategy != "zeros":
+                    if context_strategy != "zeros": 
+                        print(f"FeederPlugin: Warning - Unknown context_vector_strategy '{context_strategy}'. Defaulting to 'zeros'.")
+                
+                output_sequence.append({
+                    "Z": z_tick.astype(np.float32), 
+                    "conditional_data": conditional_data_for_tick.astype(np.float32),
+                    "context_h": context_h_tick.astype(np.float32),
+                    "datetimes": datetime_obj
+                })
+            
+            return output_sequence
