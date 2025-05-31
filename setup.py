@@ -73,7 +73,7 @@ setup(
         ],
         "optimizer.plugins": [
             "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
-            "gan_trainer      = tsg_plugins.gan_plugin:GANTrainerPlugin",
+            "gan_trainer      = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
         ],
     },
 
