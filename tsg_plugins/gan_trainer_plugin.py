@@ -34,20 +34,37 @@ class GANTrainerPlugin:
         "discriminator_lr": 1e-4,
         "discriminator_beta1": 0.5,
         "gan_save_interval": 500,
-        "latent_dim": 32, # For generator's INPUT latent vector
-        "seq_len": 18,    # For generator's INPUT latent sequence length
-        # "n_features": 5, # REMOVED - Will be derived or handled specifically
+        "latent_dim": 32, 
+        "seq_len": 18,    
         "gan_model_dir": "models/gan_trained",
         "discriminator_lstm_units": 64,
         "discriminator_dense_units": 128,
-        "gan_generator_output_actual_seq_len": 1, # Define that VAE decoder outputs 1 step
+        "gan_generator_output_actual_seq_len": 1,
+        # Callbacks parameters
+        "enable_reduce_lr_on_plateau": True,
+        "lr_reduction_factor": 0.5, # Factor by which LR is reduced
+        "lr_patience": 50,          # Epochs to wait for improvement before reducing LR
+        "lr_min_delta": 0.001,      # Minimum change to qualify as improvement for LR reduction
+        "min_lr_g": 1e-7,           # Minimum LR for generator
+        "min_lr_d": 1e-7,           # Minimum LR for discriminator
+        "lr_monitor_metric": "g_loss", # "g_loss" or "d_loss"
+        "enable_early_stopping": True,
+        "es_patience": 200,         # Epochs to wait for improvement before stopping
+        "es_min_delta": 0.001,      # Minimum change to qualify as improvement for early stopping
+        "es_monitor_metric": "g_loss", # "g_loss" or "d_loss"
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
         logger.info("Initializing GANTrainerPlugin.")
         self.config = copy.deepcopy(config)
         self.params = self.plugin_params.copy()
+        # Update self.params with config, ensuring plugin_params defaults are taken if not in config
+        for key in self.plugin_params:
+            if key in self.config:
+                self.params[key] = self.config[key]
+        # Add any keys from config that were not in plugin_params (e.g. dynamic ones)
         self.params.update(self.config)
+
 
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
@@ -118,8 +135,14 @@ class GANTrainerPlugin:
     def set_params(self, **params: Any) -> None:
         logger.info(f"GANTrainerPlugin updating parameters: {list(params.keys())}")
         self.config.update(params)
-        self.params = self.plugin_params.copy()
+        self.params = self.plugin_params.copy() # Start with defaults
+        # Update self.params with config, ensuring plugin_params defaults are taken if not in config
+        for key in self.plugin_params: # Iterate over known default keys
+            if key in self.config:
+                self.params[key] = self.config[key]
+        # Add any keys from config that were not in plugin_params (e.g. dynamic ones from main config)
         self.params.update(self.config)
+
 
         self.gen_input_seq_len = self.params.get("seq_len", self.gen_input_seq_len)
         self.gen_input_latent_dim = self.params.get("latent_dim", self.gen_input_latent_dim)
@@ -365,6 +388,29 @@ class GANTrainerPlugin:
         batch_size = self.params["gan_batch_size"]
         save_interval = self.params["gan_save_interval"]
 
+        # Callback: ReduceLROnPlateau settings
+        enable_reduce_lr = self.params.get("enable_reduce_lr_on_plateau", False)
+        lr_reduction_factor = self.params.get("lr_reduction_factor", 0.5)
+        lr_patience = self.params.get("lr_patience", 50)
+        lr_min_delta = self.params.get("lr_min_delta", 0.001)
+        min_lr_g = self.params.get("min_lr_g", 1e-7)
+        min_lr_d = self.params.get("min_lr_d", 1e-7)
+        lr_monitor_metric_name = self.params.get("lr_monitor_metric", "g_loss")
+
+        best_lr_metric_val = float('inf')
+        lr_patience_counter = 0
+        lr_reductions_count = 0
+
+        # Callback: EarlyStopping settings
+        enable_early_stop = self.params.get("enable_early_stopping", False)
+        es_patience = self.params.get("es_patience", 200)
+        es_min_delta = self.params.get("es_min_delta", 0.001)
+        es_monitor_metric_name = self.params.get("es_monitor_metric", "g_loss")
+        
+        best_es_metric_val = float('inf')
+        es_patience_counter = 0
+
+
         valid = np.ones((batch_size, 1))
         fake = np.zeros((batch_size, 1))
         d_losses, g_losses = [], []
@@ -418,7 +464,11 @@ class GANTrainerPlugin:
                         break
                 if not found_match: logger.warning(f"Train loop: Predict input '{model_input_name}' not mapped.")
             
-            generated_batch_raw = self.generator.predict(generator_predict_inputs_ordered) # Shape (batch_size, actual_generator_output_dim) e.g. (bs, 23)
+            # Change this line:
+            # generated_batch_raw = self.generator.predict(generator_predict_inputs_ordered)
+            # To this:
+            generated_batch_raw = self.generator.predict(generator_predict_inputs_ordered, verbose=0)
+
 
             # Slice if needed
             generated_batch_for_disc = generated_batch_raw
@@ -455,8 +505,58 @@ class GANTrainerPlugin:
             d_losses.append(d_loss[0])
             g_losses.append(g_loss)
 
+            # --- Callback Logic ---
+            current_lr_metric_val = g_loss if lr_monitor_metric_name == "g_loss" else d_loss[0]
+            current_es_metric_val = g_loss if es_monitor_metric_name == "g_loss" else d_loss[0]
+
+            # ReduceLROnPlateau
+            if enable_reduce_lr:
+                if current_lr_metric_val < best_lr_metric_val - lr_min_delta:
+                    best_lr_metric_val = current_lr_metric_val
+                    lr_patience_counter = 0
+                else:
+                    lr_patience_counter += 1
+                
+                if lr_patience_counter >= lr_patience:
+                    lr_patience_counter = 0
+                    lr_reductions_count += 1
+                    
+                    old_lr_g = float(tf.keras.backend.get_value(self.generator_optimizer.learning_rate))
+                    new_lr_g = max(old_lr_g * lr_reduction_factor, min_lr_g)
+                    tf.keras.backend.set_value(self.generator_optimizer.learning_rate, new_lr_g)
+                    
+                    old_lr_d = float(tf.keras.backend.get_value(self.discriminator_optimizer.learning_rate))
+                    new_lr_d = max(old_lr_d * lr_reduction_factor, min_lr_d)
+                    tf.keras.backend.set_value(self.discriminator_optimizer.learning_rate, new_lr_d)
+                    
+                    logger.info(f"ReduceLROnPlateau: Epoch {epoch}. Reducing LRs. G: {old_lr_g:.2e}->{new_lr_g:.2e}, D: {old_lr_d:.2e}->{new_lr_d:.2e}. Reductions: {lr_reductions_count}.")
+            
+            # EarlyStopping
+            if enable_early_stop:
+                if current_es_metric_val < best_es_metric_val - es_min_delta:
+                    best_es_metric_val = current_es_metric_val
+                    es_patience_counter = 0
+                else:
+                    es_patience_counter += 1
+
+                if es_patience_counter >= es_patience:
+                    logger.info(f"EarlyStopping: Epoch {epoch}. Monitored metric ({es_monitor_metric_name}) did not improve for {es_patience} epochs. Stopping training.")
+                    break # Exit epoch loop
+
+            log_message_parts = [
+                f"{epoch}/{epochs}",
+                f"[D loss: {d_loss[0]:.4f}, acc.: {100*d_loss[1]:.2f}%]",
+                f"[G loss: {g_loss:.4f}]",
+                f"time: {epoch_time:.2f}s"
+            ]
+            if enable_reduce_lr:
+                log_message_parts.append(f"[LR Patience: {lr_patience_counter}/{lr_patience}, Reductions: {lr_reductions_count}]")
+            if enable_early_stop:
+                log_message_parts.append(f"[ES Patience: {es_patience_counter}/{es_patience}]")
+
             if epoch % 100 == 0 or epoch == epochs -1 :
-                logger.info(f"{epoch}/{epochs} [D loss: {d_loss[0]:.4f}, acc.: {100*d_loss[1]:.2f}%] [G loss: {g_loss:.4f}] time: {epoch_time:.2f}s")
+                logger.info(" ".join(log_message_parts))
+
 
             if epoch % save_interval == 0 and epoch > 0:
                 self.save_models(epoch)
