@@ -252,8 +252,7 @@ class FeederPlugin:
     def set_params(self, **kwargs):
         old_method = self.params.get("sampling_method")
         old_encoder_file = self.params.get("encoder_model_file")
-        # old_data_file = self.params.get("real_data_file") # REMOVED
-        old_data_file = self.main_config.get("x_train_file") # Get from stored main_config initially
+        old_data_file = self.main_config.get("x_train_file") # Get from stored mainConfig initially
         old_technique = self.params.get("encoder_sampling_technique")
         old_copula_bw_method = self.params.get("copula_kde_bw_method") 
         old_encoder_features = self.params.get("feature_columns_for_encoder")
@@ -262,27 +261,33 @@ class FeederPlugin:
         old_latent_shape = list(self.params.get("latent_shape", [0,0])) # Make a copy
 
         # Update main_config if kwargs contains keys that are part of main config
-        # This is important if set_params is called with a more complete config later (e.g. by Optimizer)
         self.main_config.update(kwargs)
 
-        # Update self.params using kwargs, handling prefixed keys
-        for param_key_short in self.plugin_params.keys():
-            if param_key_short in kwargs:
-                self.params[param_key_short] = kwargs[param_key_short]
-            else:
-                potential_prefixed_key = f"feeder_{param_key_short}" 
-                if potential_prefixed_key in kwargs:
-                    self.params[param_key_short] = kwargs[potential_prefixed_key]
+        # Update self.params: Start with existing self.params (defaults), then overwrite/add from kwargs.
+        # This ensures all keys from kwargs are present in self.params.
+        self.params.update(kwargs)
+
+        # Then, handle specific logic for feeder_prefixed keys if they should override the direct keys.
+        # This loop ensures that if a short key (from FeederPlugin.plugin_params) has a
+        # feeder_prefixed version in kwargs, the prefixed version takes precedence for that specific short key.
+        for param_key_short in self.plugin_params.keys(): # Iterate over FeederPlugin's own default keys
+            potential_prefixed_key = f"feeder_{param_key_short}"
+            if potential_prefixed_key in kwargs:
+                # If feeder_prefixed key exists in incoming kwargs, it updates the short key in self.params
+                self.params[param_key_short] = kwargs[potential_prefixed_key]
+            # If only the direct short key was in kwargs, self.params.update(kwargs) already handled it.
+            # If neither was in kwargs, the original default in self.params (from self.plugin_params.copy()) remains.
         
         # Handle 'latent_dim' from optimizer potentially overriding the feature part of 'latent_shape'
         if 'latent_dim' in kwargs and isinstance(kwargs['latent_dim'], int):
-            current_shape = list(self.params.get('latent_shape', [0,0])) # Get current or default
-            if len(current_shape) == 2:
-                print(f"FeederPlugin: Updating latent_shape feature count from 'latent_dim'={kwargs['latent_dim']}. Old shape: {current_shape}")
-                current_shape[1] = kwargs['latent_dim']
-                self.params['latent_shape'] = current_shape
+            # Ensure latent_shape is initialized if it wasn't (e.g. from defaults)
+            current_shape_for_ld_update = list(self.params.get('latent_shape', [18, 32])) # Use a sensible default if not found
+            if len(current_shape_for_ld_update) == 2:
+                # print(f"FeederPlugin: Updating latent_shape feature count from 'latent_dim'={kwargs['latent_dim']}. Old shape: {current_shape_for_ld_update}")
+                current_shape_for_ld_update[1] = kwargs['latent_dim']
+                self.params['latent_shape'] = current_shape_for_ld_update
             else:
-                print(f"FeederPlugin: Warning - 'latent_dim' provided, but current 'latent_shape' ({current_shape}) is not 2D. Cannot update feature count.")
+                print(f"FeederPlugin: Warning - 'latent_dim' provided, but current 'latent_shape' ({current_shape_for_ld_update}) is not 2D. Cannot update feature count.")
 
         # Ensure latent_shape is a list of two integers
         ls = self.params.get("latent_shape")
@@ -293,7 +298,6 @@ class FeederPlugin:
 
         new_method = self.params.get("sampling_method")
         new_encoder_file = self.params.get("encoder_model_file")
-        # new_data_file = self.params.get("real_data_file") # REMOVED
         new_data_file = self.main_config.get("x_train_file") # Get updated from main_config
         new_technique = self.params.get("encoder_sampling_technique")
         new_copula_bw_method = self.params.get("copula_kde_bw_method") 
@@ -330,13 +334,12 @@ class FeederPlugin:
         if (old_data_file != new_data_file or
             old_fundamental_features != new_fundamental_features or
             old_datetime_col != new_datetime_col or
-            (len(new_fundamental_features) > 0 and self._real_fundamental_features_df_scaled is None) or
-            (len(new_fundamental_features) > 0 and self._real_datetimes_pd_series is None)
+            (new_fundamental_features and len(new_fundamental_features) > 0 and self._real_fundamental_features_df_scaled is None) or # Check if list is not empty
+            (new_fundamental_features and len(new_fundamental_features) > 0 and self._real_datetimes_pd_series is None) # Check if list is not empty
             ):
             reinitialize_fundamentals = True
         
         if reinitialize_encoder_related or reinitialize_fundamentals:
-            # Check against the potentially updated self.main_config.get("x_train_file")
             if self.main_config.get("x_train_file") or (new_method == "from_encoder" and self.params.get("encoder_model_file")):
                 try:
                     print("FeederPlugin: Re-initializing data due to parameter change.")
@@ -345,7 +348,7 @@ class FeederPlugin:
                     print(f"FeederPlugin: Error during re-initialization in set_params: {e}")
                     self._invalidate_encoder_state() 
             else: 
-                if new_method == "from_encoder" or len(new_fundamental_features) > 0:
+                if new_method == "from_encoder" or (new_fundamental_features and len(new_fundamental_features) > 0): # Check if list is not empty
                     print(f"FeederPlugin: Warning - 'x_train_file' (from main config) not provided, but needed for current settings. Clearing related state.")
                 self._invalidate_encoder_state()
 
