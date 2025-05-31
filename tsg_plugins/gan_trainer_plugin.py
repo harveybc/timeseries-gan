@@ -153,17 +153,87 @@ class GANTrainerPlugin:
         logger.info("Building GAN model (Generator + Discriminator)...")
         self.discriminator.trainable = False  # Discriminator is not trained during GAN training phase
         
-        # Assuming generator takes latent vector as input.
-        # The input to the GAN model will be the input to the generator.
-        # This needs to match how the FeederPlugin provides latent vectors.
-        # Example: if latent_shape is [seq_len, latent_dim]
-        generator_input_shape = tuple(self.params.get("latent_shape", (self.seq_len, self.latent_dim)))
+        # Define input layers for the GAN based on what the VAE Decoder (self.generator) expects
+        # These shapes should align with what FeederPlugin provides.
         
-        gan_input = tf.keras.Input(shape=generator_input_shape, name="gan_input_latent_vector")
-        generated_data = self.generator(gan_input) # Output of generator
-        gan_output = self.discriminator(generated_data)  # Pass generated data to discriminator
+        # 1. Latent vector input
+        latent_input_shape = tuple(self.params.get("latent_shape", (self.seq_len, self.latent_dim)))
+        gan_latent_input = tf.keras.Input(shape=latent_input_shape, name="gan_input_latent_vector")
         
-        gan = tf.keras.Model(gan_input, gan_output, name="gan_combined")
+        # 2. Conditional data input
+        # self.conditional_dim was calculated in __init__
+        gan_conditional_input = tf.keras.Input(shape=(self.conditional_dim,), name="gan_input_conditional_data")
+        
+        # 3. Context vector input
+        # self.context_dim_gan was calculated in __init__
+        gan_context_input = tf.keras.Input(shape=(self.context_dim_gan,), name="gan_input_context_vector")
+
+        # The order of inputs to self.generator matters and must match its internal definition.
+        # We need to get the expected input names from the generator model itself.
+        # These names are configured in the GeneratorPlugin (e.g., "generator_decoder_input_name_latent")
+        
+        if not hasattr(self.generator, 'inputs') or not self.generator.inputs:
+            logger.error("Cannot determine generator's input signature. self.generator.inputs is not available.")
+            raise ValueError("Generator model input signature unknown.")
+
+        generator_input_names_from_model = [inp.name.split(':')[0] for inp in self.generator.inputs]
+        logger.info(f"Generator model expects inputs named: {generator_input_names_from_model}")
+
+        # Get the configured names for each type of input from self.params (which includes generator_plugin.params)
+        cfg_latent_name = self.params.get("generator_decoder_input_name_latent")
+        cfg_context_name = self.params.get("generator_decoder_input_name_context")
+        cfg_conditional_name = self.params.get("generator_decoder_input_name_conditions")
+        # cfg_window_name = self.params.get("generator_decoder_input_name_window") # Not used for GAN direct generation from Z
+
+        if not cfg_latent_name or not cfg_context_name or not cfg_conditional_name:
+            logger.error("One or more generator input names (latent, context, conditions) are not configured in params.")
+            raise ValueError("Missing generator input name configuration.")
+
+        # Map our GAN input layers to the generator's expected input names
+        input_map = {
+            cfg_latent_name: gan_latent_input,
+            cfg_context_name: gan_context_input,
+            cfg_conditional_name: gan_conditional_input,
+        }
+
+        # Order the GAN input layers according to the generator model's input order
+        gan_input_layers_ordered = []
+        for model_input_name in generator_input_names_from_model:
+            found_match = False
+            for cfg_name, gan_layer in input_map.items():
+                # Check if the model_input_name (e.g., "decoder_input_z_seq_2") starts with the configured base name (e.g., "decoder_input_z_seq")
+                # This handles cases where Keras might append suffixes like "_1", "_2" to layer names if models are rebuilt.
+                if model_input_name.startswith(cfg_name):
+                    gan_input_layers_ordered.append(gan_layer)
+                    found_match = True
+                    break
+            if not found_match:
+                # This check is important. If the generator expects an input (e.g. window) that we are not providing for GAN mode,
+                # it will fail. The current VAE-GAN setup assumes direct generation from Z, C, H.
+                # If the generator *always* requires the window input, this GAN model structure is incompatible.
+                # However, typically for GANs, we bypass window inputs if the generator can operate from Z,C,H alone.
+                logger.warning(f"Generator model input '{model_input_name}' does not match any configured GAN inputs (latent, context, conditions). This input will not be provided to the generator in the GAN model. This might be okay if it's an optional input or not used in this generation path.")
+                # If it's a critical missing input, this will error out when self.generator is called.
+
+        if len(gan_input_layers_ordered) != len(self.generator.inputs):
+             logger.error(f"Mismatch between ordered GAN inputs ({len(gan_input_layers_ordered)}) and generator's expected inputs ({len(self.generator.inputs)}). This indicates a problem mapping configured input names to the model's actual input signature.")
+             logger.error(f"Ordered GAN inputs based on mapping: {[layer.name for layer in gan_input_layers_ordered]}")
+             logger.error(f"Generator's expected inputs by name: {generator_input_names_from_model}")
+             logger.error(f"Configured input names: Latent='{cfg_latent_name}', Context='{cfg_context_name}', Conditions='{cfg_conditional_name}'")
+             # This often happens if the generator model expects an input (e.g., 'input_x_window') that we are not providing in this GAN setup.
+             # For a VAE-GAN, we typically only feed Z, C, H to the decoder.
+             # If the decoder *requires* the window, then this GAN architecture is problematic for that specific decoder.
+             # For now, we proceed, and Keras will raise an error if the call to self.generator is invalid.
+             # A more robust solution would be to ensure the generator can operate with Z,C,H or to provide dummy/appropriate window data.
+             # Given the error "expects 3 input(s)", it seems it wants Z, C, H.
+
+        # Define the list of inputs for the tf.keras.Model
+        actual_gan_model_inputs = [gan_latent_input, gan_conditional_input, gan_context_input]
+
+        generated_data = self.generator(gan_input_layers_ordered) # Pass the ordered list of KerasTensors
+        gan_output = self.discriminator(generated_data)
+        
+        gan = tf.keras.Model(inputs=actual_gan_model_inputs, outputs=gan_output, name="gan_combined")
         gan.compile(loss='binary_crossentropy', optimizer=self.generator_optimizer)
         logger.info("GAN model built and compiled.")
         gan.summary(print_fn=logger.info)
@@ -256,48 +326,63 @@ class GANTrainerPlugin:
             idx = np.random.randint(0, real_data.shape[0], batch_size)
             real_batch = real_data[idx]
 
-            # Generate a batch of new data using FeederPlugin and Generator
-            # The FeederPlugin should provide latent vectors compatible with the generator
             if not self.feeder_plugin:
                 logger.error("Feeder plugin not available to generate latent noise for generator.")
                 raise ValueError("Feeder plugin required for GAN training.")
 
-            # Feeder generates latent noise + any conditions
-            # Assuming feeder_plugin.generate() returns a dictionary or object
-            # from which we can extract the latent vector for the generator.
-            # The shape of this latent vector must match self.generator.input_shape.
-            # For VAEGeneratorPlugin, this is typically `feeder_outputs_sequence['latent_vector']`
-            # and might be 3D: (batch_size, latent_seq_len, latent_dim_features)
-            
-            # Simplification: Feeder generates latent vectors of shape (batch_size, latent_dim)
-            # or (batch_size, latent_seq_len, latent_dim_features)
-            # This needs to align with your FeederPlugin's output and Generator's input.
-            # Let's assume feeder_plugin.generate gives a dict with 'latent_vector'
             feeder_output_for_gen = self.feeder_plugin.generate(n_ticks_to_generate=batch_size) 
             
-            # The VAEGeneratorPlugin's generate method is complex and expects initial windows etc.
-            # For GAN training, we typically feed noise directly to the generator part of the VAE.
-            # So, self.generator here should be the decoder part.
-            # The input to this decoder needs to be latent vectors.
-            
-            # Assuming feeder_output_for_gen['latent_vector'] is the correct input for self.generator
-            # and has shape (batch_size, seq_len_for_latent, latent_dim_features)
-            # or (batch_size, latent_dim) if generator is simpler.
-            # Let's assume latent_input_for_generator is correctly shaped.
-            latent_input_for_generator = feeder_output_for_gen.get('latent_vector') 
-            if latent_input_for_generator is None:
-                # Fallback: generate random noise if feeder doesn't provide 'latent_vector'
-                # This shape must match the generator's input.
-                # If generator input is (None, seq_len, latent_dim)
+            latent_input_for_generator = feeder_output_for_gen.get('latent_vector_batch')
+            conditional_input_for_generator = feeder_output_for_gen.get('conditional_data_batch')
+            context_input_for_generator = feeder_output_for_gen.get('context_h_batch')
+
+            if latent_input_for_generator is None or conditional_input_for_generator is None or context_input_for_generator is None:
+                logger.error("FeederPlugin did not return all required inputs (latent, conditional, context) for the generator.")
+                # Fallback to random noise for latent if others are missing too, this will likely fail if C and H are also None.
                 gen_input_shape_from_config = tuple(self.params.get("latent_shape", (self.seq_len, self.latent_dim)))
                 if len(gen_input_shape_from_config) == 2: # (seq_len, features)
                     latent_input_for_generator = np.random.normal(0, 1, (batch_size, gen_input_shape_from_config[0], gen_input_shape_from_config[1]))
                 elif len(gen_input_shape_from_config) == 1: # (features_flat)
                     latent_input_for_generator = np.random.normal(0, 1, (batch_size, gen_input_shape_from_config[0]))
-                else:
-                    raise ValueError(f"Unsupported latent_shape for noise generation: {gen_input_shape_from_config}")
+                # Create dummy conditional and context if missing, with correct shapes
+                if conditional_input_for_generator is None:
+                    conditional_input_for_generator = np.zeros((batch_size, self.conditional_dim))
+                if context_input_for_generator is None:
+                    context_input_for_generator = np.zeros((batch_size, self.context_dim_gan))
 
-            generated_batch = self.generator.predict(latent_input_for_generator)
+
+            # Order the inputs for self.generator.predict according to its expected input signature
+            # This reuses the logic from _build_gan to determine the order
+            generator_input_names_from_model = [inp.name.split(':')[0] for inp in self.generator.inputs]
+            cfg_latent_name = self.params.get("generator_decoder_input_name_latent")
+            cfg_context_name = self.params.get("generator_decoder_input_name_context")
+            cfg_conditional_name = self.params.get("generator_decoder_input_name_conditions")
+
+            input_data_map_predict = {
+                cfg_latent_name: latent_input_for_generator,
+                cfg_context_name: context_input_for_generator,
+                cfg_conditional_name: conditional_input_for_generator,
+            }
+            
+            generator_predict_inputs_ordered = []
+            for model_input_name in generator_input_names_from_model:
+                found_match = False
+                for cfg_name, data_array in input_data_map_predict.items():
+                    if model_input_name.startswith(cfg_name):
+                        generator_predict_inputs_ordered.append(data_array)
+                        found_match = True
+                        break
+                if not found_match:
+                    # This should ideally not happen if _build_gan logic is correct and generator only needs Z,C,H
+                    logger.error(f"Could not find data for generator input '{model_input_name}' during predict step.")
+                    # Handle error or provide a dummy input if absolutely necessary and safe
+                    # For now, this will likely lead to an error in predict if an input is truly missing.
+
+            if len(generator_predict_inputs_ordered) != len(self.generator.inputs):
+                 logger.error(f"Predict step: Mismatch between ordered inputs for generator ({len(generator_predict_inputs_ordered)}) and generator's expected inputs ({len(self.generator.inputs)}).")
+                 # This is a critical error if it occurs.
+
+            generated_batch = self.generator.predict(generator_predict_inputs_ordered)
 
             # Train the discriminator
             d_loss_real = self.discriminator.train_on_batch(real_batch, valid)
@@ -307,18 +392,29 @@ class GANTrainerPlugin:
             # ---------------------
             #  Train Generator
             # ---------------------
-            # Generate noise for generator training (same way as above)
-            feeder_output_for_gan = self.feeder_plugin.generate(n_ticks_to_generate=batch_size)
-            latent_input_for_gan_train = feeder_output_for_gan.get('latent_vector')
-            if latent_input_for_gan_train is None:
+            feeder_output_for_gan_train = self.feeder_plugin.generate(n_ticks_to_generate=batch_size)
+            latent_input_for_gan_train = feeder_output_for_gan_train.get('latent_vector_batch')
+            conditional_input_for_gan_train = feeder_output_for_gan_train.get('conditional_data_batch')
+            context_input_for_gan_train = feeder_output_for_gan_train.get('context_h_batch')
+            
+            if latent_input_for_gan_train is None or conditional_input_for_gan_train is None or context_input_for_gan_train is None:
+                logger.error("FeederPlugin did not return all required inputs (latent, conditional, context) for GAN training step.")
+                # Fallback similar to above
                 gen_input_shape_from_config = tuple(self.params.get("latent_shape", (self.seq_len, self.latent_dim)))
                 if len(gen_input_shape_from_config) == 2:
                     latent_input_for_gan_train = np.random.normal(0, 1, (batch_size, gen_input_shape_from_config[0], gen_input_shape_from_config[1]))
                 elif len(gen_input_shape_from_config) == 1:
-                    latent_input_for_gan_train = np.random.normal(0, 1, (batch_size, gen_input_shape_from_config[0]))
+                     latent_input_for_gan_train = np.random.normal(0, 1, (batch_size, gen_input_shape_from_config[0]))
+                if conditional_input_for_gan_train is None:
+                    conditional_input_for_gan_train = np.zeros((batch_size, self.conditional_dim))
+                if context_input_for_gan_train is None:
+                    context_input_for_gan_train = np.zeros((batch_size, self.context_dim_gan))
 
-            # Train the generator (to fool the discriminator)
-            g_loss = self.gan.train_on_batch(latent_input_for_gan_train, valid)
+            # Inputs for self.gan.train_on_batch must match the order of self.gan.inputs
+            # which are [gan_latent_input, gan_conditional_input, gan_context_input]
+            gan_train_inputs_ordered = [latent_input_for_gan_train, conditional_input_for_gan_train, context_input_for_gan_train]
+            
+            g_loss = self.gan.train_on_batch(gan_train_inputs_ordered, valid)
             
             epoch_time = time.time() - start_time_epoch
             d_losses.append(d_loss[0])
