@@ -215,13 +215,13 @@ class GANTrainerPlugin:
         generated_data_for_disc = generated_data_raw
         if self.actual_generator_output_dim and self.actual_generator_output_dim != self.discriminator_target_n_features:
             logger.info(f"GAN build: Slicing generator output from {self.actual_generator_output_dim} to {self.discriminator_target_n_features} features.")
+            # Slicing KerasTensors is generally fine using Python slicing syntax
             generated_data_for_disc = generated_data_raw[:, :self.discriminator_target_n_features]
         
         # Reshape for discriminator: (None, disc_target_n_features) -> (None, disc_target_seq_len, disc_target_n_features)
-        generated_data_reshaped = tf.reshape(
-            generated_data_for_disc, 
-            [-1, self.discriminator_target_seq_len, self.discriminator_target_n_features]
-        )
+        # Use Keras Reshape layer instead of tf.reshape
+        target_shape_for_discriminator = (self.discriminator_target_seq_len, self.discriminator_target_n_features)
+        generated_data_reshaped = tf.keras.layers.Reshape(target_shape_for_discriminator)(generated_data_for_disc)
         
         gan_output = self.discriminator(generated_data_reshaped)
         
