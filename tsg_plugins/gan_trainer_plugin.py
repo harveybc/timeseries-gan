@@ -12,6 +12,7 @@ import tensorflow as tf
 from tensorflow.keras.optimizers import Adam # Corrected import
 from tensorflow.keras.utils import plot_model # ADDED for model architecture plots
 import matplotlib.pyplot as plt
+import numpy as np
 import os # Added os for path operations
 import sys # Added sys for exit operations
 
