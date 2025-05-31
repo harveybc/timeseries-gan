@@ -522,14 +522,21 @@ class GANTrainerPlugin:
                     lr_reductions_count += 1
                     
                     old_lr_g = float(tf.keras.backend.get_value(self.generator_optimizer.learning_rate))
-                    new_lr_g = max(old_lr_g * lr_reduction_factor, min_lr_g)
+                    # Cast new_lr_g to the optimizer's learning rate dtype before setting
+                    lr_dtype_g = self.generator_optimizer.learning_rate.dtype # Get the DType object
+                    new_lr_g = tf.cast(max(old_lr_g * lr_reduction_factor, min_lr_g), dtype=lr_dtype_g)
                     tf.keras.backend.set_value(self.generator_optimizer.learning_rate, new_lr_g)
                     
                     old_lr_d = float(tf.keras.backend.get_value(self.discriminator_optimizer.learning_rate))
-                    new_lr_d = max(old_lr_d * lr_reduction_factor, min_lr_d)
+                    # Cast new_lr_d to the optimizer's learning rate dtype before setting
+                    lr_dtype_d = self.discriminator_optimizer.learning_rate.dtype # Get the DType object
+                    new_lr_d = tf.cast(max(old_lr_d * lr_reduction_factor, min_lr_d), dtype=lr_dtype_d)
                     tf.keras.backend.set_value(self.discriminator_optimizer.learning_rate, new_lr_d)
                     
-                    logger.info(f"ReduceLROnPlateau: Epoch {epoch}. Reducing LRs. G: {old_lr_g:.2e}->{new_lr_g:.2e}, D: {old_lr_d:.2e}->{new_lr_d:.2e}. Reductions: {lr_reductions_count}.")
+                    # For logging, convert back to float if needed, or use .numpy()
+                    log_new_lr_g = float(new_lr_g.numpy()) if hasattr(new_lr_g, 'numpy') else float(new_lr_g)
+                    log_new_lr_d = float(new_lr_d.numpy()) if hasattr(new_lr_d, 'numpy') else float(new_lr_d)
+                    logger.info(f"ReduceLROnPlateau: Epoch {epoch}. Reducing LRs. G: {old_lr_g:.2e}->{log_new_lr_g:.2e}, D: {old_lr_d:.2e}->{log_new_lr_d:.2e}. Reductions: {lr_reductions_count}.")
             
             # EarlyStopping
             if enable_early_stop:
