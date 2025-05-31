@@ -55,6 +55,7 @@ DEFAULT_VALUES = {
 
     # --- Parameters for GeneratorPlugin ---
     "generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
+    "discriminator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_discriminator_model.keras",
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
         "DATE_TIME", 
@@ -150,7 +151,7 @@ DEFAULT_VALUES = {
     "target_column_order": [],
     "num_base_features_generated": 6, # Example, adjust if necessary
     "preprocessor_plugin": "stl_preprocessor", # Example, adjust if necessary
-    "gan_training_mode": False, # Example, adjust if necessary
+    "gan_training_mode": True, # Example, adjust if necessary
 
     # --- Parameters for GANTrainerPlugin ---
     "trainer": "gan_trainer", # Default trainer plugin

@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Tuple, Union, Optional # Added Optional
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.optimizers import Adam # type: ignore
+from tensorflow.keras.optimizers import Adam # Corrected import
+from tensorflow.keras.utils import plot_model # ADDED for model architecture plots
+import matplotlib.pyplot as plt
 import os # Added os for path operations
 import sys # Added sys for exit operations
 
@@ -157,8 +159,9 @@ class GANTrainerPlugin:
 
         model = tf.keras.Sequential(name="discriminator")
         # If seq_len is 1, LSTM might be overkill or behave like a Dense layer on flattened input.
-        # Consider a simpler architecture if discriminator_target_seq_len is always 1.
-        model.add(tf.keras.layers.LSTM(self.params.get("discriminator_lstm_units", 64), input_shape=input_shape_disc, return_sequences=False))
+        model.add(tf.keras.layers.LSTM(self.params.get("discriminator_lstm_units", 64), input_shape=input_shape_disc, return_sequences=True if self.discriminator_target_seq_len > 1 else False))
+        if self.discriminator_target_seq_len > 1: # Add Flatten only if LSTM returns sequences
+            model.add(tf.keras.layers.Flatten())
         model.add(tf.keras.layers.Dense(self.params.get("discriminator_dense_units", 128), activation='relu'))
         model.add(tf.keras.layers.Dropout(0.3))
         model.add(tf.keras.layers.Dense(1, activation='sigmoid'))
@@ -166,6 +169,11 @@ class GANTrainerPlugin:
         model.compile(loss='binary_crossentropy', optimizer=self.discriminator_optimizer, metrics=['accuracy'])
         logger.info("Discriminator model built and compiled.")
         model.summary(print_fn=logger.info)
+        try:
+            plot_model(model, to_file=os.path.join(self.gan_model_dir, 'discriminator_model_plot.png'), show_shapes=True, show_layer_names=True)
+            logger.info(f"Discriminator model plot saved to {os.path.join(self.gan_model_dir, 'discriminator_model_plot.png')}")
+        except Exception as e:
+            logger.warning(f"Could not plot discriminator model: {e}. Ensure pydot and graphviz are installed.")
         return model
 
     def _build_gan(self) -> tf.keras.Model:
@@ -230,12 +238,39 @@ class GANTrainerPlugin:
         gan.compile(loss='binary_crossentropy', optimizer=self.generator_optimizer)
         logger.info("GAN model built and compiled.")
         gan.summary(print_fn=logger.info)
+        try:
+            plot_model(gan, to_file=os.path.join(self.gan_model_dir, 'gan_model_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
+            logger.info(f"GAN model plot saved to {os.path.join(self.gan_model_dir, 'gan_model_plot.png')}")
+            # Optionally plot the generator (VAE decoder) if it's not too complex and hasn't been plotted elsewhere
+            if self.generator:
+                 plot_model(self.generator, to_file=os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
+                 logger.info(f"GAN's generator component plot saved to {os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png')}")
+
+        except Exception as e:
+            logger.warning(f"Could not plot GAN model: {e}. Ensure pydot and graphviz are installed.")
         return gan
 
     def train(self, x_train_file: Optional[str] = None, data: Optional[np.ndarray] = None) -> None:
         if self.generator is None or self.discriminator is None or self.gan is None:
             logger.error("Models not built. Cannot start training.")
             return
+        
+        # Ensure model directory exists for plots even before first save_models call
+        os.makedirs(self.gan_model_dir, exist_ok=True)
+        # Attempt to plot models here if not done in _build_gan or if dir wasn't ready
+        if not os.path.exists(os.path.join(self.gan_model_dir, 'discriminator_model_plot.png')):
+            try:
+                plot_model(self.discriminator, to_file=os.path.join(self.gan_model_dir, 'discriminator_model_plot.png'), show_shapes=True, show_layer_names=True)
+            except Exception: pass # Ignore if fails, already tried in build
+        if not os.path.exists(os.path.join(self.gan_model_dir, 'gan_model_plot.png')):
+            try:
+                plot_model(self.gan, to_file=os.path.join(self.gan_model_dir, 'gan_model_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
+            except Exception: pass # Ignore if fails
+        if self.generator and not os.path.exists(os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png')):
+            try:
+                plot_model(self.generator, to_file=os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
+            except Exception: pass
+
 
         # Configure preprocessor to output data suitable for discriminator
         # (seq_len=self.discriminator_target_seq_len, features=self.discriminator_target_n_features)
