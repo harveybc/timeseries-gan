@@ -22,7 +22,7 @@ setup(
         ],
         'timeseries_gan.discriminators': [
             'default=app.plugins.discriminator_default:Plugin'
-            # Add other discriminator plugins here
+            # Add other discriminator plugins here sdg->tsg
         ]
     },
     install_requires=[
