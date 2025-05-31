@@ -95,10 +95,11 @@ class GANTrainerPlugin:
             self.conditional_dim_for_generator = num_date_feats + num_fund_feats
             self.context_dim_for_generator = self.feeder_plugin.params.get("feeder_context_vector_dim", 64)
         else:
-            num_date_feats = len(self.params.get("feeder_date_feature_names_for_conditioning", [])) * 2
-            num_fund_feats = len(self.params.get("feeder_fundamental_feature_names_for_conditioning", []))
+            # Corrected keys: removed "_names"
+            num_date_feats = len(self.params.get("feeder_date_features_for_conditioning", [])) * 2
+            num_fund_feats = len(self.params.get("feeder_fundamental_features_for_conditioning", []))
             self.conditional_dim_for_generator = num_date_feats + num_fund_feats
-            self.context_dim_for_generator = self.params.get("feeder_context_vector_dim", 64)
+            self.context_dim_for_generator = self.params.get("feeder_context_vector_dim", 64) # Ensure this key is also correct if feeder_plugin is None
         logger.info(f"GANTrainer determined for VAE Decoder (Generator) inputs: conditional_dim={self.conditional_dim_for_generator}, context_dim_gan={self.context_dim_for_generator}")
 
         self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
