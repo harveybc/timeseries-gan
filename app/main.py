@@ -191,7 +191,7 @@ def main():
     print(f"Loading Optimizer Plugin: {plugin_name_optimizer}")
     try:
         optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name_optimizer)
-        optimizer_plugin = optimizer_class(current_config) # Pass current_config
+        optimizer_plugin = optimizer_class(current_config) # Pass current_config # THIS LINE IS THE CULPRIT
     except Exception as e:
         print(f"Failed to load or initialize Optimizer Plugin '{plugin_name_optimizer}': {e}")
         traceback.print_exc()
