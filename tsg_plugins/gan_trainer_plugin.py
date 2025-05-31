@@ -85,11 +85,16 @@ class GANTrainerPlugin:
             logger.warning("Generator plugin instance or its model not provided to GANTrainerPlugin. Generator will be None.")
             self.generator = None # Or load one based on config if GANTrainer is independent
 
+        # --- MOVED OPTIMIZER INITIALIZATION UP ---
+        self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
+        self.discriminator_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
+        # --- END MOVED ---
+
         self.discriminator = self._build_discriminator()
         self.gan = self._build_gan()
 
-        self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
-        self.discriminator_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
+        # self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"]) # REMOVED FROM HERE
+        # self.discriminator_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"]) # REMOVED FROM HERE
         
         # Ensure model save directory exists
         self.gan_model_dir = self.params.get("gan_model_dir", "models/gan_trained")
