@@ -56,9 +56,30 @@ class GANTrainerPlugin:
         self.n_features = self.params.get("n_features", self.params.get("generator_decoder_output_feature_names", []))
         if isinstance(self.n_features, list):
             self.n_features = len(self.n_features) # If it's a list of names, get the count
+        
+        # Get shapes for conditional and context inputs from feeder or generator params
+        # These are needed for building the GAN model input layers
+        # Assuming feeder_plugin is available during __init__ or these params are in main config
+        if self.feeder_plugin and hasattr(self.feeder_plugin, 'params'):
+            num_date_feats = len(self.feeder_plugin.params.get("date_feature_names_for_conditioning", [])) * 2 # sin/cos
+            num_fund_feats = len(self.feeder_plugin.params.get("fundamental_feature_names_for_conditioning", []))
+            self.conditional_dim = num_date_feats + num_fund_feats
+            self.context_dim_gan = self.feeder_plugin.params.get("context_vector_dim", 64)
+        else: # Fallback if feeder_plugin not yet fully available, try from self.params (main config)
+            num_date_feats = len(self.params.get("feeder_date_feature_names_for_conditioning", [])) * 2
+            num_fund_feats = len(self.params.get("feeder_fundamental_feature_names_for_conditioning", []))
+            self.conditional_dim = num_date_feats + num_fund_feats
+            self.context_dim_gan = self.params.get("feeder_context_vector_dim", 64)
+        logger.info(f"GANTrainer determined conditional_dim: {self.conditional_dim}, context_dim_gan: {self.context_dim_gan}")
+
 
         if self.generator_plugin and hasattr(self.generator_plugin, 'model'):
-            self.generator = self.generator_plugin.model
+            self.generator = self.generator_plugin.model # This is the VAE decoder
+            # --- ADDED: Freeze the pre-trained VAE decoder (generator) ---
+            if self.generator:
+                self.generator.trainable = False
+                logger.info("GANTrainerPlugin: Set VAE decoder (generator) to trainable=False for GAN training.")
+            # --- END ADDED ---
             logger.info("Using generator model from provided generator_plugin instance.")
         else:
             logger.warning("Generator plugin instance or its model not provided to GANTrainerPlugin. Generator will be None.")
