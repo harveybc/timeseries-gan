@@ -60,20 +60,19 @@ setup(
 
     entry_points={
         "console_scripts": [
-            "tsg=data_processor.main:main",
+            "tsg=app.main:main",
         ],
         "feeder.plugins": [
             "default_feeder=tsg_plugins.feeder_plugin:FeederPlugin",
         ],
         "generator.plugins": [
-            "default_generator=tsg_plugins.generator_plugin:GeneratorPlugin",
+            "vae_generator = tsg_plugins.generator_plugin:VAEGeneratorPlugin",
+            "default_generator = tsg_plugins.generator_plugin:VAEGeneratorPlugin" # A default alias
         ],
-        "evaluator.plugins": [
-            "default_evaluator=tsg_plugins.evaluator_plugin:EvaluatorPlugin",
-        ],
-        "optimizer.plugins": [
-            "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
-            "gan_trainer      = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
+        "trainer.plugins": [
+            "gan_trainer = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
+            # Placeholder for a VAE trainer if you create one and want to register it
+            # "vae_trainer = tsg_plugins.vae_trainer_plugin:VAETrainerPlugin"
         ],
     },
 

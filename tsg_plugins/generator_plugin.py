@@ -22,9 +22,10 @@ import zipfile # For checking .keras file format (zip)
 from tqdm.auto import tqdm # ADDED for the overall progress bar
 import json # For loading normalization params
 from typing import Dict, Any, List, Optional # ADD THIS LINE
+from tsg_plugins.plugin_api import GeneratorPlugin # Ensure plugin_api is correct
 
 
-class GeneratorPlugin:
+class VAEGeneratorPlugin(GeneratorPlugin):
     # Parámetros configurables por defecto
     plugin_params = {
         "sequential_model_file": None,

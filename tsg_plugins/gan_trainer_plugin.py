@@ -28,13 +28,20 @@ import time  # Timing execution
 from typing import Any, Dict, List, Tuple, Union
 
 from deap import algorithms, base, creator, tools  # DEAP components
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Dense, LSTM, RepeatVector, TimeDistributed, Bidirectional, Conv1DTranspose, AdditiveAttention, LayerNormalization, LeakyReLU, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+import numpy as np
+import os
+from tsg_plugins.plugin_api import FeederPlugin, GeneratorPlugin, TrainerPlugin # Corrected import path
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Set default log level
 
 
-class GANTrainerPlugin:
+class GANTrainerPlugin(TrainerPlugin):
     """
     DEAP-based optimizer plugin for synthetic data generation.
 
@@ -112,9 +119,6 @@ class GANTrainerPlugin:
         """
         Train GAN by alternating discriminator and generator updates.
         """
-        import numpy as np
-        from tensorflow.keras.models import Model
-
         # 1) Acquire generator model
         gen_model = getattr(generator_plugin, "model", None)
         if gen_model is None:
@@ -220,3 +224,211 @@ class GANTrainerPlugin:
             Dense(1, activation="sigmoid"),
         ])
         return model
+
+    def _build_generator(self):
+        seq_len = self.config.get("seq_len")
+        latent_dim = self.config.get("latent_dim")
+        n_features = self.config.get("n_features")
+        
+        # Based on VAE Decoder architecture
+        inputs = Input(shape=(latent_dim,))
+        # Potentially repeat or dense layer to match BiLSTM input requirements if latent_dim is small
+        x = RepeatVector(seq_len)(inputs) # Assuming latent_dim is fed to each time step of BiLSTM
+                                        # This might need adjustment based on how latent_dim is used.
+                                        # If latent_dim is features for a single step, then input shape might be (1, latent_dim)
+                                        # and then Dense to expand to seq_len * internal_lstm_units
+
+        # BiLSTM layer
+        # The number of units in LSTM should be determined based on complexity and n_features
+        # For now, let's use a value, e.g., 128 or relate it to n_features or seq_len
+        lstm_units = self.config.get("generator_lstm_units", 128) 
+        x = Bidirectional(LSTM(lstm_units, return_sequences=True))(x)
+
+        # 3 Conv1DTranspose layers
+        # Kernel sizes and filters should be chosen to upscale to the desired seq_len and n_features
+        # Example filter counts and kernel sizes, these need careful tuning
+        filters = [64, 32, n_features] 
+        kernel_sizes = [5, 5, 7] # These are examples
+        strides = [1, 1, 1] # Strides might need to be > 1 if upsampling in length too, depends on BiLSTM output
+
+        # Reshape BiLSTM output if necessary to be compatible with Conv1DTranspose
+        # Conv1DTranspose expects (batch, steps, channels)
+        # If BiLSTM output is (batch, seq_len, lstm_units*2), it's likely compatible.
+
+        for i in range(3):
+            x = Conv1DTranspose(filters=filters[i], 
+                                kernel_size=kernel_sizes[i], 
+                                strides=strides[i], # Adjust if upsampling sequence length
+                                padding='same', # Or 'causal' if appropriate
+                                activation='relu' if i < 2 else 'linear')(x) # Linear for final output layer
+            x = LayerNormalization()(x) # Optional: add normalization
+
+        # Additive Attention layer
+        # Attention mechanism might need adjustment based on exact input/output shapes
+        # Assuming x is (batch, seq_len, n_features)
+        # Query for attention could be a learned variable or derived from input/state
+        # For simplicity, let's assume self-attention on the output sequence
+        attention_units = self.config.get("generator_attention_units", 64)
+        query = Dense(attention_units, name='attention_query')(x) 
+        value = Dense(attention_units, name='attention_value')(x)
+        # Using x as content for self-attention style
+        attention_output = AdditiveAttention(name='additive_attention')([query, value, x]) 
+
+        # Final output layer to ensure correct shape (seq_len, n_features)
+        # This might be redundant if the last Conv1DTranspose and Attention already produce this.
+        # If attention_output is (batch, seq_len, attention_units), a final Dense layer is needed.
+        if attention_output.shape[-1] != n_features:
+             outputs = TimeDistributed(Dense(n_features, activation=self.config.get("output_activation", "sigmoid")))(attention_output)
+        else:
+            # Apply activation if the number of features already matches
+            outputs = tf.keras.layers.Activation(self.config.get("output_activation", "sigmoid"))(attention_output)
+
+
+        # Ensure output shape is (seq_len, n_features)
+        # This might require a Reshape layer if the above layers don't naturally produce it.
+        # For example, if output is (batch_size, seq_len, n_features)
+        # and the model is used to generate one sequence at a time, this is fine.
+        # If used within a TimeDistributed wrapper later, it might need adjustment.
+
+        self.generator = Model(inputs, outputs, name="generator")
+        # print("--- Generator Summary (GANTrainer) ---")
+        # self.generator.summary()
+        return self.generator
+
+    def _build_models_and_compile(self):
+        # Ensure generator and discriminator are built
+        if self.generator is None:
+            self._build_generator()
+        if self.discriminator is None:
+            self._build_discriminator()
+
+        # Compile Discriminator
+        self.discriminator.compile(loss='binary_crossentropy',
+                                   optimizer=Adam(self.config.get("discriminator_lr", 0.0002), 
+                                                  beta_1=self.config.get("discriminator_beta1", 0.5)),
+                                   metrics=['accuracy'])
+
+        # GAN (Combined Model)
+        self.discriminator.trainable = False
+        
+        latent_dim = self.config.get("latent_dim")
+        gan_input = Input(shape=(latent_dim,))
+        generated_sequence = self.generator(gan_input)
+        gan_output = self.discriminator(generated_sequence)
+        
+        self.gan = Model(gan_input, gan_output)
+        self.gan.compile(loss='binary_crossentropy', 
+                         optimizer=Adam(self.config.get("generator_lr", 0.0002), 
+                                        beta_1=self.config.get("generator_beta1", 0.5)))
+        
+        print("--- Generator Summary (GANTrainer) ---")
+        self.generator.summary()
+        print("--- Discriminator Summary (GANTrainer) ---")
+        self.discriminator.summary()
+        print("--- GAN Summary (GANTrainer) ---")
+        self.gan.summary()
+
+
+    def train(self, x_train_file):
+        self._build_models_and_compile() # Ensure models are built and compiled before training
+
+        feeder_name = self.config.get("feeder_plugin", "default_feeder")
+        # This part needs a proper plugin loading mechanism from main.py
+        # For now, assuming FeederPlugin can be directly instantiated if it's the default
+        if feeder_name == "default_feeder": # Or however your default feeder is identified
+            from tsg_plugins.feeder_plugin import CSVFeederPlugin # Assuming this is the default
+            feeder = CSVFeederPlugin(self.config)
+        else:
+            # Placeholder for dynamic plugin loading if you have multiple feeders
+            raise NotImplementedError(f"Feeder plugin {feeder_name} not implemented in GANTrainerPlugin direct instantiation.")
+
+        data = feeder.feed(x_train_file) 
+        
+        if data is None or data.shape[0] == 0:
+            print("Error: No data loaded for GAN training. Check x_train_file and FeederPlugin.")
+            return
+        
+        # Reshape data if it's 2D (samples, features*seq_len) to 3D (samples, seq_len, features)
+        if len(data.shape) == 2:
+            seq_len = self.config.get("seq_len")
+            n_features = self.config.get("n_features")
+            if data.shape[1] == seq_len * n_features:
+                data = data.reshape((data.shape[0], seq_len, n_features))
+            else:
+                print(f"Error: Cannot reshape data of shape {data.shape} to ({data.shape[0]}, {seq_len}, {n_features}). Check data format.")
+                return
+        elif len(data.shape) != 3:
+            print(f"Error: Data has unexpected shape {data.shape}. Expected 3D (samples, seq_len, features) or 2D that can be reshaped.")
+            return
+
+        epochs = self.config.get("gan_epochs", 100)
+        batch_size = self.config.get("gan_batch_size", 32)
+        latent_dim = self.config.get("latent_dim")
+        
+        real_labels = np.ones((batch_size, 1))
+        fake_labels = np.zeros((batch_size, 1))
+
+        for epoch in range(epochs):
+            idx = np.random.randint(0, data.shape[0], batch_size)
+            real_sequences = data[idx]
+            
+            noise = np.random.normal(0, 1, (batch_size, latent_dim))
+            fake_sequences = self.generator.predict(noise)
+            
+            d_loss_real = self.discriminator.train_on_batch(real_sequences, real_labels)
+            d_loss_fake = self.discriminator.train_on_batch(fake_sequences, fake_labels)
+            d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+
+            noise = np.random.normal(0, 1, (batch_size, latent_dim))
+            g_loss = self.gan.train_on_batch(noise, real_labels)
+            
+            if epoch % self.config.get("gan_save_interval", 100) == 0 or epoch == epochs -1:
+                print(f"{epoch} [D loss: {d_loss[0]:.4f}, acc.: {100*d_loss[1]:.2f}%] [G loss: {g_loss:.4f}]")
+                self.save_model()
+
+        print("GAN Training Finished.")
+        self.save_model()
+
+
+    def save_model(self):
+        if not self.generator or not self.discriminator:
+            print("Models not built. Cannot save.")
+            return
+            
+        model_dir = self.config.get("gan_model_dir", "models/gan")
+        os.makedirs(model_dir, exist_ok=True)
+        self.generator.save(os.path.join(model_dir, "generator_model.h5"))
+        self.discriminator.save(os.path.join(model_dir, "discriminator_model.h5"))
+        print(f"GAN models saved to {model_dir}")
+
+    def load_model(self):
+        model_dir = self.config.get("gan_model_dir", "models/gan")
+        gen_path = os.path.join(model_dir, "generator_model.h5")
+        # disc_path = os.path.join(model_dir, "discriminator_model.h5") # Discriminator not always needed for generation
+
+        loaded_successfully = False
+        if os.path.exists(gen_path):
+            try:
+                self.generator = tf.keras.models.load_model(gen_path, compile=False)
+                print(f"Generator loaded from {gen_path}")
+                loaded_successfully = True
+            except Exception as e:
+                print(f"Error loading generator model from {gen_path}: {e}")
+        else:
+            print(f"Warning: Generator model not found at {gen_path}.")
+
+        if not loaded_successfully:
+            print("Building new generator model as loading failed or no model found.")
+            self._build_generator() # Build a new one if loading fails
+        
+        # Discriminator and GAN model are primarily for training, 
+        # so their loading can be deferred or handled by a separate compile/setup step if resuming training.
+        # For now, GANTrainerPlugin.load_model focuses on getting the generator ready.
+        # If discriminator is needed by other parts, it should be loaded too.
+        # self._build_models_and_compile() # Re-compile if needed for further training or full GAN use
+
+
+    def get_generator(self):
+        if self.generator is None:
+            self.load_model() 
+        return self.generator
