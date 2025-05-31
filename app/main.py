@@ -276,26 +276,46 @@ def main():
                 for i, input_tensor in enumerate(decoder_inputs):
                     input_layer_name = input_tensor.name.split(':')[0]
                     if input_layer_name == latent_input_name_from_config:
-                        shape_tuple = input_tensor.shape.as_list() 
-                        if len(shape_tuple) == 3 and shape_tuple[1] is not None and shape_tuple[2] is not None:
-                            inferred_latent_shape = (shape_tuple[1], shape_tuple[2]) # (seq_len, features)
-                            print(f"DEBUG main.py: Inferred latent_shape from decoder input '{input_layer_name}': {inferred_latent_shape}")
-                            latent_input_found = True
-                            break
+                        current_shape = input_tensor.shape
+                        shape_list = []
+                        if hasattr(current_shape, 'as_list'): # Check if it's a TensorShape object
+                            shape_list = current_shape.as_list()
+                        elif isinstance(current_shape, tuple): # Check if it's already a tuple
+                            shape_list = list(current_shape)
                         else:
-                            print(f"Warning main.py: Latent input '{input_layer_name}' shape {shape_tuple} is not as expected (None, seq_len, features). Cannot infer.")
+                            print(f"ERROR main.py: Unexpected type for input_tensor.shape: {type(current_shape)} for input '{input_layer_name}'.")
+                            # Attempt to convert to list if it's iterable, otherwise log error and continue
+                            try:
+                                shape_list = list(current_shape)
+                                print(f"DEBUG main.py: Attempted conversion of shape {current_shape} to list: {shape_list}")
+                            except TypeError:
+                                print(f"ERROR main.py: input_tensor.shape for '{input_layer_name}' is not iterable and not TensorShape/tuple.")
+                                shape_list = [] # Ensure shape_list is defined for subsequent checks
+
+                        if shape_list and len(shape_list) == 3 and shape_list[0] is None: # Expected (None, seq_len, features)
+                            inferred_latent_shape = tuple(shape_list[1:]) # (seq_len, features)
+                            print(f"DEBUG main.py: Inferred latent_shape for '{latent_input_name_from_config}': {inferred_latent_shape} from KerasTensor shape {shape_list}")
+                            latent_input_found = True
+                            break 
+                        elif shape_list: # If shape_list was populated but didn't match criteria
+                            print(f"ERROR main.py: Latent input KerasTensor shape {shape_list} for '{latent_input_name_from_config}' is not as expected (None, seq_len, features). Cannot infer.")
+                        # If shape_list is empty (due to error in conversion), the next 'if not latent_input_found' will catch it.
                 
                 if not latent_input_found:
-                    print(f"ERROR main.py: Could not find input layer named '{latent_input_name_from_config}' in decoder model. Available inputs: {decoder_input_names}")
-                if inferred_latent_shape is None and latent_input_found: # Should not happen if found and shape was valid
-                    print(f"ERROR main.py: Could not determine a valid inferred latent shape for '{latent_input_name_from_config}'.")
+                    print(f"ERROR main.py: Could not find input layer named '{latent_input_name_from_config}' in decoder model or its shape was invalid. Available inputs: {decoder_input_names}")
+                # No need for 'inferred_latent_shape is None and latent_input_found' check, as 'break' ensures inferred_latent_shape is set if found.
                 
                 if inferred_latent_shape:
                     print(f"DEBUG main.py: Setting FeederPlugin latent_shape to: {list(inferred_latent_shape)}")
                     feeder_plugin.set_params(latent_shape=list(inferred_latent_shape))
                     current_config['latent_shape'] = list(inferred_latent_shape)
-                    if trainer_plugin: # Also update trainer_plugin if it uses latent_shape directly
-                        trainer_plugin.set_params(latent_shape=list(inferred_latent_shape))
+                    if trainer_plugin:                        
+                        # Also update trainer_plugin's gen_input_seq_len and gen_input_latent_dim
+                        print(f"DEBUG main.py: Updating GANTrainerPlugin with inferred latent_shape: seq_len={inferred_latent_shape[0]}, latent_dim={inferred_latent_shape[1]}")
+                        trainer_plugin.set_params(seq_len=inferred_latent_shape[0], latent_dim=inferred_latent_shape[1])
+                else: # This 'else' covers cases where latent_input_found is False or inferred_latent_shape remained None
+                    print(f"ERROR main.py: Failed to infer a valid latent_shape for '{latent_input_name_from_config}'. Check model structure and config.")
+
 
         else:
             print("ERROR main.py: Decoder model or its inputs not available after generator_plugin setup. Cannot infer latent_shape.")
