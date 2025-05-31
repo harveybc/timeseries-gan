@@ -67,12 +67,18 @@ setup(
         ],
         "generator.plugins": [
             "vae_generator = tsg_plugins.generator_plugin:GeneratorPlugin",
-            "default_generator = tsg_plugins.generator_plugin:GeneratorPlugin" # A default alias
+            "default_generator = tsg_plugins.generator_plugin:GeneratorPlugin"
+        ],
+        "evaluator.plugins": [ # Assuming you have an evaluator entry, based on logs
+            "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin", # Ensure this points to your evaluator
+        ],
+        "optimizer.plugins": [
+            # Corrected entry: points to the OptimizerPlugin class in tsg_plugins
+            "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
+            # If you had an old entry like "default_optimizer = optimizer_plugins.default_optimizer:Plugin", remove or comment it out.
         ],
         "trainer.plugins": [
             "gan_trainer = tsg_plugins.gan_trainer_plugin:GANTrainerPlugin",
-            # Placeholder for a VAE trainer if you create one and want to register it
-            # "vae_trainer = tsg_plugins.vae_trainer_plugin:VAETrainerPlugin"
         ],
     },
 

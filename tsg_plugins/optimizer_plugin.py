@@ -75,9 +75,6 @@ class OptimizerPlugin:
     plugin_debug_vars = ["population_size", "n_generations", "cxpb", "mutpb"]
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        """
-        Initialize optimizer plugin with default parameters.
-        """
         if config is None:
             raise ValueError("Se requiere el diccionario de configuración ('config').")
         
@@ -431,7 +428,7 @@ class OptimizerPlugin:
         start_dt_str = self.params.get("optimizer_start_datetime") # From optimizer's own params
         if not start_dt_str:
             start_dt_str = self._get_config_param("start_datetime", datetime.now().strftime('%Y-%m-%d %H:%M:%S')) # From global or optimizer params
-        
+
         periodicity = self._get_config_param("dataset_periodicity", "1h") # From global or optimizer params
 
         try:
