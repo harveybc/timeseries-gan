@@ -33,9 +33,8 @@ class GANTrainerPlugin:
         "gan_save_interval": 500,
         "latent_dim": 32, # Example, should align with feeder/generator
         "seq_len": 18,    # Example, should align with feeder/generator
-        "n_features": 5,  # Example, should align with data
+        # "n_features": 5,  # REMOVE OR COMMENT OUT THIS DEFAULT
         "gan_model_dir": "models/gan_trained", # Directory to save GAN models
-        # Add other GAN specific parameters here (e.g., discriminator architecture details)
         "discriminator_lstm_units": 64,
         "discriminator_dense_units": 128,
     }
@@ -43,19 +42,34 @@ class GANTrainerPlugin:
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
         logger.info("Initializing GANTrainerPlugin.")
         self.config = copy.deepcopy(config)
-        self.params = {**self.plugin_params, **self.config} # Merge config into params
+        # Merge plugin defaults first, then apply the main config.
+        self.params = self.plugin_params.copy()
+        self.params.update(self.config) # Main config overrides plugin defaults
 
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
         self.preprocessor_plugin = preprocessor_plugin_instance
         
         self.latent_dim = self.params.get("latent_dim", 32)
-        # If latent_shape is [seq_len, features], take seq_len from there for discriminator input if needed
-        # For now, assuming seq_len and n_features are directly available or inferred for discriminator build
         self.seq_len = self.params.get("seq_len", self.params.get("latent_shape", [18, 32])[0]) 
-        self.n_features = self.params.get("n_features", self.params.get("generator_decoder_output_feature_names", []))
-        if isinstance(self.n_features, list):
-            self.n_features = len(self.n_features) # If it's a list of names, get the count
+        
+        # Correctly determine n_features
+        # Priority:
+        # 1. Length of 'generator_decoder_output_feature_names' if available in params.
+        # 2. Explicit 'n_features' from params (e.g., if set directly in config for GAN).
+        # 3. Fallback (should ideally not be hit if config is complete).
+        g_output_feature_names = self.params.get("generator_decoder_output_feature_names")
+        if isinstance(g_output_feature_names, list) and g_output_feature_names:
+            self.n_features = len(g_output_feature_names)
+            logger.info(f"GANTrainerPlugin: n_features determined from len(generator_decoder_output_feature_names): {self.n_features}")
+        elif "n_features" in self.params: # Fallback to explicit n_features if the list isn't there or is empty
+            self.n_features = self.params["n_features"]
+            logger.info(f"GANTrainerPlugin: n_features determined from params['n_features']: {self.n_features}")
+        else:
+            logger.warning("GANTrainerPlugin: 'n_features' could not be determined from 'generator_decoder_output_feature_names' or an explicit 'n_features' param. Defaulting to 1. THIS IS LIKELY INCORRECT.")
+            self.n_features = 1 # Fallback, will likely cause issues if hit.
+
+        logger.info(f"GANTrainerPlugin final determined values: seq_len={self.seq_len}, n_features={self.n_features}, latent_dim={self.latent_dim}")
         
         # Get shapes for conditional and context inputs from feeder or generator params
         # These are needed for building the GAN model input layers
@@ -104,15 +118,32 @@ class GANTrainerPlugin:
 
     def set_params(self, **params: Any) -> None:
         """Allows updating configuration parameters after initialization."""
-        logger.info(f"GANTrainerPlugin updating parameters: {params}")
+        logger.info(f"GANTrainerPlugin updating parameters: {list(params.keys())}")
         self.config.update(params)
-        self.params = {**self.plugin_params, **self.config} # Re-merge with new params
-        # Potentially re-initialize parts of the plugin if critical params change
+        self.params = self.plugin_params.copy() # Start with plugin defaults
+        self.params.update(self.config) # Apply the updated full config
+
         self.latent_dim = self.params.get("latent_dim", self.latent_dim)
         self.seq_len = self.params.get("seq_len", self.params.get("latent_shape", [self.seq_len, self.latent_dim])[0])
-        self.n_features = self.params.get("n_features", self.params.get("generator_decoder_output_feature_names", []))
-        if isinstance(self.n_features, list):
-            self.n_features = len(self.n_features)
+        
+        # Correctly determine n_features on update
+        g_output_feature_names = self.params.get("generator_decoder_output_feature_names")
+        if isinstance(g_output_feature_names, list) and g_output_feature_names:
+            self.n_features = len(g_output_feature_names)
+            logger.info(f"GANTrainerPlugin (set_params): n_features determined from len(generator_decoder_output_feature_names): {self.n_features}")
+        elif "n_features" in self.params:
+            self.n_features = self.params["n_features"]
+            logger.info(f"GANTrainerPlugin (set_params): n_features determined from params['n_features']: {self.n_features}")
+        else:
+            # Retain self.n_features if not found, or set to a default if it was never set.
+            if not hasattr(self, 'n_features') or self.n_features is None:
+                 logger.warning("GANTrainerPlugin (set_params): 'n_features' could not be determined and was not previously set. Defaulting to 1. THIS IS LIKELY INCORRECT.")
+                 self.n_features = 1 # Fallback if it was never initialized properly
+            else:
+                 logger.warning(f"GANTrainerPlugin (set_params): 'n_features' could not be determined. Retaining previous value: {self.n_features}. THIS IS LIKELY INCORRECT if relevant params changed.")
+
+
+        logger.info(f"GANTrainerPlugin (set_params) final values: seq_len={self.seq_len}, n_features={self.n_features}, latent_dim={self.latent_dim}")
 
         # Re-initialize optimizers if learning rates change
         self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
