@@ -891,6 +891,46 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # --- ADD EVALUATION STEP HERE ---
+    if evaluator_plugin and not output_df_synthetic_aligned.empty:
+        print("INFO main.py: Evaluating generated synthetic data...")
+        try:
+            # Assuming TARGET_CSV_COLUMNS contains the correct feature names for output_df_synthetic_aligned
+            # The evaluator might need real data for comparison.
+            # df_real_raw_segment_for_output contains a segment of real data.
+            # You might need to pass a more comprehensive real dataset if your evaluator expects it
+            # or configure the evaluator to load its own reference real data.
+
+            # Convert synthetic data to NumPy if evaluator expects it
+            synthetic_data_np_for_eval = output_df_synthetic_aligned[TARGET_CSV_COLUMNS].drop(columns=[datetime_col_name], errors='ignore').values.astype(np.float32)
+            feature_names_for_eval = [col for col in TARGET_CSV_COLUMNS if col != datetime_col_name]
+
+
+            # Example call, adjust based on your EvaluatorPlugin's `evaluate` signature
+            # It might need real data, specific feature names, etc.
+            evaluation_metrics = evaluator_plugin.evaluate(
+                synthetic_data=synthetic_data_np_for_eval,
+                # real_data_processed=real_data_np_for_eval, # You'd need to prepare/load appropriate real data
+                feature_names=feature_names_for_eval,
+                config=current_config # Pass the current config
+            )
+            print(f"INFO main.py: Evaluation metrics: {evaluation_metrics}")
+            
+            # Save evaluation metrics
+            metrics_output_file = current_config.get("metrics_file", "evaluation_metrics.json")
+            os.makedirs(os.path.dirname(metrics_output_file), exist_ok=True)
+            with open(metrics_output_file, 'w') as f:
+                json.dump(evaluation_metrics, f, indent=4)
+            print(f"INFO main.py: Evaluation metrics saved to {metrics_output_file}")
+
+        except Exception as e_eval:
+            print(f"❌ main.py: Error during evaluation: {e_eval}")
+            traceback.print_exc()
+    elif not evaluator_plugin:
+        print("WARN main.py: EvaluatorPlugin not available. Skipping evaluation.")
+    elif output_df_synthetic_aligned.empty:
+        print("INFO main.py: No synthetic data generated. Skipping evaluation.")
+
     # Save final configuration
     if args.save_config:
         try:

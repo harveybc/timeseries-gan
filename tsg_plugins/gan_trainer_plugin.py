@@ -601,13 +601,21 @@ class GANTrainerPlugin:
     def save_models(self, epoch: int) -> None:
         """Saves the generator and discriminator models."""
         if self.generator:
-            g_path = os.path.join(self.gan_model_dir, f"generator_epoch_{epoch}.h5")
+            # Change .h5 to .keras
+            g_path = os.path.join(self.gan_model_dir, f"generator_epoch_{epoch}.keras")
             self.generator.save(g_path)
             logger.info(f"Saved generator model to {g_path}")
         if self.discriminator:
-            d_path = os.path.join(self.gan_model_dir, f"discriminator_epoch_{epoch}.h5")
+            # Change .h5 to .keras
+            d_path = os.path.join(self.gan_model_dir, f"discriminator_epoch_{epoch}.keras")
             self.discriminator.save(d_path)
             logger.info(f"Saved discriminator model to {d_path}")
+        # Also, if you save the combined GAN model, update its extension too.
+        # Example if you were to save self.gan:
+        # if self.gan:
+        #     gan_path = os.path.join(self.gan_model_dir, f"gan_epoch_{epoch}.keras")
+        #     self.gan.save(gan_path)
+        #     logger.info(f"Saved GAN model to {gan_path}")
 
     def get_generator(self) -> Optional[tf.keras.Model]:
         """Returns the trained generator model."""
