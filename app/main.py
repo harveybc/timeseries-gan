@@ -16,10 +16,6 @@ import json # Ensure json is imported
 import pandas as pd # Ensure pandas is imported
 import numpy as np # Ensure numpy is imported
 import tempfile # ADD THIS IMPORT
-import argparse
-import importlib
-from app import config as app_config # Use app.config
-from typing import Dict, Any, Optional # Add typing imports
 
 # --- MONKEY PATCH for numpy.NaN ---
 # Applied because pandas_ta 0.3.14b0 (or a dependency) seems to use
@@ -110,98 +106,6 @@ TARGET_CSV_COLUMNS = [
     "CLOSE_30m_tick_5","CLOSE_30m_tick_6","CLOSE_30m_tick_7","CLOSE_30m_tick_8",
     "day_of_month","hour_of_day","day_of_week"
 ]
-
-# Helper function to dynamically load plugins
-def load_plugin(plugin_name, plugin_type, config_dict):
-    try:
-        # Assuming plugins are in tsg_plugins.<plugin_name>_plugin.py
-        # And class name is <PluginName>Plugin
-        module_name_part = plugin_name.replace("_plugin", "") # e.g., csv_feeder from csv_feeder_plugin
-        # Heuristic for class name: CsvFeederPlugin from csv_feeder
-        class_name_parts = [part.capitalize() for part in module_name_part.split('_')]
-        class_name = "".join(class_name_parts) + plugin_type.capitalize() + "Plugin"
-        
-        module_path = f"tsg_plugins.{module_name_part}_{plugin_type}_plugin"
-        if plugin_type == "trainer" and plugin_name == "gan": # Special case for gan_trainer
-            module_path = "tsg_plugins.gan_trainer_plugin"
-            class_name = "GANTrainerPlugin"
-        elif plugin_type == "feeder": # Example: csv_feeder_plugin.CSVFeederPlugin
-             module_path = f"tsg_plugins.{plugin_name}_plugin" # csv_feeder_plugin
-             class_name = "".join([p.capitalize() for p in plugin_name.split('_')]) + "Plugin" # CSVFeederPlugin
-        elif plugin_type == "generator":
-            module_path = f"tsg_plugins.{plugin_name}_plugin" # vae_generator_plugin
-            class_name = "".join([p.capitalize() for p in plugin_name.split('_')]) + "Plugin" # VAEGeneratorPlugin
-
-
-        print(f"Attempting to load {plugin_type} plugin: module '{module_path}', class '{class_name}'")
-        plugin_module = importlib.import_module(module_path)
-        plugin_class = getattr(plugin_module, class_name)
-        return plugin_class(config_dict)
-    except ImportError as e:
-        print(f"Error importing {plugin_type} plugin {plugin_name}: {e}")
-        # Fallback to default if specified, or raise error
-        if plugin_type == "feeder" and plugin_name != "default_feeder": # default_feeder is a placeholder name
-            print("Falling back to default CSVFeederPlugin for feeder.")
-            from tsg_plugins.feeder_plugin import CSVFeederPlugin
-            return CSVFeederPlugin(config_dict)
-        elif plugin_type == "generator" and plugin_name != "default_generator":
-            print("Falling back to default VAEGeneratorPlugin for generator.")
-            from tsg_plugins.generator_plugin import VAEGeneratorPlugin
-            return VAEGeneratorPlugin(config_dict)
-        # No default trainer specified to fall back to here, main logic will handle it or fail.
-        raise
-    except AttributeError as e:
-        print(f"Error finding class {class_name} in module {module_path}: {e}")
-        raise
-
-def load_plugin_by_type_and_name(plugin_type_key: str, plugin_name: str, config_dict: Dict[str, Any]):
-    """
-    Loads a plugin based on its type (e.g., 'feeder', 'generator', 'trainer') and name.
-    Assumes plugin classes are named <NameCapitalized>Plugin, 
-    and modules are tsg_plugins.<name_lowercase>_plugin.py.
-    Special handling for 'gan_trainer' can be added if its naming is different.
-    """
-    # Map default placeholders to actual plugin names if necessary
-    if plugin_name == "default_feeder": plugin_name = "csv_feeder"
-    if plugin_name == "default_generator": plugin_name = "vae_generator" 
-    # No default for trainer as it\'s specific (e.g., gan_trainer)
-
-    module_name_part = plugin_name.replace("_plugin", "")
-    
-    # Construct class name based on conventions
-    if plugin_name == "gan_trainer": 
-        class_name = "GANTrainerPlugin"
-        module_path = f"tsg_plugins.gan_trainer_plugin"
-    elif plugin_name == "csv_feeder":
-        class_name = "CSVFeederPlugin"
-        module_path = f"tsg_plugins.feeder_plugin" # Corrected: feeder_plugin.py contiene CSVFeederPlugin
-    elif plugin_name == "vae_generator":
-        class_name = "VAEGeneratorPlugin"
-        module_path = f"tsg_plugins.generator_plugin" # Corrected: generator_plugin.py contiene VAEGeneratorPlugin
-    else:
-        # General case, assuming <Name>Plugin in <name>_plugin.py
-        class_name_parts = [part.capitalize() for part in module_name_part.split('_')]
-        class_name = "".join(class_name_parts) + "Plugin"
-        module_path = f"tsg_plugins.{module_name_part}_plugin"
-
-    try:
-        print(f"Attempting to load plugin: module \'{module_path}\', class \'{class_name}\'")
-        plugin_module = importlib.import_module(module_path)
-        plugin_class = getattr(plugin_module, class_name)
-        return plugin_class(config_dict)
-    except ImportError as e:
-        print(f"Error importing plugin module {module_path}: {e}")
-        # Attempt to provide more context for ModuleNotFoundError
-        if isinstance(e, ModuleNotFoundError):
-            print(f"Hint: Ensure \'{module_path.replace('.', '/')}.py\' exists and is in PYTHONPATH.")
-            print(f"And that class \'{class_name}\' is defined within it.")
-        raise
-    except AttributeError as e:
-        print(f"Error finding class {class_name} in module {module_path}: {e}")
-        raise
-    except Exception as e:
-        print(f"Unexpected error loading plugin {plugin_name} ({module_path}.{class_name}): {e}")
-        raise
 
 def main():
     """

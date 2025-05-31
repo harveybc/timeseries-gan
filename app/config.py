@@ -6,116 +6,149 @@ supported by the sdg application. These defaults are used when no value
 is provided via CLI, config file, or remote config.
 """
 
-# --- Basic data and model parameters ---
-SEQ_LEN = 18  # Sequence length
-LATENT_DIM = 32  # Latent dimension for VAE/GAN
-N_FEATURES = 5  # Number of features in the time series # TO BE ADJUSTED BY USER
+DEFAULT_VALUES = {
+    # Plugin selection
+    "feeder": "default_feeder",
+    "generator": "default_generator",
+    "evaluator": "default_evaluator",
+    "optimizer": "default_optimizer",
 
-# --- File paths ---
-# Input data paths (assuming they remain in the 'data' folder relative to project root)
-X_TRAIN_FILE = "data/x_train.csv"
-X_TEST_FILE = "data/x_test.csv"
+    # Data for evaluation and base for generation
+    # "real_data_file": "examples/data/phase_3/normalized_d4.csv", # REMOVED - Redundant, use x_train_file
+    "x_train_file": "examples/data/phase_3/normalized_d4.csv", # Primary data source
+    "y_train_file": "examples/data/phase_3/normalized_d4.csv",
+    "x_validation_file": "examples/data/phase_3/normalized_d5.csv",
+    "y_validation_file": "examples/data/phase_3/normalized_d5.csv",
+    "x_test_file": "examples/data/phase_3/normalized_d6.csv",
+    "y_test_file": "examples/data/phase_3/normalized_d6.csv",
+    "target_column": "CLOSE", 
+    "stl_period":24,
+    "predicted_horizons": [24,48,72,96,120,144],
+    "use_stl": True,
+    "use_wavelets": True,
+    "use_multi_tapper": True,
 
-# Output paths updated to examples/results/phase_4_3/
-BASE_OUTPUT_DIR = "examples/results/phase_4_3"
-OUTPUT_FILE = f"{BASE_OUTPUT_DIR}/generated_data.csv"
+    "dataset_periodicity": "1h", 
 
-# --- Plugin names (defaults) ---
-FEEDER_PLUGIN = "csv_feeder"  # Default feeder plugin
-GENERATOR_PLUGIN = "vae_generator"  # Default generator plugin (VAEGeneratorPlugin handles VAE/GAN)
-TRAINER_PLUGIN = "default_trainer" # General trainer for pipeline, GAN has its own
+     # Generation parameters
+    "n_samples": 12600,
+    "max_steps_train": 25200,
+    "latent_shape": [18, 32], 
+    "batch_size": 32, 
+    
+    # --- Parameters for FeederPlugin ---
+    "feeder_sampling_method": "standard_normal", 
+    "feeder_encoder_sampling_technique": "direct", 
+    "encoder_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_encoder_model.keras", 
+    "feeder_feature_columns_for_encoder": [], 
+    "feeder_real_data_file_has_header": True,
+    "feeder_datetime_col_in_real_data": "DATE_TIME",
+    "feeder_date_features_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week", "day_of_year"], # ADDED "day_of_year"
+    "feeder_fundamental_features_for_conditioning": ["S&P500_Close", "vix_close"],
+    "feeder_max_day_of_month": 31,
+    "feeder_max_hour_of_day": 23,
+    "feeder_max_day_of_week": 6,
+    "feeder_max_day_of_year": 366, # ADDED
+    "feeder_context_vector_dim": 64, # CHANGED from 16 to 64 to match Generator/main config
+    "feeder_context_vector_strategy": "random",
+    "feeder_copula_kde_bw_method": None,
 
-# --- VAE specific parameters (if VAE is used or trained separately) ---
-VAE_MODEL_PATH = f"{BASE_OUTPUT_DIR}/models/vae/generator_model.h5" # Path to the VAE generator (decoder)
-VAE_EPOCHS = 100
-VAE_BATCH_SIZE = 32
-VAE_SAVE_INTERVAL = 10
-VAE_TRAINING_MODE = False # Set to true to run VAE training (if a VAETrainerPlugin is implemented)
+    # --- Parameters for GeneratorPlugin ---
+    "generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
+    "generator_decoder_input_window_size": 144, 
+    "generator_full_feature_names_ordered": [
+        "DATE_TIME", 
+        "OPEN", "HIGH", "LOW", "CLOSE", # CLOSE is derived
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+        "day_of_month_sin", "day_of_month_cos",
+        "hour_of_day_sin", "hour_of_day_cos",
+        "day_of_week_sin", "day_of_week_cos",
+        "day_of_year_sin", "day_of_year_cos",
+        "S&P500_Close", "vix_close",
+        "log_return", # log_return is now expected from decoder
+        "stl_trend", "stl_seasonal", "stl_resid",
+        "wav_approx_L2", "wav_detail_L1", "wav_detail_L2",
+        "mtm_band_0", "mtm_band_1", "mtm_band_2", "mtm_band_3",
+        "BC-BO", "BH-BL", "BH-BO", "BO-BL",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        "day_of_month", "hour_of_day", "day_of_week" 
+    ], 
+    "generator_decoder_output_feature_names": [
+        # Based on cvae_target_feature_names from phase_4_2_cnn_small_debug_out.json
+        "OPEN", "LOW", "HIGH", # "vix_close", "S&P500_Close" are removed from this list
+        "BC-BO", "BH-BL", 
+        # "S&P500_Close", # REMOVED
+        # "vix_close", # REMOVED
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
+        # "log_return" REMOVED - It's NOT in the cvae_target_feature_names of the trained model
+    ], 
+    "generator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
+    "generator_ti_feature_names": [ 
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-",
+        "ATR", "CCI", "WilliamsR", "Momentum", "ROC"
+    ],
+    "generator_date_conditional_feature_names": ["day_of_month", "hour_of_day", "day_of_week", "day_of_year"], 
+    "generator_feeder_conditional_feature_names": ["S&P500_Close", "vix_close"], 
+    "generator_ti_calculation_min_lookback": 200, 
+    "generator_ti_params": { 
+        "rsi_length": 14, "ema_length": 14, 
+        "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+        "stoch_k": 14, "stoch_d": 3, "stoch_smooth_k": 3,
+        "adx_length": 14, "atr_length": 14, "cci_length": 14, 
+        "willr_length": 14, "mom_length": 14, "roc_length": 14
+    },
+    "generator_normalization_params_file": "examples/data/phase_3/phase_3_debug_out.json",
+    "generator_decoder_input_name_latent": "decoder_input_z_seq",       
+    "generator_decoder_input_name_window": "input_x_window",          
+    "generator_decoder_input_name_conditions": "decoder_input_conditions", 
+    "generator_decoder_input_name_context": "decoder_input_h_context",   
+    "context_vector_dim": 64, # This is the main config value, Feeder should align
 
-# --- Data generation parameters ---
-PREPEND_LENGTH = 50  # Number of real data points to prepend to synthetic data
-GENERATION_LENGTH = 200  # Number of synthetic data points to generate
+    # --- Parameters for EvaluatorPlugin ---
+    "evaluator_metrics": ["mmd", "acf", "wasserstein", "kstest", "discriminative_score", "predictive_score", "visual"],
+    "evaluator_mmd_gamma": None, 
+    "evaluator_acf_nlags": 20,
+    "evaluator_predictive_model_type": "LSTM", 
+    "evaluator_predictive_epochs": 10,
+    "evaluator_predictive_batch_size": 32,
+    "evaluator_plot_max_features": 10, 
+    "evaluator_plot_max_lags_acf": 50, 
 
-# --- GAN specific parameters ---
-# Defaults set for GAN training mode
-GAN_TRAINING_MODE = True  # Set to true to run GAN training mode
-GAN_MODEL_DIR = f"{BASE_OUTPUT_DIR}/models/gan"  # Directory to save/load GAN generator and discriminator
-GENERATOR_LSTM_UNITS = 128
-GENERATOR_ATTENTION_UNITS = 64
-DISCRIMINATOR_LR = 0.0002
-DISCRIMINATOR_BETA1 = 0.5
-GENERATOR_LR = 0.0002
-GENERATOR_BETA1 = 0.5
-GAN_EPOCHS = 10000  # Default epochs for GAN training
-GAN_BATCH_SIZE = 32    # Default batch size for GAN training
-GAN_SAVE_INTERVAL = 500 # How often to save models during GAN training
+    # --- Parameters for OptimizerPlugin ---
+    "hyperparameter_optimization_mode": False, 
+    "run_hyperparameter_optimization": True, 
+    "population_size": 10,
+    "n_generations": 5,
+    "cxpb": 0.6,
+    "mutpb": 0.3,
+    "hyperparameter_bounds": {
+        "latent_dim": (8, 64), 
+        "batch_size": (16, 128), 
+    },
+    "optimizer_n_samples_per_eval": 1000, 
+    "optimizer_start_datetime": None, 
 
-# --- Activation for the output layer of generators (VAE/GAN) ---
-OUTPUT_ACTIVATION = "sigmoid"  # or "tanh", depending on data normalization
-
-# --- Type of generator to use in generation mode ('vae' or 'gan') ---
-# This default is for when NOT in GAN_TRAINING_MODE.
-# After GAN training, user would change this to 'gan' for generation using the trained GAN.
-GENERATOR_TYPE = "vae"
-
-# --- Feature names (USER MUST CONFIGURE THESE TO MATCH THEIR DATA AND MODELS) ---
-# Example: if your data has 45 features and your VAE/GAN models expect these.
-# N_FEATURES above should match len(FULL_FEATURE_NAMES_ORDERED)
-FULL_FEATURE_NAMES_ORDERED = [f"feature_{i}" for i in range(N_FEATURES)] # Placeholder, user must update
-DECODER_OUTPUT_FEATURE_NAMES = [f"feature_{i}" for i in range(min(N_FEATURES, 4))] # Placeholder, user must update
-OHLC_FEATURE_NAMES = [f"feature_{i}" for i in range(min(N_FEATURES, 4))] # Placeholder, user must update
-
-
-# --- Configuration dictionary ---
-# This dictionary aggregates all parameters.
-# It can be overridden by command-line arguments or a JSON config file.
-config = {
-    "seq_len": SEQ_LEN,
-    "latent_dim": LATENT_DIM,
-    "n_features": N_FEATURES,
-    "x_train_file": X_TRAIN_FILE,
-    "x_test_file": X_TEST_FILE,
-    "output_file": OUTPUT_FILE,
-    "feeder_plugin": FEEDER_PLUGIN,
-    "generator_plugin": GENERATOR_PLUGIN, # VAEGeneratorPlugin is default, handles GAN model loading via generator_type
-    "trainer_plugin": TRAINER_PLUGIN, # For main pipeline trainer, not GAN specific
-    "vae_model_path": VAE_MODEL_PATH,
-    "vae_epochs": VAE_EPOCHS,
-    "vae_batch_size": VAE_BATCH_SIZE,
-    "vae_save_interval": VAE_SAVE_INTERVAL,
-    "prepend_length": PREPEND_LENGTH,
-    "generation_length": GENERATION_LENGTH,
-    "vae_training_mode": VAE_TRAINING_MODE, # For dedicated VAE training mode
-    "gan_training_mode": GAN_TRAINING_MODE, # For dedicated GAN training mode
-    "gan_model_dir": GAN_MODEL_DIR,
-    "generator_lstm_units": GENERATOR_LSTM_UNITS,
-    "generator_attention_units": GENERATOR_ATTENTION_UNITS,
-    "discriminator_lr": DISCRIMINATOR_LR,
-    "discriminator_beta1": DISCRIMINATOR_BETA1,
-    "generator_lr": GENERATOR_LR,
-    "generator_beta1": GENERATOR_BETA1,
-    "gan_epochs": GAN_EPOCHS,
-    "gan_batch_size": GAN_BATCH_SIZE,
-    "gan_save_interval": GAN_SAVE_INTERVAL,
-    "output_activation": OUTPUT_ACTIVATION,
-    "generator_type": GENERATOR_TYPE, # Determines if VAEGeneratorPlugin loads a VAE or GAN model
-    "full_feature_names_ordered": FULL_FEATURE_NAMES_ORDERED,
-    "decoder_output_feature_names": DECODER_OUTPUT_FEATURE_NAMES,
-    "ohlc_feature_names": OHLC_FEATURE_NAMES,
+    # General execution parameters
+    "random_seed": 42,
+    "num_synthetic_samples_to_generate": 0, 
+    "start_datetime": None, 
+    "output_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_12600_prepended_o.csv",
+    #"synthetic_data_output_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_25200_prepended.csv",
+    "metrics_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_12600_metrics.json",
+    "save_config": "examples/results/phase_4_2/config_out_12600.json",
+    "save_log": "examples/results/phase_4_2/debug_out_12600.json",
+    "quiet_mode": False,
+    "datetime_col_name": "DATE_TIME",
+    "target_column_order": [],
+    "num_base_features_generated": 6, # Example, adjust if necessary
+    "preprocessor_plugin": "stl_preprocessor", # Example, adjust if necessary
+    "gan_training_mode": False # Example, adjust if necessary
 }
-
-def get_config():
-    """Returns a copy of the configuration dictionary."""
-    return config.copy()
-
-# Example of how to update config dynamically (e.g., from CLI args or a file)
-def update_config(new_params):
-    """Updates the global config with new parameters."""
-    config.update(new_params)
-
-# You might also have a function to load config from a JSON file, e.g.:
-# import json
-# def load_from_json(json_path):
-#     with open(json_path, 'r') as f:
-#         loaded_config = json.load(f)
-#     update_config(loaded_config)
