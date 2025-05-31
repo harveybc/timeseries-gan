@@ -17,6 +17,7 @@ import pandas as pd # Ensure pandas is imported
 import numpy as np # Ensure numpy is imported
 import traceback # ADD THIS IMPORT
 from datetime import datetime, timedelta # ADD THIS IMPORT
+import tensorflow as tf # Ensure tensorflow is imported, typically as tf, if you're calling tf.keras.models.load_model
 
 # --- MONKEY PATCH for numpy.NaN ---
 # Applied because pandas_ta 0.3.14b0 (or a dependency) seems to use
@@ -574,12 +575,8 @@ def main():
             print("❌ GANTrainerPlugin not loaded. Cannot start GAN training.")
             sys.exit(1)
         try:
-            # Ensure preprocessor_plugin is passed if GANTrainerPlugin.train needs it for x_train_file
-            # The GANTrainerPlugin already has it from its constructor.
             trainer_plugin.train(x_train_file=current_config.get("x_train_file"))
             print("✔︎ GAN training process finished.")
-            # Decide if to exit or proceed to other operations (e.g., evaluation of GAN)
-            # For now, we exit after GAN training.
             sys.exit(0) 
         except Exception as e:
             print(f"❌ GAN training failed: {e}")
@@ -602,11 +599,47 @@ def main():
             traceback.print_exc()
             sys.exit(1)
     
-    # If not in hyperparameter optimization mode, proceed to generation/prepending.
+    # If not in GAN training or hyperparameter optimization mode, proceed to VAE-based generation/prepending.
     print("▶ Starting data generation and prepending process (VAE-based)...")
 
     try:
-        # Configuration for paths and sizes
+        # --- Verify and Load Generator (VAE Decoder) ---
+        # This is implicitly handled by GeneratorPlugin's initialization.
+        # We add an explicit check here for clarity and robustness.
+        generator_model_path_for_loading = current_config.get("generator_sequential_model_file")
+        if not generator_model_path_for_loading:
+            print("CRITICAL main.py: 'generator_sequential_model_file' not specified in config. Cannot proceed with VAE-based generation.")
+            sys.exit(1)
+        if not generator_plugin or not generator_plugin.model:
+            print(f"CRITICAL main.py: Generator model (VAE decoder) from '{generator_model_path_for_loading}' not loaded successfully by GeneratorPlugin. Cannot proceed.")
+            sys.exit(1)
+        print(f"INFO main.py: Using VAE generator model: {generator_model_path_for_loading}")
+
+        # --- Verify and Load Pre-trained Discriminator (if specified) ---
+        loaded_pretrained_discriminator = None
+        discriminator_model_path_for_loading = current_config.get("discriminator_sequential_model_file")
+
+        if discriminator_model_path_for_loading:
+            print(f"INFO main.py: 'discriminator_sequential_model_file' is specified: {discriminator_model_path_for_loading}")
+            if not os.path.exists(discriminator_model_path_for_loading):
+                print(f"ERROR main.py: Pre-trained discriminator file not found at '{discriminator_model_path_for_loading}'. This file is required when specified. Exiting.")
+                sys.exit(1)
+            try:
+                print(f"INFO main.py: Attempting to load pre-trained discriminator from: {discriminator_model_path_for_loading}")
+                loaded_pretrained_discriminator = tf.keras.models.load_model(discriminator_model_path_for_loading, compile=False)
+                disc_name = getattr(loaded_pretrained_discriminator, 'name', 'N/A')
+                print(f"INFO main.py: Successfully loaded pre-trained discriminator: {disc_name}")
+                # You can uncomment the next line to see the model summary if needed
+                # loaded_pretrained_discriminator.summary(print_fn=print)
+            except Exception as e_disc_load:
+                print(f"ERROR main.py: Failed to load pre-trained discriminator from '{discriminator_model_path_for_loading}': {e_disc_load}")
+                traceback.print_exc()
+                sys.exit(1)
+        else:
+            print("INFO main.py: 'discriminator_sequential_model_file' not specified. Proceeding with VAE generator only for data generation.")
+            # No error here; VAE-only generation is the fallback if discriminator isn't specified.
+
+        # Configuration for paths and sizes (remains the same)
         x_train_file_path = current_config["x_train_file"]
         if not x_train_file_path or not os.path.exists(x_train_file_path):            
             print(f"ERROR main.py: x_train_file '{x_train_file_path}' not found or not specified. Exiting.")
@@ -779,16 +812,18 @@ def main():
 
         # --- Step D: Generate Synthetic Values ---
         X_syn_generated_values_np = np.array([]).reshape(0, len(generator_full_feature_names_for_df_creation)) 
-        final_synthetic_target_datetimes_series = target_datetimes_for_generation # Use the correctly generated series
+        final_synthetic_target_datetimes_series = target_datetimes_for_generation 
 
         if n_samples_synthetic > 0 and not final_synthetic_target_datetimes_series.empty:
             print(f"Generating feeder outputs for {n_samples_synthetic} synthetic steps...")
+            # FeederPlugin's generate method is called
             feeder_outputs_sequence_synthetic = feeder_plugin.generate(
                 n_ticks_to_generate=n_samples_synthetic,
-                target_datetimes=final_synthetic_target_datetimes_series # This is already pd.Series of Timestamps
+                target_datetimes=final_synthetic_target_datetimes_series
             )
 
-            print("Generating synthetic feature values via GeneratorPlugin...")
+            print("Generating synthetic feature values via GeneratorPlugin (using VAE decoder)...")
+            # GeneratorPlugin's generate method is called (uses the VAE decoder)
             generated_output_from_plugin = generator_plugin.generate(
                 feeder_outputs_sequence=feeder_outputs_sequence_synthetic,
                 sequence_length_T=n_samples_synthetic,
@@ -869,13 +904,14 @@ def main():
 # --- ADD SCRIPT EXECUTION BLOCK ---
 if __name__ == "__main__":
     # Ensure necessary imports for the script are at the top level of main.py
-    # import pandas as pd # Already imported globally
-    # import numpy as np # Already imported globally
-    # import os # Already imported globally
-    # import sys # Already imported globally
-    # import traceback # Already imported globally
-    # import json # Already imported globally
+    import pandas as pd
+    import numpy as np
+    import os
+    import sys
+    import traceback
+    import json
     from datetime import datetime, timedelta # Ensure this is imported at the top
+    import tensorflow as tf # Ensure TensorFlow is imported for model loading
 
     try:
         main()
