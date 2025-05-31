@@ -15,7 +15,8 @@ import traceback
 import json # Ensure json is imported
 import pandas as pd # Ensure pandas is imported
 import numpy as np # Ensure numpy is imported
-import tempfile # ADD THIS IMPORT
+import traceback # ADD THIS IMPORT
+from datetime import datetime, timedelta # ADD THIS IMPORT
 
 # --- MONKEY PATCH for numpy.NaN ---
 # Applied because pandas_ta 0.3.14b0 (or a dependency) seems to use
@@ -95,17 +96,17 @@ print("--- End pandas_ta import attempt ---")
 
 # Define the target CSV column order based on normalized_d2.csv
 # This should be the exact header string from your file, split into a list.
-TARGET_CSV_COLUMNS = [
-    "DATE_TIME","RSI","MACD","MACD_Histogram","MACD_Signal","EMA",
-    "Stochastic_%K","Stochastic_%D","ADX","DI+","DI-","ATR","CCI",
-    "WilliamsR","Momentum","ROC","OPEN","HIGH","LOW","CLOSE",
-    "BC-BO","BH-BL","BH-BO","BO-BL","S&P500_Close","vix_close",
-    "CLOSE_15m_tick_1","CLOSE_15m_tick_2","CLOSE_15m_tick_3","CLOSE_15m_tick_4",
-    "CLOSE_15m_tick_5","CLOSE_15m_tick_6","CLOSE_15m_tick_7","CLOSE_15m_tick_8",
-    "CLOSE_30m_tick_1","CLOSE_30m_tick_2","CLOSE_30m_tick_3","CLOSE_30m_tick_4",
-    "CLOSE_30m_tick_5","CLOSE_30m_tick_6","CLOSE_30m_tick_7","CLOSE_30m_tick_8",
-    "day_of_month","hour_of_day","day_of_week"
-]
+# TARGET_CSV_COLUMNS = [  # THIS WILL BE MADE DYNAMIC LATER
+#     "DATE_TIME","RSI","MACD","MACD_Histogram","MACD_Signal","EMA",
+#     "Stochastic_%K","Stochastic_%D","ADX","DI+","DI-","ATR","CCI",
+#     "WilliamsR","Momentum","ROC","OPEN","HIGH","LOW","CLOSE",
+#     "BC-BO","BH-BL","BH-BO","BO-BL","S&P500_Close","vix_close",
+#     "CLOSE_15m_tick_1","CLOSE_15m_tick_2","CLOSE_15m_tick_3","CLOSE_15m_tick_4",
+#     "CLOSE_15m_tick_5","CLOSE_15m_tick_6","CLOSE_15m_tick_7","CLOSE_15m_tick_8",
+#     "CLOSE_30m_tick_1","CLOSE_30m_tick_2","CLOSE_30m_tick_3","CLOSE_30m_tick_4",
+#     "CLOSE_30m_tick_5","CLOSE_30m_tick_6","CLOSE_30m_tick_7","CLOSE_30m_tick_8",
+#     "day_of_month","hour_of_day","day_of_week"
+# ]
 
 def main():
     """
@@ -118,6 +119,7 @@ def main():
 
     print("Loading default configuration...")
     config: Dict[str, Any] = DEFAULT_VALUES.copy()
+    current_config = config # Use current_config as the main mutable config dictionary
 
     file_config: Dict[str, Any] = {}
     # Carga remota de configuración si se solicita
@@ -141,136 +143,162 @@ def main():
     # Primera fusión de la configuración (sin parámetros específicos de plugins)
     print("Merging configuration with CLI arguments and unknown args (first pass, no plugin params)...")
     unknown_args_dict = process_unknown_args(unknown_args)
-    config = merge_config(config, {}, {}, file_config, cli_args, unknown_args_dict)
+    current_config = merge_config(current_config, {}, {}, file_config, cli_args, unknown_args_dict)
+
+    # --- Initialize Plugins ---
+    feeder_plugin = None
+    generator_plugin = None
+    evaluator_plugin = None
+    optimizer_plugin = None
+    preprocessor_plugin = None
+    trainer_plugin = None # ADDED for GANTrainerPlugin
 
     # Selección del plugin Feeder
-    if not cli_args.get('feeder'):
-        cli_args['feeder'] = config.get('feeder', 'default_feeder')
-    plugin_name = config.get('feeder', 'default_feeder')
-    print(f"Loading Feeder Plugin: {plugin_name}")
+    plugin_name_feeder = current_config.get('feeder', 'default_feeder')
+    print(f"Loading Feeder Plugin: {plugin_name_feeder}")
     try:
-        feeder_class, _ = load_plugin('feeder.plugins', plugin_name)
-        feeder_plugin = feeder_class(config)
-        feeder_plugin.set_params(**config)
+        feeder_class, _ = load_plugin('feeder.plugins', plugin_name_feeder)
+        feeder_plugin = feeder_class(current_config) # Pass current_config
     except Exception as e:
-        print(f"Failed to load or initialize Feeder Plugin '{plugin_name}': {e}")
+        print(f"Failed to load or initialize Feeder Plugin '{plugin_name_feeder}': {e}")
+        traceback.print_exc()
         sys.exit(1)
 
     # Selección del plugin Generator
-    if not cli_args.get('generator'):
-        cli_args['generator'] = config.get('generator', 'default_generator')
-    plugin_name = config.get('generator', 'default_generator')
-    print(f"Loading Generator Plugin: {plugin_name}")
+    plugin_name_generator = current_config.get('generator', 'default_generator')
+    print(f"Loading Generator Plugin: {plugin_name_generator}")
     try:
-        # ADD THIS DEBUG BLOCK
-        returned_value_for_generator = load_plugin('generator.plugins', plugin_name)
-        print(f"DEBUG main.py: Received from load_plugin for generator: {returned_value_for_generator}")
-        print(f"DEBUG main.py: Type of received value: {type(returned_value_for_generator)}")
-        if isinstance(returned_value_for_generator, (tuple, list)): # Check if it's an iterable
-            print(f"DEBUG main.py: Length of received iterable: {len(returned_value_for_generator)}")
-        # END DEBUG BLOCK
-        
-        generator_class, _ = returned_value_for_generator # Use the inspected value
-        generator_plugin = generator_class(config)
-        generator_plugin.set_params(**config)
+        generator_class, _ = load_plugin('generator.plugins', plugin_name_generator)
+        generator_plugin = generator_class(current_config) # Pass current_config
+    except Exception as e:
+        print(f"Failed to load or initialize Generator Plugin '{plugin_name_generator}': {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
-        # --- Inferir latent_dim desde el decoder y actualizar feeder_plugin ---
+    # Selección del plugin Evaluator
+    plugin_name_evaluator = current_config.get('evaluator', 'default_evaluator')
+    print(f"Loading Evaluator Plugin: {plugin_name_evaluator}")
+    try:
+        evaluator_class, _ = load_plugin('evaluator.plugins', plugin_name_evaluator)
+        evaluator_plugin = evaluator_class(current_config) # Pass current_config
+    except Exception as e:
+        print(f"Failed to load or initialize Evaluator Plugin '{plugin_name_evaluator}': {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Selección del plugin Optimizer
+    plugin_name_optimizer = current_config.get('optimizer', 'default_optimizer')
+    print(f"Loading Optimizer Plugin: {plugin_name_optimizer}")
+    try:
+        optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name_optimizer)
+        optimizer_plugin = optimizer_class(current_config) # Pass current_config
+    except Exception as e:
+        print(f"Failed to load or initialize Optimizer Plugin '{plugin_name_optimizer}': {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Carga del Preprocessor Plugin
+    plugin_name_preprocessor = current_config.get('preprocessor_plugin', 'stl_preprocessor')
+    print(f"Loading Preprocessor Plugin: {plugin_name_preprocessor}")
+    try:
+        preprocessor_class, _ = load_plugin('preprocessor.plugins', plugin_name_preprocessor)
+        preprocessor_plugin = preprocessor_class() # Assuming constructor takes no args or uses its own defaults initially
+                                                    # It will get config via set_params later
+    except Exception as e:
+        print(f"Failed to load or initialize Preprocessor Plugin '{plugin_name_preprocessor}': {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Selección del plugin Trainer (for GAN)
+    plugin_name_trainer = current_config.get('trainer', 'gan_trainer') # From DEFAULT_VALUES
+    print(f"Loading Trainer Plugin: {plugin_name_trainer}")
+    try:
+        trainer_class, _ = load_plugin('trainer.plugins', plugin_name_trainer)
+        # GANTrainerPlugin expects other plugin instances at construction
+        trainer_plugin = trainer_class(
+            config=current_config, # Initial config
+            generator_plugin_instance=generator_plugin,
+            feeder_plugin_instance=feeder_plugin,
+            preprocessor_plugin_instance=preprocessor_plugin
+        )
+    except Exception as e:
+        print(f"Failed to load or initialize Trainer Plugin '{plugin_name_trainer}': {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    print("Merging configuration with CLI arguments and plugin parameters...")
+    # Merge plugin_params from each instantiated plugin
+    if feeder_plugin and hasattr(feeder_plugin, 'plugin_params'):
+        current_config = merge_config(current_config, feeder_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+    if generator_plugin and hasattr(generator_plugin, 'plugin_params'):
+        current_config = merge_config(current_config, generator_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+    if evaluator_plugin and hasattr(evaluator_plugin, 'plugin_params'):
+        current_config = merge_config(current_config, evaluator_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+    if optimizer_plugin and hasattr(optimizer_plugin, 'plugin_params'):
+        current_config = merge_config(current_config, optimizer_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+    if preprocessor_plugin and hasattr(preprocessor_plugin, 'plugin_params'):
+        current_config = merge_config(current_config, preprocessor_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+    if trainer_plugin and hasattr(trainer_plugin, 'plugin_params'): # ADDED for GANTrainerPlugin
+        current_config = merge_config(current_config, trainer_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+
+    # --- Set final parameters for all plugins ---
+    print("Setting final parameters for all plugins...")
+    if feeder_plugin: feeder_plugin.set_params(**current_config)
+    if generator_plugin: generator_plugin.set_params(**current_config)
+    if evaluator_plugin: evaluator_plugin.set_params(**current_config)
+    if optimizer_plugin: optimizer_plugin.set_params(**current_config)
+    if preprocessor_plugin: preprocessor_plugin.set_params(**current_config)
+    if trainer_plugin: trainer_plugin.set_params(**current_config) # ADDED for GANTrainerPlugin
+
+
+    # --- Inferir latent_dim desde el decoder y actualizar feeder_plugin (AFTER generator_plugin.set_params) ---
+    if generator_plugin and feeder_plugin:
         decoder_model = getattr(generator_plugin, "sequential_model", None) 
         if decoder_model is None:
             decoder_model = getattr(generator_plugin, "model", None)
             if decoder_model is None:
-                raise RuntimeError("GeneratorPlugin must expose attribute 'sequential_model' or 'model'.")
+                print("ERROR main.py: Decoder model not found in GeneratorPlugin (attributes 'sequential_model' or 'model'). Cannot infer latent_shape.")
             else:
                 print("DEBUG main.py: Found decoder model under attribute 'model'.")
         else:
             print("DEBUG main.py: Found decoder model under attribute 'sequential_model'.")
         
-        if not hasattr(decoder_model, 'inputs') or not decoder_model.inputs:
-            raise RuntimeError(f"Decoder model '{type(decoder_model).__name__}' does not have inspectable 'inputs' attribute or it's empty.")
+        if decoder_model and hasattr(decoder_model, 'inputs') and decoder_model.inputs:
+            decoder_inputs = decoder_model.inputs 
+            decoder_input_names = [inp.name.split(':')[0] for inp in decoder_inputs] 
+            
+            latent_input_name_from_config = generator_plugin.params.get("decoder_input_name_latent")
+            if not latent_input_name_from_config:
+                print("ERROR main.py: GeneratorPlugin config missing 'decoder_input_name_latent'. Cannot infer latent_shape.")
+            else:
+                inferred_latent_shape = None 
+                latent_input_found = False
+                for i, input_tensor in enumerate(decoder_inputs):
+                    input_layer_name = input_tensor.name.split(':')[0]
+                    if input_layer_name == latent_input_name_from_config:
+                        shape_tuple = input_tensor.shape.as_list() 
+                        if len(shape_tuple) == 3 and shape_tuple[1] is not None and shape_tuple[2] is not None:
+                            inferred_latent_shape = (shape_tuple[1], shape_tuple[2]) # (seq_len, features)
+                            print(f"DEBUG main.py: Inferred latent_shape from decoder input '{input_layer_name}': {inferred_latent_shape}")
+                            latent_input_found = True
+                            break
+                        else:
+                            print(f"Warning main.py: Latent input '{input_layer_name}' shape {shape_tuple} is not as expected (None, seq_len, features). Cannot infer.")
+                
+                if not latent_input_found:
+                    print(f"ERROR main.py: Could not find input layer named '{latent_input_name_from_config}' in decoder model. Available inputs: {decoder_input_names}")
+                if inferred_latent_shape is None and latent_input_found: # Should not happen if found and shape was valid
+                    print(f"ERROR main.py: Could not determine a valid inferred latent shape for '{latent_input_name_from_config}'.")
+                
+                if inferred_latent_shape:
+                    print(f"DEBUG main.py: Setting FeederPlugin latent_shape to: {list(inferred_latent_shape)}")
+                    feeder_plugin.set_params(latent_shape=list(inferred_latent_shape))
+                    current_config['latent_shape'] = list(inferred_latent_shape)
+                    if trainer_plugin: # Also update trainer_plugin if it uses latent_shape directly
+                        trainer_plugin.set_params(latent_shape=list(inferred_latent_shape))
 
-        decoder_inputs = decoder_model.inputs 
-        decoder_input_names = [inp.name.split(':')[0] for inp in decoder_inputs] 
-        
-        latent_input_name_from_config = generator_plugin.params.get("decoder_input_name_latent")
-        if not latent_input_name_from_config:
-            raise ValueError("GeneratorPlugin config missing 'decoder_input_name_latent'.")
-
-        inferred_latent_shape = None # Will be a tuple (seq_len, features)
-        latent_input_found = False
-        for i, input_tensor in enumerate(decoder_inputs):
-            input_layer_name = input_tensor.name.split(':')[0]
-            if input_layer_name == latent_input_name_from_config:
-                shape_list = list(input_tensor.shape) # e.g. [None, 18, 32]
-                if len(shape_list) == 3 and shape_list[1] is not None and shape_list[2] is not None:
-                    inferred_latent_shape = (shape_list[1], shape_list[2]) # (seq_len, features)
-                    latent_input_found = True
-                    print(f"DEBUG main.py: Found latent input '{latent_input_name_from_config}' with original shape {input_tensor.shape}. Inferred latent_shape: {inferred_latent_shape}")
-                    break
-                else:
-                    print(f"DEBUG main.py: Latent input '{latent_input_name_from_config}' found, but original shape {input_tensor.shape} (list: {shape_list}) is not 3D with defined sequence length and features for shape inference.")
-        
-        if not latent_input_found:
-            raise RuntimeError(f"Could not find input layer named '{latent_input_name_from_config}' in decoder model. Available inputs: {decoder_input_names}")
-        if inferred_latent_shape is None:
-            raise RuntimeError(f"Could not determine a valid inferred latent shape for '{latent_input_name_from_config}'. Expected 3D shape like (None, seq_len, features).")
-
-        print(f"DEBUG main.py: Setting FeederPlugin latent_shape to: {inferred_latent_shape}")
-        # Pass the tuple (seq_len, features)
-        feeder_plugin.set_params(latent_shape=list(inferred_latent_shape)) # Pass as list as per FeederPlugin's type hints/usage
-        # Update the main config as well, so OptimizerPlugin sees the correct base if it doesn't tune it
-        config['latent_shape'] = list(inferred_latent_shape)
-        # If optimizer tunes 'latent_dim' (feature part), FeederPlugin's set_params will handle it.
-    except Exception as e:
-        print(f"Failed to load or initialize Generator Plugin '{plugin_name}': {e}")
-        traceback.print_exc() # This will now work correctly
-        sys.exit(1)
-
-    # Selección del plugin Evaluator
-    if not cli_args.get('evaluator'):
-        cli_args['evaluator'] = config.get('evaluator', 'default_evaluator')
-    plugin_name = config.get('evaluator', 'default_evaluator')
-    print(f"Loading Evaluator Plugin: {plugin_name}")
-    try:
-        evaluator_class, _ = load_plugin('evaluator.plugins', plugin_name)
-        evaluator_plugin = evaluator_class(config)
-        evaluator_plugin.set_params(**config)
-    except Exception as e:
-        print(f"Failed to load or initialize Evaluator Plugin '{plugin_name}': {e}")
-        sys.exit(1)
-
-    # Selección del plugin Optimizer
-    if not cli_args.get('optimizer'):
-        cli_args['optimizer'] = config.get('optimizer', 'default_optimizer')
-    plugin_name = config.get('optimizer', 'default_optimizer')
-    print(f"Loading Optimizer Plugin: {plugin_name}")
-    try:
-        optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name)
-        optimizer_plugin = optimizer_class(config)
-        optimizer_plugin.set_params(**config)
-    except Exception as e:
-        print(f"Failed to load or initialize Optimizer Plugin '{plugin_name}': {e}")
-        sys.exit(1)
-
-    # Carga del Preprocessor Plugin (para process_data, ventanas deslizantes y STL)
-    # Using the exact loading mechanism you provided:
-    plugin_name = config.get('preprocessor_plugin', 'stl_preprocessor') # Default name from your snippet
-    print(f"Loading Plugin ..{plugin_name}") # Print format from your snippet
-    try:
-        # Ensure 'preprocessor.plugins' is the correct group name for your preprocessor
-        preprocessor_class, _ = load_plugin('preprocessor.plugins', plugin_name) # Group from your snippet
-        preprocessor_plugin = preprocessor_class() # Instantiation from your snippet
-        preprocessor_plugin.set_params(**config) # Param setting from your snippet
-    except Exception as e:
-        print(f"Failed to load or initialize Preprocessor Plugin: {e}") # Error message format from your snippet
-        sys.exit(1)
-
-    print("Merging configuration with CLI arguments and plugin parameters...")
-    config = merge_config(config, feeder_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
-    config = merge_config(config, generator_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
-    config = merge_config(config, evaluator_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
-    config = merge_config(config, optimizer_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
-    if hasattr(preprocessor_plugin, 'plugin_params'):
-        config = merge_config(config, preprocessor_plugin.plugin_params, {}, file_config, cli_args, unknown_args_dict)
+        else:
+            print("ERROR main.py: Decoder model or its inputs not available after generator_plugin setup. Cannot infer latent_shape.")
 
 
     # --- REMOVE REDUNDANT CONFIG MERGE ---
@@ -494,15 +522,51 @@ def main():
 
     # --- (The old generate_datetime_column function can be removed or kept if used elsewhere) ---
 
+    # --- DYNAMICALLY DEFINE TARGET_CSV_COLUMNS ---
+    # This should be based on the generator's full feature list, which includes the datetime column.
+    # The order should match how the final CSV is expected.
+    # Assuming generator_plugin.params["full_feature_names_ordered"] is the definitive list
+    # and includes the datetime column as the first element.
+    
+    TARGET_CSV_COLUMNS = []
+    if generator_plugin and generator_plugin.params.get("full_feature_names_ordered"):
+        TARGET_CSV_COLUMNS = generator_plugin.params.get("full_feature_names_ordered")
+        # Ensure datetime_col_name is first if it's not already, or handle as per your data structure.
+        # For now, assume full_feature_names_ordered is already correctly ordered for output.
+        print(f"DEBUG main.py: Dynamically set TARGET_CSV_COLUMNS from generator_plugin.params['full_feature_names_ordered'] (Count: {len(TARGET_CSV_COLUMNS)})")
+    else:
+        print("ERROR main.py: Could not dynamically set TARGET_CSV_COLUMNS. generator_plugin or 'full_feature_names_ordered' not available. Falling back to an empty list or a hardcoded default if necessary.")
+        # Fallback to a minimal default or raise error if this is critical
+        TARGET_CSV_COLUMNS = [current_config.get("datetime_col_name", "DATE_TIME")] # Minimal fallback
+
+
     # --- DECISIÓN DE EJECUCIÓN ---
     # -------------------------------------------------------------------------
     # GAN TRAINING OR VAE‐GENERATE + EVALUATE / PREPEND
     # -------------------------------------------------------------------------
     
-    is_gan_training_mode = config.get("gan_training_mode", False) 
-    is_hyperparam_opt_mode = config.get("hyperparameter_optimization_mode", False) and config.get("run_hyperparameter_optimization", True)
+    is_gan_training_mode = current_config.get("gan_training_mode", False) 
+    is_hyperparam_opt_mode = current_config.get("hyperparameter_optimization_mode", False) and current_config.get("run_hyperparameter_optimization", True)
 
-    if is_hyperparam_opt_mode:
+    if is_gan_training_mode:
+        print("▶ Starting GAN training mode...")
+        if not trainer_plugin:
+            print("❌ GANTrainerPlugin not loaded. Cannot start GAN training.")
+            sys.exit(1)
+        try:
+            # Ensure preprocessor_plugin is passed if GANTrainerPlugin.train needs it for x_train_file
+            # The GANTrainerPlugin already has it from its constructor.
+            trainer_plugin.train(x_train_file=current_config.get("x_train_file"))
+            print("✔︎ GAN training process finished.")
+            # Decide if to exit or proceed to other operations (e.g., evaluation of GAN)
+            # For now, we exit after GAN training.
+            sys.exit(0) 
+        except Exception as e:
+            print(f"❌ GAN training failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+    elif is_hyperparam_opt_mode:
         print("▶ Running hyperparameter optimization with Optimizer Plugin…")
         try:
             optimal_params = optimizer_plugin.optimize(
@@ -519,19 +583,19 @@ def main():
             sys.exit(1)
     
     # If not in hyperparameter optimization mode, proceed to generation/prepending.
-    print("▶ Starting data generation and prepending process...")
+    print("▶ Starting data generation and prepending process (VAE-based)...")
 
     try:
         # Configuration for paths and sizes
-        x_train_file_path = config["x_train_file"]
+        x_train_file_path = current_config["x_train_file"]
         if not x_train_file_path or not os.path.exists(x_train_file_path):            
             print(f"ERROR main.py: x_train_file '{x_train_file_path}' not found or not specified. Exiting.")
             sys.exit(1)
             
-        max_steps_train_real = config["max_steps_train"] 
-        n_samples_synthetic = config.get("n_samples", config.get("num_synthetic_samples_to_generate", 0))
-        datetime_col_name = config.get("datetime_col_name", "DATE_TIME")
-        dataset_periodicity = config.get("dataset_periodicity", "1h")
+        max_steps_train_real = current_config["max_steps_train"] 
+        n_samples_synthetic = current_config.get("n_samples", current_config.get("num_synthetic_samples_to_generate", 0))
+        datetime_col_name = current_config.get("datetime_col_name", "DATE_TIME")
+        dataset_periodicity = current_config.get("dataset_periodicity", "1h")
         decoder_input_window_size = generator_plugin.params.get("decoder_input_window_size")
         generator_full_feature_names_for_df_creation = generator_plugin.params.get("full_feature_names_ordered", [])
         if not generator_full_feature_names_for_df_creation or "DATE_TIME" not in generator_full_feature_names_for_df_creation:
@@ -539,40 +603,29 @@ def main():
             sys.exit(1)
 
         # --- Step A: Read the raw real data segment that will be appended and determine its start datetime ---
-        df_real_raw_segment_for_output = pd.DataFrame(columns=TARGET_CSV_COLUMNS) 
+        df_real_raw_segment_for_output = pd.DataFrame(columns=TARGET_CSV_COLUMNS) # Uses dynamic TARGET_CSV_COLUMNS
         first_dt_of_real_segment_to_append: Optional[pd.Timestamp] = None
 
         if max_steps_train_real > 0:
             try:
-                temp_df_real_raw = pd.read_csv(
-                    x_train_file_path, 
-                    nrows=max_steps_train_real, 
-                    header=0 if config.get("feeder_real_data_file_has_header", True) else None
-                )
-
-                if not temp_df_real_raw.empty:
-                    aligned_real_segment = pd.DataFrame(columns=TARGET_CSV_COLUMNS)
-                    for col_target_name in TARGET_CSV_COLUMNS:
-                        if col_target_name in temp_df_real_raw.columns:
-                            aligned_real_segment[col_target_name] = temp_df_real_raw[col_target_name]
-                        elif isinstance(col_target_name, int) and col_target_name < len(temp_df_real_raw.columns):
-                             aligned_real_segment[TARGET_CSV_COLUMNS[col_target_name]] = temp_df_real_raw.iloc[:, col_target_name]
-                        else:
-                            aligned_real_segment[col_target_name] = np.nan 
-                    df_real_raw_segment_for_output = aligned_real_segment
-
-                    if datetime_col_name in df_real_raw_segment_for_output.columns and not df_real_raw_segment_for_output[datetime_col_name].empty:
-                        first_dt_val = df_real_raw_segment_for_output[datetime_col_name].iloc[0]
-                        if pd.notnull(first_dt_val):
-                            first_dt_of_real_segment_to_append = pd.to_datetime(first_dt_val)
-                        else:
-                            print(f"WARN main.py: First datetime in raw real segment is null.")
+                df_real_full_raw = pd.read_csv(x_train_file_path, parse_dates=[datetime_col_name])
+                # Take the last 'max_steps_train_real' rows for the segment to be appended
+                df_real_raw_segment_for_output_unaligned = df_real_full_raw.tail(max_steps_train_real).copy()
+                
+                # Align columns with TARGET_CSV_COLUMNS
+                df_real_raw_segment_for_output = pd.DataFrame(columns=TARGET_CSV_COLUMNS)
+                for col in TARGET_CSV_COLUMNS:
+                    if col in df_real_raw_segment_for_output_unaligned.columns:
+                        df_real_raw_segment_for_output[col] = df_real_raw_segment_for_output_unaligned[col]
                     else:
-                        print(f"WARN main.py: Datetime column '{datetime_col_name}' not found or empty in the read raw real segment.")
-                else:
-                    print("DEBUG main.py: Raw real data segment read from x_train_file is empty (max_steps_train_real might be > file length or file empty).")
+                        df_real_raw_segment_for_output[col] = np.nan # Or some other default
+                
+                if not df_real_raw_segment_for_output.empty and datetime_col_name in df_real_raw_segment_for_output.columns:
+                    first_dt_of_real_segment_to_append = pd.to_datetime(df_real_raw_segment_for_output[datetime_col_name].iloc[0])
+                print(f"DEBUG main.py: Real data segment for output loaded. Shape: {df_real_raw_segment_for_output.shape}. Starts at: {first_dt_of_real_segment_to_append}")
+
             except Exception as e_raw_read:
-                print(f"WARN main.py: Error reading raw real data segment from '{x_train_file_path}': {e_raw_read}. Real segment will be empty.")
+                print(f"ERROR main.py: Could not read or process raw real data segment from '{x_train_file_path}': {e_raw_read}")
         else:
             print("DEBUG main.py: No real rows requested for output (max_steps_train_real is 0). Real segment will be empty.")
         
@@ -605,7 +658,7 @@ def main():
                      print(f"WARN main.py: No synthetic datetimes were generated despite valid real_start_dt. Check 'n_samples' and date logic.")
             else:
                 print("ERROR main.py: Cannot determine first datetime of real segment for prepending, but synthetic samples are requested. Synthetic data generation will use fallback start time.")
-                synthetic_start_dt_str = config.get("start_datetime") or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                synthetic_start_dt_str = current_config.get("start_datetime") or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 target_datetimes_for_generation_str_list = generate_datetime_column( # Ensure this function is defined or imported
                     start_datetime_str=synthetic_start_dt_str,
                     num_samples=n_samples_synthetic,
@@ -620,12 +673,12 @@ def main():
         # This part remains largely the same, as it's for the generator's initial state,
         # which needs processed features from the *end* of the training data.
         print(f"Preprocessing full '{x_train_file_path}' to extract initial window for generator...")
-        config_for_full_train_preprocessing = config.copy()
+        config_for_full_train_preprocessing = current_config.copy()
         
         if hasattr(preprocessor_plugin, 'plugin_params'):
-            if not config_for_full_train_preprocessing.get('use_stl', False):
-                if 'stl_window' in preprocessor_plugin.plugin_params or 'stl_window' in config_for_full_train_preprocessing:
-                     config_for_full_train_preprocessing['stl_window'] = 0 
+            if not config_for_full_train_preprocessing.get('use_stl', False): # Example: check a preprocessor param
+                 # config_for_full_train_preprocessing['preprocessor_specific_param'] = some_value
+                 pass # Adjust config for preprocessor if needed
         
         print(f"DEBUG main.py: Calling preprocessor_plugin.run_preprocessing with full config for x_train_file: {x_train_file_path}")
         all_processed_datasets = preprocessor_plugin.run_preprocessing(config=config_for_full_train_preprocessing)
@@ -738,21 +791,18 @@ def main():
         # --- Step E: Create Synthetic DataFrame ---
         df_synthetic_generated_full_features = pd.DataFrame(X_syn_generated_values_np, columns=generator_full_feature_names_for_df_creation)
         if n_samples_synthetic > 0 and not final_synthetic_target_datetimes_series.empty:
-            if len(final_synthetic_target_datetimes_series) == df_synthetic_generated_full_features.shape[0]:
-                # Ensure datetime_col_name is a column before assigning
-                if datetime_col_name not in df_synthetic_generated_full_features.columns:
-                     df_synthetic_generated_full_features.insert(0, datetime_col_name, np.nan) # Add if missing
-                df_synthetic_generated_full_features[datetime_col_name] = final_synthetic_target_datetimes_series.dt.strftime('%Y-%m-%d %H:%M:%S').values
-            else:
-                print(f"Warning: Mismatch between synthetic datetimes ({len(final_synthetic_target_datetimes_series)}) and generated values ({df_synthetic_generated_full_features.shape[0]}). Datetime column might be misaligned or omitted for synthetic data.")
+            df_synthetic_generated_full_features[datetime_col_name] = final_synthetic_target_datetimes_series.values # Ensure datetime col is added
         
-        output_df_synthetic_aligned = pd.DataFrame(columns=TARGET_CSV_COLUMNS)
+        output_df_synthetic_aligned = pd.DataFrame(columns=TARGET_CSV_COLUMNS) # Uses dynamic TARGET_CSV_COLUMNS
         if not df_synthetic_generated_full_features.empty:
-            for col_target_name in TARGET_CSV_COLUMNS:
-                if col_target_name in df_synthetic_generated_full_features.columns:
-                    output_df_synthetic_aligned[col_target_name] = df_synthetic_generated_full_features[col_target_name]
+            # Align columns of synthetic data to TARGET_CSV_COLUMNS
+            for col_name_target in TARGET_CSV_COLUMNS:
+                if col_name_target in df_synthetic_generated_full_features.columns:
+                    output_df_synthetic_aligned[col_name_target] = df_synthetic_generated_full_features[col_name_target]
                 else:
-                    output_df_synthetic_aligned[col_target_name] = np.nan
+                    # If a column in TARGET_CSV_COLUMNS is not in generated, fill with NaN or default
+                    output_df_synthetic_aligned[col_name_target] = np.nan 
+            print(f"DEBUG main.py: Synthetic data DF created and aligned. Shape: {output_df_synthetic_aligned.shape}")
 
         # --- Step F: Real DataFrame for Output is df_real_raw_segment_for_output (already prepared and aligned) ---
         print(f"DEBUG main.py: Real data segment for final output DF shape: {df_real_raw_segment_for_output.shape}")
@@ -776,7 +826,7 @@ def main():
                 ignore_index=True
             )
         
-        final_output_path = config.get("output_file")
+        final_output_path = current_config.get("output_file")
         os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
         df_combined_prepended.to_csv(final_output_path, index=False, na_rep='NaN')
         print(f"✔︎ Combined data (synthetic prepended to real) saved to {final_output_path} (Shape: {df_combined_prepended.shape})")
@@ -789,11 +839,10 @@ def main():
     # Save final configuration
     if args.save_config:
         try:
-            config_save_path = args.save_config if isinstance(args.save_config, str) else "examples/results/final_config.json"
-            save_config(config_save_path, config)
-            print(f"✔︎ Configuration saved to {config_save_path}")
+            save_config(current_config, args.save_config) # Pass current_config
+            print(f"Final configuration saved to {args.save_config}")
         except Exception as e:
-            print(f"WARNING: Failed to save configuration: {e}. Proceeding without saving config.")
+            print(f"Failed to save local configuration: {e}")
     
     print("Fin de la ejecución del script main.py.")
 
