@@ -673,6 +673,7 @@ class GANTrainerPlugin:
              logger.error(f"GAN build: Mismatch in ordered inputs for generator. Expected {len(self.generator.inputs)}, got {len(generator_feed_inputs_ordered)}. This is critical.")
 
         generated_data_raw = self.generator(generator_feed_inputs_ordered) # Shape: (batch, seq_len_gen_output, actual_generator_output_dim)
+        logger.info(f"GAN build: Generator component: {self.generator.name}, Trainable: {self.generator.trainable}, Trainable weights: {len(self.generator.trainable_weights if self.generator else [])}")
         
         # Ensure generator output is 3D for the TI layer and discriminator
         # self.generator_output_actual_seq_len should reflect the generator\\'s intended output sequence length (e.g., 1 or self.seq_len)
@@ -740,12 +741,29 @@ class GANTrainerPlugin:
         data_with_tis_for_discriminator = ti_calculator_layer(base_features_from_generator)
         # Expected shape: (None, self.seq_len, self.num_features_for_discriminator) -> (None, 18, 41)
         
+        logger.info(f"GAN build: Discriminator component: {self.discriminator.name}, Trainable: {self.discriminator.trainable}, Trainable weights: {len(self.discriminator.trainable_weights if self.discriminator else [])}")
+        # self.discriminator.trainable should be False here for the GAN model
+
         gan_output = self.discriminator(data_with_tis_for_discriminator) 
         
         actual_gan_model_inputs = [gan_latent_input, gan_conditional_input, gan_context_input]
         gan = tf.keras.Model(inputs=actual_gan_model_inputs, outputs=gan_output, name="gan_combined")
+        
+        logger.info(f"GAN build: GAN model trainable weights BEFORE compile: {len(gan.trainable_weights)}")
+        # Critical: Log the trainable_variables of the gan model
+        if gan.trainable_weights:
+            logger.info(f"GAN build: GAN trainable weight names: {[w.name for w in gan.trainable_weights]}")
+        else:
+            logger.info("GAN build: GAN model has NO trainable weights before compile.")
+
         gan.compile(loss='binary_crossentropy', optimizer=self.g_optimizer)
         logger.info("GAN model built and compiled.")
+        logger.info(f"GAN build: GAN model trainable weights AFTER compile: {len(gan.trainable_weights)}")
+        if gan.trainable_weights:
+            logger.info(f"GAN build: GAN trainable weight names after compile: {[w.name for w in gan.trainable_weights]}")
+        else:
+            logger.info("GAN build: GAN model has NO trainable weights after compile.")
+        
         gan.summary(print_fn=logger.info)
         try:
             plot_model(gan, to_file=os.path.join(self.gan_model_dir, 'gan_model_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
