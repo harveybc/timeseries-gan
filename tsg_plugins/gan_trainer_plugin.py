@@ -713,7 +713,7 @@ class GANTrainerPlugin:
         logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
 
 
-        for epoch in range(self.params['gan_epochs']):
+        for epoch in range(self.params["gan_epochs"]):
             start_time_epoch = time.time()
             
             # ---------------------
@@ -730,10 +730,10 @@ class GANTrainerPlugin:
 
             # Generate a batch of new series using the FeederPlugin and Generator
             # FeederPlugin provides latent_input, conditional_input, context_input
-            feeder_outputs = self.feeder_plugin_instance.generate(n_samples=self.params["gan_batch_size"])
-            latent_input_batch = feeder_outputs["latent_vectors"]
-            conditional_input_batch = feeder_outputs["conditional_vectors"]
-            context_input_batch = feeder_outputs["context_vectors"]
+            feeder_output = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
+            latent_input_batch = feeder_output["latent_vectors"]
+            conditional_input_batch = feeder_output["conditional_vectors"]
+            context_input_batch = feeder_output["context_vectors"]
 
             generator_inputs = [latent_input_batch, conditional_input_batch, context_input_batch]
             
@@ -765,7 +765,7 @@ class GANTrainerPlugin:
             # The GAN model (combined) trains the generator to fool the discriminator
             
             # Generate new inputs for the generator for this training step
-            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_samples=self.params["gan_batch_size"])
+            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
             latent_input_batch_g = feeder_outputs_for_g["latent_vectors"]
             conditional_input_batch_g = feeder_outputs_for_g["conditional_vectors"]
             context_input_batch_g = feeder_outputs_for_g["context_vectors"]
@@ -1201,7 +1201,7 @@ class GANTrainerPlugin:
             logger.error(f"Error plotting losses: {e}")
 
 
-    def save_models(self, epoch: int) -> None:
+    def save_models(self, epoch: None) -> None:
         """Saves the generator and discriminator models."""
         if self.generator:
             # Change .h5 to .keras
