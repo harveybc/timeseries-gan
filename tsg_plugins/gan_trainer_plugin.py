@@ -1182,7 +1182,7 @@ class GANTrainerPlugin:
             for length in willr_configs:
                 call_key = ('willr', str((length,)))
                 if call_key not in processed_indicator_calls:
-                                       if col_map['high'] and col_map['low'] and col_map['close']:
+                    if col_map['high'] and col_map['low'] and col_map['close']:
                         try:
                             df_with_tas.ta.willr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, append=True)
                             processed_indicator_calls.add(call_key)
