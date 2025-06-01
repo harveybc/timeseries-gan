@@ -1211,7 +1211,7 @@ class GANTrainerPlugin:
         if self.discriminator:
             # Change .h5 to .keras
             d_path = os.path.join(self.gan_model_dir, f"discriminator_epoch_{epoch}.keras")
-                       self.discriminator.save(d_path)
+            self.discriminator.save(d_path)
             logger.info(f"Saved discriminator model to {d_path}")
         # Also, if you save the combined GAN model, update its extension too.
         # Example if you were to save self.gan:
