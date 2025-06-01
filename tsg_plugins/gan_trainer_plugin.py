@@ -811,6 +811,25 @@ class GANTrainerPlugin:
                     # Potentially raise an error or handle as critical failure
                     raise AttributeError("'generator_output_actual_seq_len' not set, cannot reshape generator output.")
 
+            # NEW SLICING LOGIC
+            # Slice features if the generator's output feature dimension (after potential reshape)
+            # differs from the configured self.num_base_features.
+            current_feature_dim = generated_base_features_raw.shape[-1]
+            if current_feature_dim != self.num_base_features:
+                if self.num_base_features > 0:
+                    self.logger.info(
+                        f"GANTrainerPlugin (train): Slicing generator output's feature dimension "
+                        f"from {current_feature_dim} to {self.num_base_features} (num_base_features) features."
+                    )
+                    generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
+                    self.logger.info(f"GANTrainerPlugin (train): Sliced generated_base_features_raw shape: {generated_base_features_raw.shape}")
+                else:
+                    self.logger.warning(
+                        f"GANTrainerPlugin (train): num_base_features is {self.num_base_features}. "
+                        f"Not slicing generator output (current features: {current_feature_dim}). "
+                        "This might be an issue if TI calculation or Discriminator expects a positive number of features."
+                    )
+            # END OF NEW SLICING LOGIC
 
             # Calculate TIs for generated data
             generated_features_with_tis = self._calculate_technical_indicators(generated_base_features_raw) # (batch, seq_len, num_features_for_discriminator)
@@ -1163,7 +1182,7 @@ class GANTrainerPlugin:
             for length in willr_configs:
                 call_key = ('willr', str((length,)))
                 if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
+                                       if col_map['high'] and col_map['low'] and col_map['close']:
                         try:
                             df_with_tas.ta.willr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, append=True)
                             processed_indicator_calls.add(call_key)
