@@ -1140,9 +1140,12 @@ class GANTrainerPlugin:
 
             if self.seq_len is not None: 
                 if self.seq_len == 1: # Discriminator expects a sequence of length 1
-                    self.logger.info(f"GAN Build (2D output): Generator output was 2D. Expanding dims to make it 3D (batch, 1, features) as D expects seq_len=1. Shape before: {generated_base_features_tensor.shape}")
-                    generated_base_features_tensor = tf.expand_dims(generated_base_features_tensor, axis=1)
-                    self.logger.info(f"GAN Build: Shape after expand_dims: {generated_base_features_tensor.shape}")
+                    self.logger.info(f"GAN Build (2D output): Generator output was 2D. Reshaping to 3D (batch, 1, features) as D expects seq_len=1. Shape before: {generated_base_features_tensor.shape}")
+                    # generated_base_features_tensor = tf.expand_dims(generated_base_features_tensor, axis=1) # Old problematic line
+                    # New line using Keras Reshape layer:
+                    # Assuming generated_base_features_tensor has shape (batch, self.num_base_features) at this point
+                    generated_base_features_tensor = layers.Reshape((1, self.num_base_features))(generated_base_features_tensor)
+                    self.logger.info(f"GAN Build: Shape after Reshape: {generated_base_features_tensor.shape}")
                 else: # Discriminator expects seq_len > 1, but generator output is 2D
                      self.logger.error(f"GAN Build: Generator output is 2D, but discriminator expects seq_len {self.seq_len}. Cannot reconcile. Critical error.")
                      raise ValueError(f"Generator output 2D, but discriminator expects sequence length {self.seq_len}.")
