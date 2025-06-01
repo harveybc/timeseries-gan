@@ -724,21 +724,25 @@ class GANTrainerPlugin:
             idx = np.random.randint(0, x_train_data.shape[0], self.params["gan_batch_size"])
             real_data_batch_raw = x_train_data[idx] # (batch_size, seq_len, features_from_preprocessor)
             
-            # Slice to the features the discriminator will see (first N features from preprocessor output)
-            # These are assumed to be correctly ordered (base + TIs) by the unmodifiable preprocessor
             real_data_for_discriminator = real_data_batch_raw[:, :, :self.num_features_for_discriminator]
 
             # Generate a batch of new series using the FeederPlugin and Generator
-            # FeederPlugin provides latent_input, conditional_input, context_input
             feeder_output = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
-            latent_input_batch = feeder_output["latent_vectors"]
-            conditional_input_batch = feeder_output["conditional_vectors"]
-            context_input_batch = feeder_output["context_vectors"]
-
-            generator_inputs = [latent_input_batch, conditional_input_batch, context_input_batch]
             
-            # Generator produces base features
-            generated_base_features_raw = self.generator.predict(generator_inputs, verbose=0) # (batch, seq_len, num_base_features)
+            # Prepare inputs for the generator model in the correct order
+            # self.generator_actual_input_names_ordered is set in __init__ based on generator.inputs
+            generator_inputs = []
+            if not hasattr(self, 'generator_actual_input_names_ordered'):
+                self.logger.error("GANTrainerPlugin attribute 'generator_actual_input_names_ordered' not found. Was __init__ properly called?")
+                raise AttributeError("'generator_actual_input_names_ordered' not found.")
+
+            for input_name in self.generator_actual_input_names_ordered:
+                if input_name not in feeder_output:
+                    self.logger.error(f"KeyError: Feeder output missing expected key '{input_name}' for generator input. Available keys: {list(feeder_output.keys())}")
+                    raise KeyError(f"Feeder output missing expected key '{input_name}' for generator input.")
+                generator_inputs.append(feeder_output[input_name])
+            
+            generated_base_features_raw = self.generator.predict(generator_inputs, verbose=0)
 
             # Calculate TIs for generated data
             generated_features_with_tis = self._calculate_technical_indicators(generated_base_features_raw) # (batch, seq_len, num_features_for_discriminator)
@@ -762,16 +766,24 @@ class GANTrainerPlugin:
             # ---------------------
             #  Train Generator
             # ---------------------
-            # The GAN model (combined) trains the generator to fool the discriminator
             
-            # Generate new inputs for the generator for this training step
             feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
-            latent_input_batch_g = feeder_outputs_for_g["latent_vectors"]
-            conditional_input_batch_g = feeder_outputs_for_g["conditional_vectors"]
-            context_input_batch_g = feeder_outputs_for_g["context_vectors"]
             
-            gan_inputs = [latent_input_batch_g, conditional_input_batch_g, context_input_batch_g]
-            g_loss = self.gan.train_on_batch(gan_inputs, valid) # Generator tries to make discriminator output "valid"
+            # Prepare inputs for the GAN model (latent, conditional, context)
+            # These names are from config and used to build the GAN model's inputs
+            latent_input_name = self.params.get("generator_decoder_input_name_latent", "decoder_input_z_seq")
+            conditional_input_name = self.params.get("generator_decoder_input_name_conditions", "decoder_input_conditions")
+            context_input_name = self.params.get("generator_decoder_input_name_context", "decoder_input_h_context")
+
+            gan_feed_keys = [latent_input_name, conditional_input_name, context_input_name]
+            gan_inputs = []
+            for key_name in gan_feed_keys:
+                if key_name not in feeder_outputs_for_g:
+                    self.logger.error(f"KeyError: Feeder output for GAN training missing expected key '{key_name}'. Available keys: {list(feeder_outputs_for_g.keys())}")
+                    raise KeyError(f"Feeder output for GAN training missing expected key '{key_name}'.")
+                gan_inputs.append(feeder_outputs_for_g[key_name])
+            
+            g_loss = self.gan.train_on_batch(gan_inputs, valid)
 
             # Store losses
             d_losses_history.append(d_loss)
