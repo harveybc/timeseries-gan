@@ -359,6 +359,23 @@ class FeederPlugin:
     def add_debug_info(self, debug_info: Dict[str, Any]):
         debug_info.update(self.get_debug_info())
 
+    def get_conditional_dim(self) -> int:
+        """Returns the dimension of the conditional data vector."""
+        num_date_features = 0
+        if self.params.get("date_feature_names_for_conditioning"):
+            # Each date feature (day_of_month, hour_of_day, etc.) is expanded into sin and cos
+            num_date_features = len(self.params["date_feature_names_for_conditioning"]) * 2
+        
+        num_fundamental_features = 0
+        if self.params.get("fundamental_feature_names_for_conditioning"):
+            num_fundamental_features = len(self.params["fundamental_feature_names_for_conditioning"])
+            
+        return num_date_features + num_fundamental_features
+
+    def get_context_vector_dim(self) -> int:
+        """Returns the dimension of the context vector h."""
+        return self.params.get("context_vector_dim", 0) # Default to 0 if not set
+
     def _get_scaled_date_features(self, datetime_obj: pd.Timestamp) -> np.ndarray:
         """Generates scaled (sin/cos) date features for a given datetime."""
         date_features = []
