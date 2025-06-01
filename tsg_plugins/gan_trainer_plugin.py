@@ -624,125 +624,188 @@ class GANTrainerPlugin:
         self.logger.info("GANTrainerPlugin initialized with new path configurations.")
 
     def _initialize_core_parameters_from_config(self):
-        """Helper to initialize parameters needed before model building, typically also managed by set_params."""
-        self.gen_input_seq_len = self.params.get("seq_len", 18)
-        self.gen_input_latent_dim = self.params.get("latent_dim", 32)
-        
-        self.base_feature_names_ordered = self.params.get("base_feature_names_ordered", [])
-        self.num_base_features = len(self.base_feature_names_ordered)
-        
-        all_discriminator_features = self.params.get("feature_names_for_discriminator_ordered", [])
-        self.discriminator_feature_names = all_discriminator_features
-        
-        if all_discriminator_features and self.base_feature_names_ordered:
-            self.ti_names_to_calculate = [f for f in all_discriminator_features if f not in self.base_feature_names_ordered]
-        else:
-            self.ti_names_to_calculate = self.params.get("ti_names_to_calculate", []) # Fallback if derivation fails
-            if not self.ti_names_to_calculate: # If still empty, log warning
-                 self.logger.warning("_initialize_core_parameters_from_config: Could not derive ti_names_to_calculate and it's not directly in params. TI list is empty.")
+        """Initializes core GAN, Generator, and Discriminator parameters from the config.
+        This method focuses on deriving dimensions and input names based on the actual loaded Keras models 
+        where possible, falling back to config values if necessary.
+        """
+        self.logger.info("Initializing core GAN parameters from config and loaded models...")
 
-
-        self.num_tis = len(self.ti_names_to_calculate)
-        
-        # Ensure num_features_for_discriminator is based on the length of the full list
-        if self.discriminator_feature_names:
-            self.num_features_for_discriminator = len(self.discriminator_feature_names)
-        else: # Fallback if discriminator_feature_names is empty for some reason
-            self.num_features_for_discriminator = self.num_base_features + self.num_tis
-            if not self.discriminator_feature_names: # Log if it was empty
-                 self.logger.warning("_initialize_core_parameters_from_config: 'feature_names_for_discriminator_ordered' is empty. num_features_for_discriminator calculated as num_base + num_tis.")
-
-
-        self.seq_len = self.params.get("seq_len", 18) 
-
-        # Initialize TA Strategy for Discriminator TIs
-        self.tas_strategy_for_discriminator_tis = None # Initialize attribute
-        ti_definitions_for_strategy = []
-        
-        if self.ti_names_to_calculate:
-            processed_complex_indicators = set() # To handle indicators that produce multiple columns but need one strategy entry
-
-            for ti_full_name in self.ti_names_to_calculate:
-                parts = ti_full_name.split('_')
-                indicator_name_part = parts[0] 
-                current_definition = None
-
-                try:
-                    if indicator_name_part == "RSI" and len(parts) == 2:
-                        current_definition = {"kind": "rsi", "length": int(parts[1])}
-                    elif indicator_name_part == "EMA" and len(parts) == 2:
-                        current_definition = {"kind": "ema", "length": int(parts[1])}
-                    elif indicator_name_part in ["MACD", "MACDh", "MACDs"] and len(parts) == 4:
-                        if "macd" not in processed_complex_indicators:
-                            current_definition = {"kind": "macd", "fast": int(parts[1]), "slow": int(parts[2]), "signal": int(parts[3])}
-                            processed_complex_indicators.add("macd")
-                    elif indicator_name_part in ["STOCHk", "STOCHd"] and len(parts) == 4: # e.g., STOCHk_14_3_3
-                        if "stoch" not in processed_complex_indicators:
-                            current_definition = {"kind": "stoch", "k": int(parts[1]), "d": int(parts[2]), "smooth_k": int(parts[3])}
-                            processed_complex_indicators.add("stoch")
-                    elif indicator_name_part in ["ADX", "DMP", "DMN"] and len(parts) == 2: # e.g., ADX_14
-                        if "adx" not in processed_complex_indicators:
-                            current_definition = {"kind": "adx", "length": int(parts[1])}
-                            processed_complex_indicators.add("adx")
-                    elif indicator_name_part == "ATRr" and len(parts) == 2: # e.g., ATRr_14
-                        current_definition = {"kind": "atr", "length": int(parts[1])} # Corrected "atrr" to "atr"
-                    elif indicator_name_part == "CCI" and len(parts) >= 2: # e.g., CCI_14 or CCI_14_0.015
-                        params_cci = {"length": int(parts[1])}
-                        if len(parts) == 3: params_cci["constant"] = float(parts[2])
-                        current_definition = {"kind": "cci", **params_cci}
-                    elif indicator_name_part == "WILLR" and len(parts) == 2:
-                        current_definition = {"kind": "willr", "length": int(parts[1])}
-                    elif indicator_name_part == "MOM" and len(parts) == 2:
-                        current_definition = {"kind": "mom", "length": int(parts[1])}
-                    elif indicator_name_part == "ROC" and len(parts) == 2:
-                        current_definition = {"kind": "roc", "length": int(parts[1])}
-                    elif indicator_name_part.startswith("BB") and len(parts) == 3: # e.g., BBL_20_2.0
-                        if "bbands" not in processed_complex_indicators:
-                            current_definition = {"kind": "bbands", "length": int(parts[1]), "std": float(parts[2])}
-                            processed_complex_indicators.add("bbands")
-                    else:
-                        self.logger.warning(f"GANTrainerPlugin (_initialize_core_parameters_from_config): TI name '{ti_full_name}' not parsed into a TA strategy definition.")
-                except ValueError as e:
-                    self.logger.error(f"GANTrainerPlugin (_initialize_core_parameters_from_config): Error parsing TI name '{ti_full_name}': {e}")
-                    continue # Skip this TI if parsing fails
-
-                if current_definition:
-                    # Avoid adding duplicate definitions if already processed (e.g. MACD vs MACDh)
-                    is_present = any(d == current_definition for d in ti_definitions_for_strategy)
-                    if not is_present:
-                        ti_definitions_for_strategy.append(current_definition)
-            
-            if ti_definitions_for_strategy:
-                try:
-                    self.tas_strategy_for_discriminator_tis = ta.Strategy(
-                        name="Discriminator TIs Strategy",
-                        description="Auto-generated TA strategy for discriminator features based on ti_names_to_calculate.",
-                        ta=ti_definitions_for_strategy
-                    )
-                    self.logger.info(f"GANTrainerPlugin (_initialize_core_parameters_from_config): pandas_ta.Strategy for discriminator TIs created with {len(ti_definitions_for_strategy)} definitions:")
-                    for ti_def in ti_definitions_for_strategy:
-                        self.logger.info(f"  - {ti_def}")
-                except Exception as e:
-                    self.logger.error(f"GANTrainerPlugin (_initialize_core_parameters_from_config): Failed to create pandas_ta.Strategy: {e}")
-                    self.tas_strategy_for_discriminator_tis = None # Ensure it's None on failure
+        # --- Generator Output Parameters (used by Discriminator and GAN construction) ---
+        # Actual sequence length produced by the generator model (output shape[1])
+        if self.generator and self.generator.outputs:
+            # Assuming the primary output for sequence length determination is the first one
+            # For a typical timeseries generator, output shape is (batch, seq_len, features)
+            generator_output_shape = self.generator.outputs[0].shape
+            if len(generator_output_shape) == 3:
+                self.generator_output_actual_seq_len = generator_output_shape[1]
+                self.generator_output_actual_features = generator_output_shape[2]
+                self.logger.info(f"Derived from Generator model output: generator_output_actual_seq_len = {self.generator_output_actual_seq_len}, generator_output_actual_features = {self.generator_output_actual_features}")
             else:
-                self.logger.warning("GANTrainerPlugin (_initialize_core_parameters_from_config): No valid TI definitions derived for TA Strategy. self.tas_strategy_for_discriminator_tis will be None.")
+                self.logger.warning(f"Generator model output shape {generator_output_shape} is not 3D. Cannot automatically derive seq_len and features for GAN. Falling back to config.")
+                self.generator_output_actual_seq_len = self.params.get('gan_generator_output_actual_seq_len', self.params.get('seq_len'))
+                self.generator_output_actual_features = self.params.get('gan_generator_output_actual_features', self.params.get('feature_dim'))
+                self.logger.info(f"Using config/fallback for Generator output: generator_output_actual_seq_len = {self.generator_output_actual_seq_len}, generator_output_actual_features = {self.generator_output_actual_features}")
         else:
-            self.logger.info("GANTrainerPlugin (_initialize_core_parameters_from_config): self.ti_names_to_calculate is empty. No TA Strategy for discriminator TIs will be created.")
-            self.tas_strategy_for_discriminator_tis = None # Ensure it's None if no TIs to calculate
+            self.logger.warning("Generator model or its outputs are not defined. Falling back to config for generator output dimensions.")
+            self.generator_output_actual_seq_len = self.params.get('gan_generator_output_actual_seq_len', self.params.get('seq_len'))
+            self.generator_output_actual_features = self.params.get('gan_generator_output_actual_features', self.params.get('feature_dim'))
+            self.logger.info(f"Using config/fallback for Generator output: generator_output_actual_seq_len = {self.generator_output_actual_seq_len}, generator_output_actual_features = {self.generator_output_actual_features}")
 
-        self.generator_output_actual_seq_len = self.params.get("gan_generator_output_actual_seq_len", self.seq_len)
+        if not self.generator_output_actual_seq_len or not self.generator_output_actual_features:
+            self.logger.error("Critical: Could not determine generator_output_actual_seq_len or generator_output_actual_features. Check generator model and config.")
+            raise ValueError("Generator output sequence length or features could not be determined.")
 
-        self.logger.info(
-            f"GANTrainerPlugin (_initialize_core_parameters): "
-            f"gen_input_seq_len={self.gen_input_seq_len}, gen_input_latent_dim={self.gen_input_latent_dim}, "
-            f"num_base_features={self.num_base_features}, num_tis={self.num_tis}, "
-            f"num_features_for_discriminator={self.num_features_for_discriminator}, "
-            f"seq_len (for D and TI)={self.seq_len}, "
-            f"generator_output_actual_seq_len={self.generator_output_actual_seq_len}"
-        )
-        if self.num_base_features == 0:
-            self.logger.warning("_initialize_core_parameters_from_config: num_base_features is 0. This might be problematic for the TI layer and GAN structure.")
+        # --- Generator Input Parameters (used by GAN construction for its inputs) ---
+        # These define the shapes of the inputs that the GAN model will pass to the generator internally.
+        self.generator_actual_input_names_ordered = []
+        self.gen_input_seq_len = None # For latent vector if it's sequential
+        self.gen_input_latent_dim = None
+        self.conditional_dim_for_generator = None
+        self.context_dim_for_generator = None
+
+        # Feeder key names for different generator inputs
+        self.feeder_key_name_latent = self.params.get("generator_decoder_input_name_latent", "latent_vector")
+        self.feeder_key_name_conditional = self.params.get("generator_decoder_input_name_conditions", "conditional_data")
+        self.feeder_key_name_context = self.params.get("generator_decoder_input_name_context", "context_vector")
+        self.logger.info(f"Feeder key names for generator inputs: Latent='{self.feeder_key_name_latent}', Conditional='{self.feeder_key_name_conditional}', Context='{self.feeder_key_name_context}'.")
+
+        if self.generator and self.generator.inputs:
+            self.logger.info(f"Deriving GAN input dimensions from {len(self.generator.inputs)} generator input layers.")
+            # Attempt to map known feeder key names to the generator's input layers by their Keras names
+            # This assumes Keras input layers were named according to these feeder keys or a convention.
+            # Example Keras input layer names: "input_latent_vector", "input_conditional_data", "input_context_vector"
+            # Or, if not named, rely on the order and config params for dimensions.
+
+            # Store the Keras names of the generator inputs for matching and ordering
+            # self.generator_actual_input_names_ordered will be populated based on the order of self.generator.inputs
+            # and will store the Keras name of each input layer.
+            # This list is then used in the train() method to prepare inputs for generator.predict() in the correct order.
+
+            # Default to config values, then try to override with model-derived values.
+            self.gen_input_latent_dim = self.params.get('latent_dim')
+            self.gen_input_seq_len = self.params.get('seq_len') # Often, latent vector might share seq_len if it's a sequence
+            self.conditional_dim_for_generator = self.params.get('conditional_dim')
+            self.context_dim_for_generator = self.params.get('context_dim')
+            self.logger.info(f"Initial GAN input dims from config: latent_dim={self.gen_input_latent_dim} (seq_len for latent={self.gen_input_seq_len}), conditional_dim={self.conditional_dim_for_generator}, context_dim={self.context_dim_for_generator}")
+
+            # This list will store the Keras names of the generator inputs in their defined order.
+            # It is CRUCIAL for preparing inputs for generator.predict() in the train loop.
+            self.generator_actual_input_names_ordered = [inp.name for inp in self.generator.inputs]
+            self.logger.info(f"Generator Keras input layer names (in order): {self.generator_actual_input_names_ordered}")
+
+            # Now, try to associate these Keras inputs with their roles (latent, conditional, context)
+            # to set the dimensions for _build_gan. We use the feeder_key_names for this association.
+            # The _build_gan method will then create GAN inputs named based on these roles (e.g., 'gan_input_latent').
+
+            found_latent = False
+            found_conditional = False
+            found_context = False
+
+            for i, keras_input_tensor in enumerate(self.generator.inputs):
+                input_name_from_keras = keras_input_tensor.name # e.g., "input_1" or "latent_input_layer"
+                input_shape_from_keras = keras_input_tensor.shape # e.g. TensorShape([None, 100]) or TensorShape([None, 10, 1])
+                self.logger.info(f"Processing generator input {i}: Keras name '{input_name_from_keras}', Keras shape {input_shape_from_keras}")
+
+                # Try to match based on configured feeder key names (which should ideally match Keras layer names)
+                # This is a heuristic. If Keras names are generic (e.g. "input_1"), this won't work well for role association.
+                # However, self.generator_actual_input_names_ordered will still be correct for generator.predict().
+
+                # Check for Latent Vector
+                # The feeder_key_name_latent (e.g., "latent_vector") is what the FeederPlugin provides.
+                # The Keras input layer might be named "input_latent_vector", "latent_input", or just self.feeder_key_name_latent.
+                if self.feeder_key_name_latent and (self.feeder_key_name_latent in input_name_from_keras.lower() or f"input_{self.feeder_key_name_latent}" in input_name_from_keras.lower()):
+                    self.logger.info(f"  Input '{input_name_from_keras}' matched as LATENT based on feeder key '{self.feeder_key_name_latent}'.")
+                    if len(input_shape_from_keras) == 2: # (batch, features)
+                        self.gen_input_latent_dim = input_shape_from_keras[1]
+                        self.gen_input_seq_len = None # Latent vector is not sequential
+                        self.logger.info(f"    Set for GAN (from Gen): gen_input_latent_dim = {self.gen_input_latent_dim}, gen_input_seq_len = None (2D)")
+                    elif len(input_shape_from_keras) == 3: # (batch, seq_len, features)
+                        self.gen_input_seq_len = input_shape_from_keras[1]
+                        self.gen_input_latent_dim = input_shape_from_keras[2]
+                        self.logger.info(f"    Set for GAN (from Gen): gen_input_latent_dim = {self.gen_input_latent_dim}, gen_input_seq_len = {self.gen_input_seq_len} (3D)")
+                    else:
+                        self.logger.warning(f"  Latent input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras}. Using config value for latent_dim.")
+                    found_latent = True
+                
+                # Check for Conditional Data
+                elif self.feeder_key_name_conditional and (self.feeder_key_name_conditional in input_name_from_keras.lower() or f"input_{self.feeder_key_name_conditional}" in input_name_from_keras.lower()):
+                    self.logger.info(f"  Input '{input_name_from_keras}' matched as CONDITIONAL based on feeder key '{self.feeder_key_name_conditional}'.")
+                    if len(input_shape_from_keras) == 2 and input_shape_from_keras[1] is not None:
+                        self.conditional_dim_for_generator = input_shape_from_keras[1]
+                        self.logger.info(f"    Set for GAN (from Gen): conditional_dim_for_generator = {self.conditional_dim_for_generator} (2D)")
+                    # Add handling for 3D conditional data if necessary, e.g. if it has a sequence length
+                    # elif len(input_shape_from_keras) == 3 and input_shape_from_keras[1] is not None and input_shape_from_keras[2] is not None:
+                    #     self.conditional_seq_len_for_generator = input_shape_from_keras[1]
+                    #     self.conditional_dim_for_generator = input_shape_from_keras[2]
+                    #     self.logger.info(f"    Set for GAN (from Gen): conditional_dim_for_generator = {self.conditional_dim_for_generator}, conditional_seq_len = {self.conditional_seq_len_for_generator} (3D)")
+                    else:
+                        self.logger.warning(f"  Conditional input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras} or undefined feature dim. Using config/default for conditional_dim.")
+                    found_conditional = True
+
+                # Check for Context Vector
+                elif self.feeder_key_name_context and (self.feeder_key_name_context in input_name_from_keras.lower() or f"input_{self.feeder_key_name_context}" in input_name_from_keras.lower()):
+                    self.logger.info(f"  Input '{input_name_from_keras}' matched as CONTEXT based on feeder key '{self.feeder_key_name_context}'.")
+                    if len(input_shape_from_keras) == 2 and input_shape_from_keras[1] is not None:
+                        self.context_dim_for_generator = input_shape_from_keras[1]
+                        self.logger.info(f"    Set for GAN (from Gen): context_dim_for_generator = {self.context_dim_for_generator} (2D)")
+                    # Add handling for 3D context data if necessary
+                    else:
+                        self.logger.warning(f"  Context input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras} or undefined feature dim. Using config/default for context_dim.")
+                    found_context = True
+            
+            # Fallback if roles couldn't be matched by name (e.g., generic Keras input names like "input_1")
+            # This part is tricky and relies on assumptions about the order of inputs if names are not descriptive.
+            # The current strategy is: if not found by name, stick to config values. 
+            # A more robust fallback might try to infer based on typical dimensionalities if there's a standard order.
+            if not found_latent:
+                self.logger.warning(f"Could not identify LATENT input layer for generator by name matching feeder key '{self.feeder_key_name_latent}'. Will rely on config value for 'latent_dim' ({self.gen_input_latent_dim}) for GAN construction.")
+            if not found_conditional:
+                self.logger.warning(f"Could not identify CONDITIONAL input layer for generator by name matching feeder key '{self.feeder_key_name_conditional}'. Will rely on config value for 'conditional_dim' ({self.conditional_dim_for_generator}) for GAN construction.")
+            if not found_context:
+                self.logger.warning(f"Could not identify CONTEXT input layer for generator by name matching feeder key '{self.feeder_key_name_context}'. Will rely on config value for 'context_dim' ({self.context_dim_for_generator}) for GAN construction.")
+
+            # Ensure essential dimensions are set for GAN building
+            if self.gen_input_latent_dim is None:
+                self.logger.error(f"Critical: gen_input_latent_dim is None after attempting to derive from model and config. This is required for GAN input. Check generator model input for latent vector and 'latent_dim' in config.")
+                raise ValueError("Generator latent input dimension (gen_input_latent_dim) could not be determined.")
+            # conditional_dim_for_generator and context_dim_for_generator can be None if not used by the GAN, _build_gan should handle this.
+            if self.conditional_dim_for_generator is None:
+                self.logger.info("conditional_dim_for_generator is None. GAN will be built without a dedicated conditional input if this was not derived from model or set in config.")
+            if self.context_dim_for_generator is None:
+                self.logger.info("context_dim_for_generator is None. GAN will be built without a dedicated context input if this was not derived from model or set in config.")
+
+        else: # No generator model or no inputs in generator model
+            self.logger.warning("Generator model or its inputs are not defined. GAN input dimensions will be based purely on config values.")
+            self.gen_input_latent_dim = self.params.get('latent_dim')
+            self.gen_input_seq_len = self.params.get('seq_len') # Or specific latent_seq_len if different
+            self.conditional_dim_for_generator = self.params.get('conditional_dim')
+            self.context_dim_for_generator = self.params.get('context_dim')
+            self.generator_actual_input_names_ordered = [] # No generator inputs to list
+            # Try to populate generator_actual_input_names_ordered from config if generator is missing but GAN structure is known
+            # This is a fallback for cases where generator might be loaded later or is implicit.
+            if self.feeder_key_name_latent: self.generator_actual_input_names_ordered.append(self.feeder_key_name_latent)
+            if self.feeder_key_name_conditional: self.generator_actual_input_names_ordered.append(self.feeder_key_name_conditional)
+            if self.feeder_key_name_context: self.generator_actual_input_names_ordered.append(self.feeder_key_name_context)
+            self.logger.info(f"Using config for GAN input dims: latent_dim={self.gen_input_latent_dim} (seq_len for latent={self.gen_input_seq_len}), conditional_dim={self.conditional_dim_for_generator}, context_dim={self.context_dim_for_generator}")
+            self.logger.info(f"Generator input names (from config keys as fallback): {self.generator_actual_input_names_ordered}")
+
+        if not self.generator_actual_input_names_ordered and self.generator and self.generator.inputs:
+            self.logger.error("Critical: self.generator_actual_input_names_ordered is empty even though generator has inputs. This should not happen.")
+            # This implies an issue with the logic above that populates it from self.generator.inputs
+
+        # --- Discriminator Input Parameters ---
+        # The discriminator input shape is determined by generator_output_actual_seq_len and num_tis
+        self.discriminator_input_seq_len = self.generator_output_actual_seq_len
+        self.num_features_for_discriminator = self.params.get('num_features_for_discriminator', 1) # Base features (e.g. 'close')
+        self.num_tis = self.params.get('num_tis', 20) # Number of TI features
+        # Total features for discriminator = base features + TI features
+        self.discriminator_input_feature_dim = self.num_features_for_discriminator + self.num_tis
+        self.logger.info(f"Discriminator input parameters: seq_len={self.discriminator_input_seq_len}, feature_dim (base+TIs)={self.discriminator_input_feature_dim} (base={self.num_features_for_discriminator}, TIs={self.num_tis})")
+
+        # Initialize feature names for discriminator (can be overridden by TI calculation)
+        self.discriminator_feature_names = [f'feature_{i}' for i in range(self.discriminator_input_feature_dim)]
+
+        self.logger.info("Core parameter initialization complete.")
 
     def set_params(self, **params: Any) -> None:
         self.logger.info(f"GANTrainerPlugin updating parameters with keys: {list(params.keys())}")
@@ -1028,8 +1091,7 @@ class GANTrainerPlugin:
             feeder_output_d = self.feeder_plugin_instance.generate(n_ticks_to_generate=current_batch_size) # Renamed from feeder_output
             
             # Prepare inputs for the generator model (used for predicting base features)
-            # This list of inputs will also be used for the GAN model training step later.
-            generator_inputs_for_prediction_and_gan_step = [] 
+            inputs_for_generator_predict = [] # RENAMED from generator_inputs_for_prediction_and_gan_step
             if self.generator and hasattr(self, 'generator_actual_input_names_ordered') and self.generator_actual_input_names_ordered:
                 for i, name in enumerate(self.generator_actual_input_names_ordered):
                     if name not in feeder_output_d:
@@ -1050,84 +1112,35 @@ class GANTrainerPlugin:
                             self.logger.error(f"Failed to convert input '{name}' to numpy array: {e_conv}")
                             raise TypeError(f"Input '{name}' from feeder could not be converted to a numpy array.")
 
-                    self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Feeder data shape: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}")
+                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Feeder data shape: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}")
 
                     expected_input_config = self.generator.inputs[i] # This is a KerasTensor
-                    expected_input_shape_from_generator = expected_input_config.shape # e.g., TensorShape([None, 10]) or TensorShape([None, 18, 1])
-                    self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Generator model expects input shape: {expected_input_shape_from_generator}")
-
-                    # Adjust shape if needed (primarily for 2D inputs like latent_vector, conditional_data, context_vector)
-                    if len(expected_input_shape_from_generator) == 2 and expected_input_shape_from_generator[1] is not None:
-                        expected_features = expected_input_shape_from_generator[1]
-                        self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Detected 2D input. Expected features from generator model: {expected_features}")
-                        
-                        actual_feeder_features = data_from_feeder.shape[1] if data_from_feeder.ndim == 2 else -1 # Get actual features if 2D
-                        self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Actual features from feeder: {actual_feeder_features} (ndim: {data_from_feeder.ndim})")
-
-                        if data_from_feeder.ndim == 2 and actual_feeder_features != expected_features:
-                            self.logger.warning(
-                                f"GAN/Generator input '{name}' (index {i}): Mismatch between feeder output features ({actual_feeder_features}) "
-                                f"and generator's expected features ({expected_features}) for this input. "
-                                f"Slicing feeder output to the first {expected_features} features."
-                            )
-                            data_from_feeder = data_from_feeder[:, :expected_features]
-                            self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Sliced. New feeder data shape: {data_from_feeder.shape}")
-                        elif data_from_feeder.ndim == 2 and actual_feeder_features == expected_features:
-                            self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Feeder features ({actual_feeder_features}) MATCH generator expected features ({expected_features}). No slicing needed.")
-                        elif data_from_feeder.ndim != 2:
-                            self.logger.error(
-                                f"GAN/Generator input '{name}' (index {i}): Expected 2D array from feeder but got {data_from_feeder.ndim}D. "
-                                f"Feeder shape: {data_from_feeder.shape}, Generator expects: {expected_input_shape_from_generator}. This is a critical mismatch."
-                            )
-                            raise ValueError(f"Shape mismatch for GAN/Generator input '{name}'. Expected 2D, got {data_from_feeder.ndim}D.")
-                    elif len(expected_input_shape_from_generator) == 3 and expected_input_shape_from_generator[1] is not None and expected_input_shape_from_generator[2] is not None:
-                        expected_seq_len = expected_input_shape_from_generator[1]
-                        expected_features = expected_input_shape_from_generator[2]
-                        self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Detected 3D input. Expected seq_len: {expected_seq_len}, Expected features: {expected_features}")
-                        
-                        actual_feeder_seq_len = data_from_feeder.shape[1] if data_from_feeder.ndim == 3 else -1
-                        actual_feeder_features = data_from_feeder.shape[2] if data_from_feeder.ndim == 3 else -1
-                        self.logger.info(f"GAN/Gen Input Prep (Loop {i}, Name: '{name}'): Actual feeder seq_len: {actual_feeder_seq_len}, Actual feeder features: {actual_feeder_features} (ndim: {data_from_feeder.ndim})")
-
-                        if data_from_feeder.ndim == 3:
-                            if actual_feeder_seq_len != expected_seq_len:
-                                self.logger.warning(
-                                    f"GAN/Generator input '{name}' (index {i}): Mismatch in sequence length. Feeder: {data_from_feeder.shape[1]}, Expected: {expected_seq_len}. Slicing/padding may be needed if critical."
-                                )
-                                # Add slicing/padding for seq_len if necessary, e.g. data_from_feeder = data_from_feeder[:, :expected_seq_len, :]
-                            if actual_feeder_features != expected_features:
-                                self.logger.warning(
-                                    f"GAN/Generator input '{name}' (index {i}): Mismatch in features for sequence. Feeder: {data_from_feeder.shape[2]}, Expected: {expected_features}. Slicing."
-                                )
-                                data_from_feeder = data_from_feeder[:, :, :expected_features]
-                        elif data_from_feeder.ndim != 3:
-                             self.logger.error(
-                                f"GAN/Generator input '{name}' (index {i}): Expected 3D array from feeder but got {data_from_feeder.ndim}D. "
-                                f"Feeder shape: {data_from_feeder.shape}, Generator expects: {expected_input_shape_from_generator}. This is a critical mismatch."
-                            )
-                             raise ValueError(f"Shape mismatch for GAN/Generator input '{name}'. Expected 3D, got {data_from_feeder.ndim}D.")
-                    
-                    generator_inputs_for_prediction_and_gan_step.append(data_from_feeder)
-                
-                if not generator_inputs_for_prediction_and_gan_step and self.generator.inputs: # Check if list is empty
-                    self.logger.error(
-                        f"GAN training: Generator input list is empty after processing feeder_output_d (keys: {list(feeder_output_d.keys())}), "
-                        f"but generator expects inputs: {self.generator_actual_input_names_ordered}."
-                    )
-                    raise ValueError("Failed to prepare inputs for generator prediction: Resulting input list is empty.")
-
-            elif not self.generator:
+                    expected_input_shape_from_generator = expected_input_config.shape # e.g., TensorShape([None,  10]) or TensorShape([None, 18, 1])
                  self.logger.error("GAN training: Generator model is None. Cannot make predictions or train GAN.")
                  raise ValueError("Generator model is None, cannot proceed.")
             else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
                  self.logger.error(
-                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine GAN inputs. "
+                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine Generator inputs. "
                      f"Generator defined inputs: {[inp.name for inp in self.generator.inputs] if self.generator and self.generator.inputs else 'N/A'}."
                  )
-                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for GAN training.")
+                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for Generator input preparation.")
 
-            generated_base_features_raw = self.generator.predict(generator_inputs_for_prediction_and_gan_step, verbose=0)
+            generated_base_features_raw = self.generator.predict(inputs_for_generator_predict, verbose=0)
             self.logger.info(f"GANTrainerPlugin (train): Raw generator output shape after predict(): {generated_base_features_raw.shape if generated_base_features_raw is not None else 'None'}") # DIAGNOSTIC LOG
+            
+            if generated_base_features_raw is not None and generated_base_features_raw.ndim == 3:
+                actual_gen_seq_len = generated_base_features_raw.shape[1]
+                min_required_seq_len_for_ti = self.params.get('ti_calculation_min_lookback', 15) 
+                if actual_gen_seq_len < min_required_seq_len_for_ti:
+                    self.logger.warning(
+                        f"Generated data has sequence length {actual_gen_seq_len}, which is less than the typical minimum "
+                        f"({min_required_seq_len_for_ti}) required for some technical indicators (e.g., MACD, longer EMAs). "
+                        f"This may lead to errors or NaN/zero TIs for generated data. "
+                        f"Consider: \n1. Verifying the generator model's architecture to ensure it produces longer sequences. "
+                        f"\n2. Checking if 'gan_generator_output_actual_seq_len' parameter (currently {self.generator_output_actual_seq_len if hasattr(self, 'generator_output_actual_seq_len') else 'N/A'}) "
+                        f"is influencing the effective output sequence length processed by the GAN."
+                        f"\n3. Adjusting TI parameters in 'tas_strategy_for_discriminator_tis' to require shorter lookbacks if appropriate."
+                    )
 
             # Ensure generated_base_features_raw is 3D before TI calculation
             if generated_base_features_raw.ndim == 2:
@@ -1156,16 +1169,143 @@ class GANTrainerPlugin:
             # Freeze discriminator when training generator
             if self.discriminator: self.discriminator.trainable = False
 
-            # Train the generator (via the GAN model)
-            # Use the same prepared inputs: generator_inputs_for_prediction_and_gan_step
-            if not generator_inputs_for_prediction_and_gan_step:
-                self.logger.error(
-                    "GAN training: The list of inputs for the GAN model (derived from generator_inputs_for_prediction_and_gan_step) is empty. "
-                    "This should have been caught earlier. Cannot proceed."
-                )
-                raise ValueError("GAN model inputs list is empty before train_on_batch. Cannot proceed.")
+            # Prepare inputs specifically for the GAN model's train_on_batch call
+            inputs_for_gan_train_on_batch = []
+            
+            feeder_key_for_latent = self.params.get("generator_decoder_input_name_latent")
+            feeder_key_for_conditional = self.params.get("generator_decoder_input_name_conditions")
+            feeder_key_for_context = self.params.get("generator_decoder_input_name_context")
 
-            g_loss_metrics = self.gan.train_on_batch(generator_inputs_for_prediction_and_gan_step, valid_labels, return_dict=True)
+            # Order of GAN inputs is defined in _build_gan: latent, conditional, context.
+            # self.gan.inputs[0] -> latent
+            # self.gan.inputs[1] -> conditional
+            # self.gan.inputs[2] -> context
+            # This list maps the GAN input index to its corresponding feeder key and role name.
+            # It assumes self.gan always has 3 inputs in this order.
+            # If _build_gan changes to have optional/different inputs, this mapping needs to be more dynamic.
+            gan_input_definitions_ordered = []
+            if len(self.gan.inputs) > 0: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_latent, "role": "Latent Vector", "gan_input_idx": 0})
+            if len(self.gan.inputs) > 1: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_conditional, "role": "Conditional Data", "gan_input_idx": 1})
+            if len(self.gan.inputs) > 2: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_context, "role": "Context Vector", "gan_input_idx": 2})
+
+            if len(self.gan.inputs) != len(gan_input_definitions_ordered):
+                self.logger.error(
+                    f"GAN Input Preparation: Mismatch between number of GAN model inputs ({len(self.gan.inputs)}) "
+                    f"and the number of GAN input definitions prepared ({len(gan_input_definitions_ordered)}). "
+                    f"GAN Input Names from model: {[inp.name for inp in self.gan.inputs]}. "
+                    f"This indicates a potential inconsistency with how _build_gan structures GAN inputs."
+                )
+                # This is a critical state, as we cannot reliably map feeder data to GAN inputs.
+                raise ValueError("GAN input structure mismatch. Cannot prepare inputs for GAN training.")
+
+            for i in range(len(self.gan.inputs)):
+                current_input_def = gan_input_definitions_ordered[i]
+                feeder_key_name = current_input_def["feeder_key"]
+                gan_input_keras_tensor = self.gan.inputs[i] # KerasTensor for the i-th input of GAN model
+
+                if not feeder_key_name:
+                    self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Feeder key name for GAN input role '{current_input_def['role']}' (GAN input index {i}, Keras name '{gan_input_keras_tensor.name}') is not configured (None/empty in params). This input is required by the GAN model.")
+                    raise ValueError(f"Feeder key for GAN input role '{current_input_def['role']}' is not configured. Check 'generator_decoder_input_name_...' params. GAN expects this input.")
+
+                if feeder_key_name not in feeder_output_d:
+                    self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Feeder key '{feeder_key_name}' for GAN input '{gan_input_keras_tensor.name}' (role: {current_input_def['role']}) not found in feeder_output_d. Available keys: {list(feeder_output_d.keys())}")
+                    raise KeyError(f"Missing '{feeder_key_name}' in feeder output for GAN input '{gan_input_keras_tensor.name}'.")
+                
+                data_for_gan_input = feeder_output_d[feeder_key_name]
+                
+                if not isinstance(data_for_gan_input, np.ndarray):
+                    self.logger.warning(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, Feeder Key: '{feeder_key_name}'): Data is not a numpy array (type: {type(data_for_gan_input)}). Attempting to convert.")
+                    try:
+                        data_for_gan_input = np.array(data_for_gan_input)
+                    except Exception as e_conv:
+                        self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Failed to convert input for role '{current_input_def['role']}' (feeder key '{feeder_key_name}') to numpy array: {e_conv}")
+                        raise TypeError(f"Input for GAN role '{current_input_def['role']}' from feeder could not be converted to a numpy array.")
+
+                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}', Feeder Key: '{feeder_key_name}'): Original feeder data shape: {data_for_gan_input.shape if hasattr(data_for_gan_input, 'shape') else 'N/A'}")
+
+                expected_gan_input_shape = gan_input_keras_tensor.shape 
+                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): GAN model expects input shape: {expected_gan_input_shape}")
+
+                # Slicing logic for this specific GAN input
+                if len(expected_gan_input_shape) == 2 and expected_gan_input_shape[1] is not None: # e.g. conditional_data (None, 10)
+                    expected_features = expected_gan_input_shape[1]
+                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Detected 2D GAN input. Expected features: {expected_features}")
+                    
+                    actual_feeder_features = data_for_gan_input.shape[1] if data_for_gan_input.ndim == 2 else -1
+                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Actual features from feeder: {actual_feeder_features} (ndim: {data_for_gan_input.ndim})")
+
+                    if data_for_gan_input.ndim == 2 and actual_feeder_features != expected_features:
+                        self.logger.warning(
+                            f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch between feeder output features ({actual_feeder_features}) "
+                            f"and GAN's expected features ({expected_features}). Slicing feeder output to the first {expected_features} features."
+                        )
+                        data_for_gan_input = data_for_gan_input[:, :expected_features]
+                        self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced. New data shape for GAN: {data_for_gan_input.shape}")
+                    elif data_for_gan_input.ndim == 2 and actual_feeder_features == expected_features:
+                        self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Feeder features ({actual_feeder_features}) MATCH GAN expected features ({expected_features}). No slicing needed.")
+                    elif data_for_gan_input.ndim != 2:
+                        self.logger.error(
+                            f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Expected 2D array from feeder but got {data_for_gan_input.ndim}D. "
+                            f"Feeder shape: {data_for_gan_input.shape}, GAN expects: {expected_gan_input_shape}. This is a critical mismatch."
+                        )
+                        raise ValueError(f"Shape mismatch for GAN input '{gan_input_keras_tensor.name}'. Expected 2D, got {data_for_gan_input.ndim}D.")
+                
+                elif len(expected_gan_input_shape) == 3 and expected_gan_input_shape[1] is not None and expected_gan_input_shape[2] is not None: # e.g. latent_vector (None, seq, dim)
+                    expected_seq_len = expected_gan_input_shape[1]
+                    expected_features = expected_gan_input_shape[2]
+                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Detected 3D GAN input. Expected seq_len: {expected_seq_len}, Expected features: {expected_features}")
+
+                    actual_feeder_seq_len = data_for_gan_input.shape[1] if data_for_gan_input.ndim == 3 else -1
+                    actual_feeder_features = data_for_gan_input.shape[2] if data_for_gan_input.ndim == 3 else -1
+                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Actual feeder seq_len: {actual_feeder_seq_len}, Actual feeder features: {actual_feeder_features} (ndim: {data_for_gan_input.ndim})")
+
+                    if data_for_gan_input.ndim == 3:
+                        # Slicing for sequence length
+                        if actual_feeder_seq_len != expected_seq_len:
+                            self.logger.warning(
+                                f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch in sequence length. Feeder: {actual_feeder_seq_len}, GAN Expected: {expected_seq_len}. Slicing data to {expected_seq_len}."
+                            )
+                            data_for_gan_input = data_for_gan_input[:, :expected_seq_len, :]
+                            self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced seq_len. New data shape for GAN: {data_for_gan_input.shape}")
+                            actual_feeder_seq_len = data_for_gan_input.shape[1] # Update after slicing for feature check
+
+                        # Slicing for features
+                        if actual_feeder_features != expected_features: # Check features after potential seq_len slice
+                             # If actual_feeder_features was based on original data, re-evaluate if seq_len slice happened
+                            current_features_dim = data_for_gan_input.shape[2]
+                            if current_features_dim != expected_features:
+                                self.logger.warning(
+                                    f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch in features for sequence. Feeder (possibly after seq_len slice): {current_features_dim}, GAN Expected: {expected_features}. Slicing features."
+                                )
+                                data_for_gan_input = data_for_gan_input[:, :, :expected_features]
+                                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced features. New data shape for GAN: {data_for_gan_input.shape}")
+
+                    elif data_for_gan_input.ndim != 3:
+                        self.logger.error(
+                           f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Expected 3D array from feeder but got {data_for_gan_input.ndim}D. "
+                           f"Feeder shape: {data_for_gan_input.shape}, GAN expects: {expected_gan_input_shape}. This is a critical mismatch."
+                        )
+                        raise ValueError(f"Shape mismatch for GAN input '{gan_input_keras_tensor.name}'. Expected 3D, got {data_for_gan_input.ndim}D.")
+                else:
+                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): GAN input shape {expected_gan_input_shape} is not 2D or 3D with known feature/seq_len dims, or has dynamic components (None) that are not features/seq_len. Using data as-is from feeder. Current shape: {data_for_gan_input.shape}")
+
+                inputs_for_gan_train_on_batch.append(data_for_gan_input)
+            
+            if not inputs_for_gan_train_on_batch and self.gan.inputs:
+                self.logger.error(
+                    "GAN training: The list of inputs for the GAN model (inputs_for_gan_train_on_batch) is empty, "
+                    "but GAN model expects inputs. This should not happen if GAN has inputs."
+                )
+                raise ValueError("GAN model inputs list is empty before train_on_batch, but GAN model has inputs.")
+            elif len(inputs_for_gan_train_on_batch) != len(self.gan.inputs):
+                 self.logger.error(
+                    f"GAN training: Mismatch in number of prepared inputs ({len(inputs_for_gan_train_on_batch)}) vs "
+                    f"GAN model expected inputs ({len(self.gan.inputs)}). This is a critical error."
+                )
+                 raise ValueError("Mismatch in number of prepared inputs for GAN train_on_batch.")
+
+
+            g_loss_metrics = self.gan.train_on_batch(inputs_for_gan_train_on_batch, valid_labels, return_dict=True)
 
             # Log progress
             elapsed_time = time.time() - start_time_epoch
