@@ -487,6 +487,7 @@ class GANTrainerPlugin:
         self.gan_latent_input_keras_name_hint: Optional[str] = None
         self.gan_conditional_input_keras_name_hint: Optional[str] = None
         self.gan_context_input_keras_name_hint: Optional[str] = None
+        self.gan_window_input_keras_name_hint: Optional[str] = None # ADDED
         self.gan_feeder_input_keras_name_hints: Dict[str, str] = {} # Ensure initialized as a dictionary
 
         # Paths for saving results - these will be fully resolved in _initialize_core_parameters_from_config
@@ -1120,7 +1121,7 @@ class GANTrainerPlugin:
                 # This is a critical error if they don't match.
                 # For the GAN model graph, the output of G must match input of D (after TA layer if used).
                 # If no TA layer, G_output_sliced must match D_input.
-                # So, if use_tensorflow_ta_layer is False, then num_features_for_discriminator should be equal to num_base_features.
+                # So, if use_tensorflow_ta_layer is False, then this gan_model should have been built with num_features_for_discriminator equal to num_base_features.
                 # The _initialize_core_parameters_from_config should ensure this if TIs are empty.
                 # If TIs are *not* empty and use_tensorflow_ta_layer is False, then this GAN graph is not complete for end-to-end training.
                 # The train() method would need to handle TI calculation separately.
