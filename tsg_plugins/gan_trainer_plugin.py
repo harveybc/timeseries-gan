@@ -412,6 +412,82 @@ class GANTrainerPlugin:
         self.num_features_for_discriminator = self.num_base_features + self.num_tis
         self.seq_len = self.params.get("seq_len", 18) # Used for discriminator input and TI layer
 
+        # Initialize TA Strategy for Discriminator TIs
+        self.tas_strategy_for_discriminator_tis = None # Initialize attribute
+        ti_definitions_for_strategy = []
+        
+        if self.ti_names_to_calculate:
+            processed_complex_indicators = set() # To handle indicators that produce multiple columns but need one strategy entry
+
+            for ti_full_name in self.ti_names_to_calculate:
+                parts = ti_full_name.split('_')
+                indicator_name_part = parts[0] 
+                current_definition = None
+
+                try:
+                    if indicator_name_part == "RSI" and len(parts) == 2:
+                        current_definition = {"kind": "rsi", "length": int(parts[1])}
+                    elif indicator_name_part == "EMA" and len(parts) == 2:
+                        current_definition = {"kind": "ema", "length": int(parts[1])}
+                    elif indicator_name_part in ["MACD", "MACDh", "MACDs"] and len(parts) == 4:
+                        if "macd" not in processed_complex_indicators:
+                            current_definition = {"kind": "macd", "fast": int(parts[1]), "slow": int(parts[2]), "signal": int(parts[3])}
+                            processed_complex_indicators.add("macd")
+                    elif indicator_name_part in ["STOCHk", "STOCHd"] and len(parts) == 4: # e.g., STOCHk_14_3_3
+                        if "stoch" not in processed_complex_indicators:
+                            current_definition = {"kind": "stoch", "k": int(parts[1]), "d": int(parts[2]), "smooth_k": int(parts[3])}
+                            processed_complex_indicators.add("stoch")
+                    elif indicator_name_part in ["ADX", "DMP", "DMN"] and len(parts) == 2: # e.g., ADX_14
+                        if "adx" not in processed_complex_indicators:
+                            current_definition = {"kind": "adx", "length": int(parts[1])}
+                            processed_complex_indicators.add("adx")
+                    elif indicator_name_part == "ATRr" and len(parts) == 2: # e.g., ATRr_14
+                        current_definition = {"kind": "atrr", "length": int(parts[1])}
+                    elif indicator_name_part == "CCI" and len(parts) >= 2: # e.g., CCI_14 or CCI_14_0.015
+                        params_cci = {"length": int(parts[1])}
+                        if len(parts) == 3: params_cci["constant"] = float(parts[2])
+                        current_definition = {"kind": "cci", **params_cci}
+                    elif indicator_name_part == "WILLR" and len(parts) == 2:
+                        current_definition = {"kind": "willr", "length": int(parts[1])}
+                    elif indicator_name_part == "MOM" and len(parts) == 2:
+                        current_definition = {"kind": "mom", "length": int(parts[1])}
+                    elif indicator_name_part == "ROC" and len(parts) == 2:
+                        current_definition = {"kind": "roc", "length": int(parts[1])}
+                    elif indicator_name_part.startswith("BB") and len(parts) == 3: # e.g., BBL_20_2.0
+                        if "bbands" not in processed_complex_indicators:
+                            current_definition = {"kind": "bbands", "length": int(parts[1]), "std": float(parts[2])}
+                            processed_complex_indicators.add("bbands")
+                    else:
+                        self.logger.warning(f"GANTrainerPlugin (_initialize_core_parameters_from_config): TI name '{ti_full_name}' not parsed into a TA strategy definition.")
+                except ValueError as e:
+                    self.logger.error(f"GANTrainerPlugin (_initialize_core_parameters_from_config): Error parsing TI name '{ti_full_name}': {e}")
+                    continue # Skip this TI if parsing fails
+
+                if current_definition:
+                    # Avoid adding duplicate definitions if already processed (e.g. MACD vs MACDh)
+                    is_present = any(d == current_definition for d in ti_definitions_for_strategy)
+                    if not is_present:
+                        ti_definitions_for_strategy.append(current_definition)
+            
+            if ti_definitions_for_strategy:
+                try:
+                    self.tas_strategy_for_discriminator_tis = ta.Strategy(
+                        name="Discriminator TIs Strategy",
+                        description="Auto-generated TA strategy for discriminator features based on ti_names_to_calculate.",
+                        ta=ti_definitions_for_strategy
+                    )
+                    self.logger.info(f"GANTrainerPlugin (_initialize_core_parameters_from_config): pandas_ta.Strategy for discriminator TIs created with {len(ti_definitions_for_strategy)} definitions:")
+                    for ti_def in ti_definitions_for_strategy:
+                        self.logger.info(f"  - {ti_def}")
+                except Exception as e:
+                    self.logger.error(f"GANTrainerPlugin (_initialize_core_parameters_from_config): Failed to create pandas_ta.Strategy: {e}")
+                    self.tas_strategy_for_discriminator_tis = None # Ensure it's None on failure
+            else:
+                self.logger.warning("GANTrainerPlugin (_initialize_core_parameters_from_config): No valid TI definitions derived for TA Strategy. self.tas_strategy_for_discriminator_tis will be None.")
+        else:
+            self.logger.info("GANTrainerPlugin (_initialize_core_parameters_from_config): self.ti_names_to_calculate is empty. No TA Strategy for discriminator TIs will be created.")
+            self.tas_strategy_for_discriminator_tis = None # Ensure it's None if no TIs to calculate
+
         self.generator_output_actual_seq_len = self.params.get("gan_generator_output_actual_seq_len", self.seq_len)
 
         self.logger.info(
