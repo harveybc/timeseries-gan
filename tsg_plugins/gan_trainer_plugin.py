@@ -331,20 +331,9 @@ class GANTrainerPlugin:
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
         self.config = config  # Store global config
         self.params = deepcopy(self.plugin_params)
-        
-        self.logger = logging.getLogger(__name__) # Ensure logger is initialized
+        self.set_params(**config) # Apply global config overrides to plugin params
 
-        # Initialize attributes that are often derived or set from global config
-        # and might not be in plugin_params. This prevents AttributeErrors if they
-        # are accessed before being explicitly set by _initialize_core_parameters_from_config
-        # or if they are not present in the provided config to set_params.
-        self.discriminator_feature_names: List[str] = []
-        self.num_features_for_discriminator: int = 0
-        self.base_feature_names_ordered: List[str] = []
-        self.num_base_features: int = 0
-        self.ti_names_to_calculate: List[str] = [] # General TIs list for the TI calculation layer/logic
-        # self.tas_strategy_for_discriminator_tis = None # Example if it's an object/dict
-        # self.ohlc_feature_map: Dict[str, str] = {} # Example if used
+        self.logger = logging.getLogger(__name__) # Ensure logger is initialized
 
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
