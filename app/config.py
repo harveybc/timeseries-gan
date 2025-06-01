@@ -56,6 +56,9 @@ DEFAULT_VALUES = {
     # --- Parameters for GeneratorPlugin ---
     "generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
     "discriminator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_discriminator_model.keras",
+    "save_generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
+    "save_discriminator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_discriminator_model.keras",
+    
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
         "DATE_TIME", 
