@@ -360,17 +360,19 @@ class FeederPlugin:
         debug_info.update(self.get_debug_info())
 
     def get_conditional_dim(self) -> int:
-        """Returns the dimension of the conditional data vector."""
-        num_date_features = 0
-        if self.params.get("date_feature_names_for_conditioning"):
-            # Each date feature (day_of_month, hour_of_day, etc.) is expanded into sin and cos
-            num_date_features = len(self.params["date_feature_names_for_conditioning"]) * 2
+        """Returns the total dimension of the conditional features generated."""
+        num_date_feature_names = len(self.params.get("date_feature_names_for_conditioning", []))
+        # Each date feature is typically expanded (e.g., into sin and cos components by _get_scaled_date_features)
+        # Assuming _get_scaled_date_features doubles the number of date features.
+        actual_num_date_features = num_date_feature_names * 2
         
-        num_fundamental_features = 0
-        if self.params.get("fundamental_feature_names_for_conditioning"):
-            num_fundamental_features = len(self.params["fundamental_feature_names_for_conditioning"])
-            
-        return num_date_features + num_fundamental_features
+        num_fundamental_features = len(self.params.get("fundamental_feature_names_for_conditioning", []))
+        
+        total_dim = actual_num_date_features + num_fundamental_features
+        # self.logger is not initialized in the provided FeederPlugin snippet, 
+        # but if it were, logging this would be useful:
+        # self.logger.info(f"FeederPlugin: Calculated conditional_dim: {total_dim} ({actual_num_date_features} from date, {num_fundamental_features} from fundamental)")
+        return total_dim
 
     def get_context_vector_dim(self) -> int:
         """Returns the dimension of the context vector h."""
