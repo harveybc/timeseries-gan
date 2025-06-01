@@ -1063,7 +1063,45 @@ class GANTrainerPlugin:
             if self.discriminator: self.discriminator.trainable = False
 
             # Train the generator (via the GAN model)
-            g_loss_metrics = self.gan.train_on_batch([feeder_output_d["latent_vector"], feeder_output_d["conditional_data"], feeder_output_d["context_vector"]], valid_labels, return_dict=True)
+            if self.discriminator: self.discriminator.trainable = False
+
+            gan_model_inputs_for_batch = []
+            if self.generator and hasattr(self, 'generator_actual_input_names_ordered') and self.generator_actual_input_names_ordered:
+                try:
+                    gan_model_inputs_for_batch = [feeder_output_d[name] for name in self.generator_actual_input_names_ordered]
+                    if not gan_model_inputs_for_batch and self.generator.inputs: # Check if list is empty despite generator having inputs
+                        self.logger.error(
+                            f"GAN training: Generator has inputs ({[inp.name for inp in self.generator.inputs]}) "
+                            f"but no inputs were prepared from feeder_output_d using names: {self.generator_actual_input_names_ordered}. "
+                            f"Feeder output keys: {list(feeder_output_d.keys())}."
+                        )
+                        raise ValueError("Failed to prepare inputs for GAN model: Resulting input list is empty.")
+                except KeyError as e:
+                    self.logger.error(
+                        f"GAN training: Failed to retrieve input for GAN model from feeder_output_d. Missing key: {str(e)}. "
+                        f"Generator expects inputs named: {self.generator_actual_input_names_ordered}. "
+                        f"Feeder output provided keys: {list(feeder_output_d.keys())}."
+                    )
+                    raise  # Re-raise the KeyError to stop training as this is critical
+            elif not self.generator:
+                 self.logger.error("GAN training: Generator model is None. Cannot train GAN.")
+                 raise ValueError("Generator model is None, cannot proceed with GAN training step.")
+            else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
+                 self.logger.error(
+                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine GAN inputs. "
+                     f"Generator defined inputs: {[inp.name for inp in self.generator.inputs] if self.generator and self.generator.inputs else 'N/A'}."
+                 )
+                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for GAN training.")
+
+            if not gan_model_inputs_for_batch:
+                self.logger.error(
+                    "GAN training: The list of inputs for the GAN model is empty even after attempting to prepare them. "
+                    f"Generator inputs expected: {self.generator_actual_input_names_ordered}, "
+                    f"Feeder output keys: {list(feeder_output_d.keys())}."
+                )
+                raise ValueError("GAN model inputs list is empty before train_on_batch. Cannot proceed.")
+
+            g_loss_metrics = self.gan.train_on_batch(gan_model_inputs_for_batch, valid_labels, return_dict=True)
 
             # Log progress
             elapsed_time = time.time() - start_time_epoch
@@ -1238,6 +1276,21 @@ class GANTrainerPlugin:
                      self.logger.info(f"TA strategy (self.tas_strategy_for_discriminator_tis) or its .ta list is empty for {data_type_for_logging}. No TIs calculated.")
         except Exception as e:
             self.logger.error(f"Error calculating TIs for {data_type_for_logging} data using df.ta.strategy(): {e}", exc_info=True)
+            # Try to get current_seq_len if it's defined in this scope, otherwise provide a placeholder.
+            seq_len_info = 'unknown'
+            if 'current_seq_len' in locals() and current_seq_len is not None:
+                seq_len_info = current_seq_len
+            elif hasattr(self, 'seq_len') and self.seq_len is not None:
+                seq_len_info = self.seq_len
+                
+            self.logger.warning(
+                f"This error within pandas-ta often occurs if 'seq_len' (currently ~{seq_len_info}) "
+                f"is too short for the parameters of the Technical Indicators in your strategy "
+                f"(e.g., MACD, EMAs require a minimum number of data points). "
+                f"Please review your TA strategy (defined in '{self.params.get('tas_strategy_json_path', 'config')}') "
+                f"and ensure TI parameters are compatible with the sequence length. "
+                f"Falling back to using zero TIs for {data_type_for_logging} data."
+            )
             ti_results_df = pd.DataFrame() # Ensure it's an empty DataFrame on error
 
         # Ensure self.num_tis is available and is an int
@@ -1324,10 +1377,11 @@ class GANTrainerPlugin:
             # If the number of *actually calculated* TIs (num_tis_calculated) is what matters for the true data shape,
             # but the discriminator was built using `expected_num_ti_features` (from self.num_tis),
             # then a mismatch here will cause the ValueError.
-            # The logic above (padding with zeros if ti_results_df is empty or reshape fails, up to expected_num_ti_features)
-            # aims to make final_num_features == expected_total_features_for_discriminator.
-            # So this warning should ideally only trigger if num_tis_calculated > 0 AND num_tis_calculated != expected_num_ti_features,
-            # AND the padding logic didn't make them align (e.g. if padding only happens on full failure).
+            # The logic above (padding with zeros if ti_results_df is empty or reshape_error) handles the case where N_calc is effectively 0.
+            # What if N_calc > 0 but N_calc != N_exp?
+            # Example: self.num_tis = 20. Strategy actually produces 18 TIs.
+            # Then final_num_features = base + 18. Discriminator expects base + 20. Error.
+            # Or strategy produces 22 TIs. final_num_features = base + 22. Discriminator expects base + 20. Error.
 
             # Let's re-evaluate: if num_tis_calculated != expected_num_ti_features, and expected_num_ti_features > 0
             # we should ensure the output has expected_num_ti_features columns, possibly by padding/truncating ti_features_array_batch.
@@ -1336,10 +1390,10 @@ class GANTrainerPlugin:
             # and N_calc != N_exp, then final shape is base + N_calc.
             # Discriminator expects base + N_exp.
             # The padding logic for "empty ti_results_df" or "reshape_error" handles the case where N_calc is effectively 0.
-            # What if N_calc > 0 but N_calc != N_exp?
-            # Example: self.num_tis = 20. Strategy actually produces 18 TIs.
-            # Then final_num_features = base + 18. Discriminator expects base + 20. Error.
-            # Or strategy produces 22 TIs. final_num_features = base + 22. Discriminator expects base + 20. Error.
+            # What about if N_calc > 0 and N_calc != N_exp?
+            # If we truncate to expected_num_ti_features, we might lose information.
+            # If we pad, we add zeros which might be interpreted as valid features.
+            # Let's add logic to align these in a way that makes sense.
 
             # Forcing alignment if num_tis_calculated is different from expected_num_ti_features:
             if num_tis_calculated != expected_num_ti_features and expected_num_ti_features > 0 :
