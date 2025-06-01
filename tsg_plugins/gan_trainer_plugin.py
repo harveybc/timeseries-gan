@@ -399,6 +399,7 @@ class GANTrainerPlugin:
         
         # Derive ti_names_to_calculate from discriminator features and base features
         all_discriminator_features = self.params.get("feature_names_for_discriminator_ordered", [])
+        self.discriminator_feature_names = all_discriminator_features # ADDED INITIALIZATION
         if all_discriminator_features and self.base_feature_names_ordered:
             # This assumes base_feature_names_ordered are a subset and appear first in all_discriminator_features
             self.ti_names_to_calculate = [f for f in all_discriminator_features if f not in self.base_feature_names_ordered]
