@@ -258,7 +258,7 @@ class TensorFlowTALayer(layers.Layer):
         
         # Set the shape of the output tensor because tf.numpy_function loses shape information.
         # The batch size can be dynamic (None or tf.shape(inputs)[0]).
-        output_shape = [tf.shape(inputs)[0], self.seq_len, self.num_total_features]
+        output_shape = [None, self.seq_len, self.num_total_features] # MODIFIED: Use None for symbolic batch size
         y.set_shape(output_shape)
         return y
 
