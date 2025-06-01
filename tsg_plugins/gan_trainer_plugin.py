@@ -764,9 +764,12 @@ class GANTrainerPlugin:
             
             # Get a random batch of real samples
             idx = np.random.randint(0, x_train_data.shape[0], self.params["gan_batch_size"])
-            real_data_batch_raw = x_train_data[idx] # (batch_size, seq_len, features_from_preprocessor)
+            real_data_batch_raw = x_train_data[idx] # (batch_size, seq_len, num_base_features)
             
-            real_data_for_discriminator = real_data_batch_raw[:, :, :self.num_features_for_discriminator]
+            # Calculate TIs for the real data batch to match discriminator's expected input
+            # real_data_batch_raw should have shape (batch_size, seq_len, self.num_base_features)
+            # The _calculate_technical_indicators method will verify this.
+            real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_raw)
 
             # Generate a batch of new series using the FeederPlugin and Generator
             feeder_output = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
