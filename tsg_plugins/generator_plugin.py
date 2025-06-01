@@ -450,12 +450,15 @@ class GeneratorPlugin:
         return {var: self.params.get(var) for var in self.plugin_debug_vars}
 
     def add_debug_info(self, debug_info: Dict[str, Any]):
-        """
-        Inserta info de debug en el diccionario proporcionado.
-
-        :param debug_info: diccionario destino.
-        """
         debug_info.update(self.get_debug_info())
+
+    def get_model(self) -> Optional[Model]:
+        """Returns the loaded Keras generator model."""
+        if hasattr(self, 'model') and self.model is not None:
+            return self.model
+        else:
+            # logger.warning("GeneratorPlugin: get_model() called but self.model is not set.") # Optional: add logging if needed
+            return None
 
     def _calculate_technical_indicators(self, ohlc_history_df: pd.DataFrame) -> pd.DataFrame:
         if ohlc_history_df.empty:
@@ -1140,7 +1143,7 @@ class GeneratorPlugin:
                 if feat_name in self.feature_to_idx and feat_name not in decoder_outputs_set:
                     val_denorm = calc_func(dn_o_step5, dn_h_step5, dn_l_step5, dn_c_step5)
                     if pd.notnull(val_denorm):
-                        val_norm = self._normalize_value(val_denorm, feat_name)
+                                               val_norm = self._normalize_value(val_denorm, feat_name)
                         current_tick_assembled_features[self.feature_to_idx[feat_name]] = val_norm
 
 
