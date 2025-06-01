@@ -1013,7 +1013,11 @@ class GANTrainerPlugin:
             epoch_duration = time.time() - start_time_epoch
 
             # Print the progress
-            print(f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.1e}, LR D: {current_lr_d:.1e})")
+            # Extract accuracies for real and fake batches
+            d_acc_real = d_loss_real_metrics[1] if len(d_loss_real_metrics) > 1 else 0.0
+            d_acc_fake = d_loss_fake_metrics[1] if len(d_loss_fake_metrics) > 1 else 0.0
+            
+            print(f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc_real: {d_acc_real:.4f}, D_acc_fake: {d_acc_fake:.4f}, D_acc_avg: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.2e}, LR D: {current_lr_d:.2e})")
 
             # Manual ReduceLROnPlateau
             if self.params["enable_reduce_lr_on_plateau"]:
@@ -1162,6 +1166,7 @@ class GANTrainerPlugin:
             df_with_tas = pd.concat([df_sample_base, df_sample_tis], axis=1)
             logger.debug(f"Sample {i}: df_with_tas (base + TIs) shape: {df_with_tas.shape}, columns: {list(df_with_tas.columns)}")
             
+                       
             # Reindex to ensure all expected features for the discriminator are present and in order
             # This will add any missing columns (e.g., TIs that were expected but not calculated) as NaN
             df_final_sample = df_with_tas.reindex(columns=self.discriminator_feature_names)
