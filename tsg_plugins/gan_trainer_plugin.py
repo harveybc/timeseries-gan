@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO) # Set default log level - Assuming this is set elsewhere or defaults appropriately
 # ADD INFO MESSAGE ABOUT GENERATOR WARNING
-# logger.info("GANTrainerPlugin: The VAE generator is intended to be frozen during GAN training. A \\'UserWarning: The model does not have any trainable weights.\\' may appear when generator.predict() is called; this is expected for the frozen generator and does not affect discriminator or GAN training.")
+# logger.info("GANTrainerPlugin: The VAE generator is intended to be frozen during GAN training. A \\\\\'UserWarning: The model does not have any trainable weights.\\\\\' may appear when generator.predict() is called; this is expected for the frozen generator and does not affect discriminator or GAN training.")
 
 
 # Custom Keras Layer for Technical Indicator Calculation using tf.numpy_function
@@ -30,242 +30,260 @@ class TensorFlowTALayer(layers.Layer):
     def __init__(self, base_feature_names: List[str], ti_names_to_calculate: List[str],
                  num_base_features: int, num_total_features: int, seq_len: int, **kwargs):
         super().__init__(**kwargs)
-        self.base_feature_names = base_feature_names
+        self.base_feature_names_ordered = base_feature_names
         self.ti_names_to_calculate = ti_names_to_calculate
         self.num_base_features = num_base_features
         self.num_total_features = num_total_features # num_base_features + num_tis
         self.seq_len = seq_len
+
+        # For faster lookups in call()
+        self.base_feature_name_to_idx = {name: i for i, name in enumerate(self.base_feature_names_ordered)}
+        self.num_ti_features_to_calc = len(self.ti_names_to_calculate)
+
+        # Pre-parse TIs
+        self.parsed_tis_info = []
+        for ti_full_name in self.ti_names_to_calculate:
+            col, ind, params = self._parse_ti_name(ti_full_name)
+            self.parsed_tis_info.append({"full_name": ti_full_name, "col": col, "ind": ind, "params": params})
+            if not ind:
+                 logger.warning(f"TensorFlowTALayer __init__: TI \'{ti_full_name}\' could not be parsed. Will output zeros for it.")
+            elif ind.lower() not in ["ema"]: # Add other supported TF TIs to this list
+                 logger.warning(f"TensorFlowTALayer __init__: TI type \'{ind}\' (from \'{ti_full_name}\') is not yet implemented with native TF operations. Will output zeros.")
 
     @staticmethod
     def _parse_ti_name(ti_full_name: str) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """
         Parses a technical indicator string like "FeatureName_INDICATOR_param1_param2".
         Example: "BidClose_EMA_10" -> ("BidClose", "ema", {"length": 10})
-                 "RSI_14" (if 'close' is default) -> (None, "rsi", {"length": 14}) - needs adjustment if column is not part of name
+                 "RSI_14" (if \'close\' is default) -> (None, "rsi", {"length": 14}) - needs adjustment if column is not part of name
                  "ATR_14" (no specific column, uses HLC) -> (None, "atr", {"length": 14})
         Returns: (column_name, indicator_method_name, params_dict)
         """
-        parts = ti_full_name.split('_')
-        
-        # Heuristic: If the first part matches a base feature name, it's likely the target column.
-        # This is not a perfect heuristic and depends on naming conventions.
-        # A more robust system might require explicit TI definitions (base_col, type, params).
-        
-        # Try to identify if the TI implies a specific column from base_feature_names
-        # This part is tricky and relies on conventions.
-        # For "BidClose_EMA_10", parts = ["BidClose", "EMA", "10"]
-        # For "EMA_10" (expecting 'close'), parts = ["EMA", "10"]
-        # For "ATR_14" (uses H,L,C), parts = ["ATR", "14"]
-
-        # Let's assume a convention:
-        # 1. If TI name starts with a base_feature_name + '_', that's the column. E.g. "BidClose_EMA_10"
-        # 2. Else, the TI might be column-agnostic or use pandas_ta defaults (like 'close').
+        parts = ti_full_name.split(\'_\')
         
         column_name: Optional[str] = None
         indicator_method_name: Optional[str] = None
         params: Dict[str, Any] = {}
 
-        # Tentative parsing logic - this may need refinement based on actual ti_names_to_calculate format
-        potential_col_name = parts[0]
-        # A simple check: if potential_col_name is a known base feature, assume it is.
-        # This requires passing base_feature_names to the parser or having it accessible.
-        # For now, let's assume if parts[1] is a common indicator, parts[0] is the column.
-        
-        # Simplified parsing based on common patterns observed in _calculate_technical_indicators
-        # This needs to be robust for all TIs used.
-        
         # Pattern 1: Col_Indicator_Param (e.g., BidClose_EMA_10)
-        if len(parts) >= 2 and parts[1].upper() in ["EMA", "SMA", "RSI", "BBANDS", "MACD", "ROC", "MOM", "STOCH", "STOCHRSI", "TSI", "UO", "WILLR", "ATR", "ADX", "CCI", "PSAR"]: # Common indicators
+        # Assumes indicator names are standard (EMA, SMA, RSI, etc.)
+        # This list can be expanded.
+        known_indicator_keywords = [
+            "EMA", "SMA", "RSI", "BBANDS", "MACD", "ROC", "MOM", "STOCH", 
+            "STOCHRSI", "TSI", "UO", "WILLR", "ATR", "ADX", "CCI", "PSAR"
+        ]
+
+        if len(parts) >= 2 and parts[1].upper() in known_indicator_keywords:
+            # Check if parts[0] is likely a column name (heuristic, might need base_feature_names context for robustness)
+            # For now, assume if parts[1] is a known indicator, parts[0] is the column.
             column_name = parts[0]
             indicator_method_name = parts[1].lower()
             param_parts = parts[2:]
-        # Pattern 2: Indicator_Param (e.g., RSI_14, assuming default column like 'close')
-        elif len(parts) >= 1 and parts[0].upper() in ["EMA", "SMA", "RSI", "BBANDS", "MACD", "ROC", "MOM", "STOCH", "STOCHRSI", "TSI", "UO", "WILLR", "ATR", "ADX", "CCI", "PSAR"]:
+        # Pattern 2: Indicator_Param (e.g., RSI_14, assuming default column like \'close\')
+        elif len(parts) >= 1 and parts[0].upper() in known_indicator_keywords:
             indicator_method_name = parts[0].lower()
             param_parts = parts[1:]
         else: # Cannot parse reliably
-            logger.warning(f"TensorFlowTALayer: Could not reliably parse TI name '{ti_full_name}'. Skipping this TI in symbolic graph.")
+            logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not reliably parse TI name \'{ti_full_name}\'.")
             return None, None, {}
 
-        # Parameter parsing (simplified)
-        if indicator_method_name in ["ema", "sma", "rsi", "atr", "cci", "roc", "mom", "stoch", "stochrsi", "tsi", "uo", "willr", "psar"]: # Common length-based
+        # Parameter parsing (simplified, extend as needed)
+        if indicator_method_name in ["ema", "sma", "rsi", "atr", "cci", "roc", "mom", "willr"]: # Common length-based
             if len(param_parts) > 0:
-                try: params['length'] = int(param_parts[0])
-                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse length from {param_parts[0]} for {ti_full_name}.")
+                try: params[\'length\'] = int(param_parts[0])
+                except ValueError: logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not parse length from {param_parts[0]} for {ti_full_name}.")
+        elif indicator_method_name == "stoch": # STOCHk_14_3_3 -> k,d,smooth_k
+             if len(param_parts) >= 1: params[\'k\'] = int(param_parts[0])
+             if len(param_parts) >= 2: params[\'d\'] = int(param_parts[1])
+             if len(param_parts) >= 3: params[\'smooth_k\'] = int(param_parts[2]) # often called smooth_k or s
         elif indicator_method_name == "bbands":
             if len(param_parts) > 0: # length
-                try: params['length'] = int(param_parts[0])
-                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse BBands length from {param_parts[0]} for {ti_full_name}.")
+                try: params[\'length\'] = int(param_parts[0])
+                except ValueError: logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not parse BBands length from {param_parts[0]} for {ti_full_name}.")
             if len(param_parts) > 1: # std
-                try: params['std'] = float(param_parts[1]) # or int
-                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse BBands std from {param_parts[1]} for {ti_full_name}.")
+                try: params[\'std\'] = float(param_parts[1]) # or int
+                except ValueError: logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not parse BBands std from {param_parts[1]} for {ti_full_name}.")
         elif indicator_method_name == "macd":
-            if len(param_parts) == 3: # fast, slow, signal
+            # MACD_fast_slow_signal (e.g., MACD_12_26_9)
+            if len(param_parts) == 3: 
                 try:
-                    params['fast'] = int(param_parts[0])
-                    params['slow'] = int(param_parts[1])
-                    params['signal'] = int(param_parts[2])
-                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse MACD params from {param_parts} for {ti_full_name}.")
+                    params[\'fast\'] = int(param_parts[0])
+                    params[\'slow\'] = int(param_parts[1])
+                    params[\'signal\'] = int(param_parts[2])
+                except ValueError: logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not parse MACD params from {param_parts} for {ti_full_name}.")
             elif len(param_parts) == 2: # fast, slow (signal default)
                  try:
-                    params['fast'] = int(param_parts[0])
-                    params['slow'] = int(param_parts[1])
-                 except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse MACD fast/slow params from {param_parts} for {ti_full_name}.")
+                    params[\'fast\'] = int(param_parts[0])
+                    params[\'slow\'] = int(param_parts[1])
+                 except ValueError: logger.warning(f"TensorFlowTALayer (_parse_ti_name): Could not parse MACD fast/slow params from {param_parts} for {ti_full_name}.")
+        # Add more specific param parsing as needed for other TIs
 
-        # If column_name was parsed as part of the TI name (e.g. "BidClose" from "BidClose_EMA_10")
-        # and it's not a standard pandas_ta recognized column name for the indicator (like 'high', 'low', 'close', 'volume')
-        # then we need to pass it as the 'column' argument to the pandas_ta function.
-        if column_name and indicator_method_name not in ['atr', 'adx', 'psar']: # These TIs might use HLCV implicitly
-             # For TIs like EMA, RSI, etc., if a column was parsed, use it.
-            if 'column' not in params: # Avoid overwriting if already parsed differently
-                params['column'] = column_name
-        
-        # For TIs like ATR, ADX, PSAR, they expect 'high', 'low', 'close' columns.
-        # If base_feature_names provides these (e.g. "BidHigh", "BidLow", "BidClose"),
-        # we might need to rename them temporarily in the DataFrame for pandas_ta.
-        # This adds complexity. For now, assume pandas_ta handles it or TIs are chosen carefully.
+        # If column_name was parsed (e.g. "BidClose" from "BidClose_EMA_10")
+        # and it\'s not a standard pandas_ta recognized column name for the indicator (like \'high\', \'low\', \'close\', \'volume\')
+        # then we need to pass it as the \'column\' argument to the pandas_ta function.
+        # This logic is more for pandas_ta; for TF implementation, we directly use the column index.
+        # However, storing \'column\': column_name in params if parsed_col_name is set might be useful for consistency if some TIs still use a generic handler.
+        if column_name and \'column\' not in params:
+            params[\'column_hint\'] = column_name # Store the parsed column name if any
 
         return column_name, indicator_method_name, params
 
     @staticmethod
-    def _calculate_tis_numpy_batch(inputs_numpy: np.ndarray, 
-                                   base_feature_names_py: List[str], 
-                                   ti_names_to_calculate_py: List[str], 
-                                   seq_len_py: int,
-                                   num_total_features_py: int):
-        # inputs_numpy shape: (batch_size, seq_len, num_base_features)
-        batch_size = inputs_numpy.shape[0]
-        all_samples_processed = []
+    def _tf_calculate_ema_1d(series: tf.Tensor, length: int, smoothing: float = 2.0) -> tf.Tensor:
+        """
+        Calculates Exponential Moving Average for a 1D tf.Tensor using TensorFlow operations.
+        Args:
+            series: 1D tf.Tensor of shape (seq_len,).
+            length: EMA period (integer).
+            smoothing: Smoothing factor, typically 2.0.
+        Returns:
+            1D tf.Tensor of shape (seq_len,) with EMA values.
+        """
+        seq_len_tf = tf.shape(series)[0]
 
-        for i in range(batch_size):
-            sample_base_features_np = inputs_numpy[i, :, :] # (seq_len, num_base_features)
-            df_for_tis = pd.DataFrame(sample_base_features_np, columns=base_feature_names_py)
-            
-            # Store original columns to select base features later
-            original_base_df = df_for_tis[base_feature_names_py].copy()
-
-            for ti_full_name in ti_names_to_calculate_py:
-                # Use the refined parser
-                # Note: _parse_ti_name is static, so it doesn't have access to self.base_feature_names
-                # This implies base_feature_names needs to be passed to it, or parsing logic simplified.
-                # For now, the parser makes some assumptions.
-                # A better parser might need access to the list of base_feature_names to confirm if parts[0] is a column.
-                
-                # Simplified parsing for now, assuming ti_full_name is like "BidClose_EMA_10" or "RSI_14"
-                # This parsing logic should ideally be robust and centralized if used elsewhere.
-                parsed_col, parsed_indicator, parsed_params = TensorFlowTALayer._parse_ti_name(ti_full_name)
-
-                if not parsed_indicator:
-                    logger.warning(f"TensorFlowTALayer: Skipping TI {ti_full_name} due to parsing failure in batch.")
-                    continue
-                
-                try:
-                    indicator_func = getattr(df_for_tis.ta, parsed_indicator)
-                    # Ensure 'column' param is correctly handled if parsed_col is set
-                    if parsed_col and 'column' not in parsed_params and parsed_indicator not in ['atr', 'adx', 'psar', 'obv', 'cmf', 'efi', 'cmo', 'mfi', 'chop', 'vortex', 'aroon', 'donchian', 'kc', 'ichimoku', 'thermo', 'squeeze', 'sqzpro', 'inertia', 'trendflex', 'ttm_trend', 'vhf', 'vwap', 'vwma']: # Indicators that might not take a single 'column' or use OHLCV
-                        # If parsed_col is a valid column in df_for_tis, use it.
-                        if parsed_col in df_for_tis.columns:
-                             parsed_params['column'] = parsed_col
-                        else:
-                            logger.warning(f"TensorFlowTALayer: Parsed column '{parsed_col}' for TI '{ti_full_name}' not in base features. Indicator may fail or use defaults.")
-                    
-                    # For TIs that need OHLCV, ensure columns are named appropriately or pandas_ta can find them.
-                    # E.g., if base features are "BHigh", "BLow", "BClose", "BOpen", "BVolume"
-                    # and pandas_ta expects "high", "low", "close", "open", "volume".
-                    # A temporary rename might be needed:
-                    # rename_map = {"BHigh": "high", "BLow": "low", ...}
-                    # df_for_tis.rename(columns=rename_map, inplace=True)
-                    # ... call indicator ...
-                    # df_for_tis.rename(columns={v: k for k, v in rename_map.items()}, inplace=True) # Rename back
-                    # This is complex. For now, assume names are compatible or TIs don't require strict OHLCV names.
-
-                    indicator_func(**parsed_params, append=True, col_names=(ti_full_name,))
-                except AttributeError:
-                    logger.error(f"TensorFlowTALayer: TI method '{parsed_indicator}' not found in pandas_ta for {ti_full_name}.")
-                except Exception as e:
-                    logger.error(f"TensorFlowTALayer: Error calculating TI {ti_full_name} with params {parsed_params} (parsed_col: {parsed_col}): {e}")
-
-            # Consolidate features: base features + calculated TIs
-            final_ordered_columns = base_feature_names_py + ti_names_to_calculate_py
-            
-            # Start with original base features
-            combined_df = original_base_df.copy()
-            
-            for ti_name in ti_names_to_calculate_py:
-                if ti_name in df_for_tis.columns:
-                    combined_df[ti_name] = df_for_tis[ti_name]
-                else:
-                    logger.warning(f"TensorFlowTALayer: TI column '{ti_name}' not found after calculation. Filling with zeros for this sample.")
-                    combined_df[ti_name] = np.zeros(seq_len_py) 
-            
-            # Ensure the final DataFrame has the exact columns in the expected order and count
-            # If a TI failed to compute, it's filled with zeros.
-            # We need to ensure combined_df has all columns from final_ordered_columns.
-            for col in final_ordered_columns:
-                if col not in combined_df.columns:
-                    logger.warning(f"TensorFlowTALayer: Column '{col}' was expected but not found. Adding as zeros.")
-                    combined_df[col] = np.zeros(seq_len_py)
-            
-            combined_df = combined_df[final_ordered_columns]
-            
-            # Verify shape before converting to values
-            if combined_df.shape[1] != num_total_features_py:
-                logger.error(f"TensorFlowTALayer: Shape mismatch in combined_df. Expected {num_total_features_py} features, got {combined_df.shape[1]}. Columns: {combined_df.columns}")
-                # Fallback: create a zero array of the correct shape to avoid downstream errors
-                # This indicates a serious issue in TI calculation or column management.
-                all_samples_processed.append(np.zeros((seq_len_py, num_total_features_py), dtype=np.float32))
-            else:
-                all_samples_processed.append(combined_df.values)
-
-        processed_batch_np = np.array(all_samples_processed, dtype=np.float32)
-        processed_batch_np = np.nan_to_num(processed_batch_np, nan=0.0) # Final NaN check
+        if length <= 0:
+            logger.warning(f"TensorFlowTALayer (_tf_calculate_ema_1d): EMA length must be positive, got {length}. Returning zeros.")
+            return tf.zeros_like(series, dtype=tf.float32)
         
-        # Final shape check
-        if processed_batch_np.shape != (batch_size, seq_len_py, num_total_features_py):
-            logger.error(f"TensorFlowTALayer: Output shape mismatch. Expected {(batch_size, seq_len_py, num_total_features_py)}, got {processed_batch_np.shape}. Forcing reshape if possible.")
-            # Attempt to reshape or pad if feature count is off, though this is risky
-            if processed_batch_np.shape[0] == batch_size and processed_batch_np.shape[1] == seq_len_py:
-                 # If only feature count is wrong, pad with zeros or truncate (last resort)
-                if processed_batch_np.shape[2] < num_total_features_py:
-                    padding = np.zeros((batch_size, seq_len_py, num_total_features_py - processed_batch_np.shape[2]), dtype=np.float32)
-                    processed_batch_np = np.concatenate([processed_batch_np, padding], axis=2)
-                elif processed_batch_np.shape[2] > num_total_features_py:
-                    processed_batch_np = processed_batch_np[:, :, :num_total_features_py]
-            else: # More severe shape mismatch, return zeros of expected shape
-                 processed_batch_np = np.zeros((batch_size, seq_len_py, num_total_features_py), dtype=np.float32)
+        if tf.cast(seq_len_tf, tf.int32) == 0: # Handle empty series
+            logger.debug("TensorFlowTALayer (_tf_calculate_ema_1d): Input series is empty. Returning empty tensor.")
+            return tf.zeros_like(series, dtype=tf.float32) # Or series
 
-
-        return processed_batch_np
-
-    def call(self, inputs): # inputs is a KerasTensor (symbolic)
-        # inputs shape: (batch_size, self.seq_len, self.num_base_features)
+        alpha = tf.cast(smoothing, tf.float32) / (tf.cast(length, tf.float32) + 1.0)
         
-        # tf.numpy_function expects Python native types for non-tensor arguments.
-        # self.base_feature_names, self.ti_names_to_calculate are already List[str]
-        # self.seq_len, self.num_total_features are Python int
-        
-        y = tf.numpy_function(
-            TensorFlowTALayer._calculate_tis_numpy_batch,
-            [
-                inputs, 
-                self.base_feature_names, 
-                self.ti_names_to_calculate,
-                self.seq_len,
-                self.num_total_features 
-            ],
-            tf.float32 # Output type
+        # Initialize TensorArray to store EMA values
+        ema_values_array = tf.TensorArray(dtype=tf.float32, size=seq_len_tf, dynamic_size=False, clear_after_read=False)
+
+        # First EMA value is the first series value
+        # Handle case where series might be shorter than 1
+        first_val = tf.cond(seq_len_tf > 0, lambda: series[0], lambda: tf.constant(0.0, dtype=tf.float32))
+        ema_values_array = tf.cond(seq_len_tf > 0, lambda: ema_values_array.write(0, first_val), lambda: ema_values_array)
+
+        # Loop from the second element to compute subsequent EMA values
+        loop_counter_init = tf.constant(1, dtype=tf.int32)
+        prev_ema_init = first_val
+
+        # Condition for the while_loop
+        cond = lambda i, prev_ema, arr: i < seq_len_tf
+
+        # Body of the while_loop
+        def body(i, prev_ema, arr):
+            current_val = series[i]
+            new_ema = alpha * current_val + (1.0 - alpha) * prev_ema
+            arr = arr.write(i, new_ema)
+            return i + 1, new_ema, arr
+
+        # Execute the loop only if seq_len_tf > 1
+        _, _, final_ema_values_array = tf.cond(
+            seq_len_tf > 1,
+            lambda: tf.while_loop(
+                cond, body, [loop_counter_init, prev_ema_init, ema_values_array],
+                parallel_iterations=1 # Ensure sequential calculation for EMA
+            ),
+            lambda: (loop_counter_init, prev_ema_init, ema_values_array) # No loop if only one element or empty
         )
         
-        # Set the shape of the output tensor because tf.numpy_function loses shape information.
-        # The batch size can be dynamic (None or tf.shape(inputs)[0]).
-        output_shape = [None, self.seq_len, self.num_total_features] # MODIFIED: Use None for symbolic batch size
-        y.set_shape(output_shape)
-        return y
+        return final_ema_values_array.stack()
+
+    def call(self, inputs: tf.Tensor) -> tf.Tensor: # inputs shape: (batch_size, self.seq_len, self.num_base_features)
+        batch_size = tf.shape(inputs)[0]
+        
+        calculated_ti_tensors_list = []
+
+        for ti_info in self.parsed_tis_info:
+            ti_full_name = ti_info["full_name"]
+            parsed_col_name = ti_info["col"] # This is the column hint, e.g., "BidClose"
+            parsed_indicator_name = ti_info["ind"]
+            parsed_params = ti_info["params"]
+
+            # Default to zeros for this TI, shape (batch_size, seq_len, 1)
+            current_ti_tensor_for_concat = tf.zeros([batch_size, self.seq_len, 1], dtype=tf.float32)
+
+            if parsed_indicator_name:
+                indicator_lower = parsed_indicator_name.lower()
+                if indicator_lower == "ema":
+                    if parsed_col_name in self.base_feature_name_to_idx:
+                        col_idx = self.base_feature_name_to_idx[parsed_col_name]
+                        
+                        # feature_series_batch shape: (batch_size, seq_len)
+                        feature_series_batch = inputs[:, :, col_idx]
+                        
+                        ema_length = parsed_params.get(\'length\')
+                        if ema_length is not None and isinstance(ema_length, int) and ema_length > 0:
+                            # Apply _tf_calculate_ema_1d to each sample in the batch
+                            ema_output_2d_batch = tf.map_fn(
+                                lambda s: self._tf_calculate_ema_1d(s, length=ema_length),
+                                feature_series_batch,
+                                fn_output_signature=tf.float32
+                            ) # Output shape: (batch_size, seq_len)
+                            current_ti_tensor_for_concat = tf.expand_dims(ema_output_2d_batch, axis=-1) # Shape: (batch_size, seq_len, 1)
+                        else:
+                            logger.warning(f"TensorFlowTALayer call: Invalid or missing \'length\' ({ema_length}) for EMA \'{ti_full_name}\'. Using zeros.")
+                    else:
+                        logger.warning(f"TensorFlowTALayer call: Base feature column \'{parsed_col_name}\' for EMA \'{ti_full_name}\' not found in base_feature_name_to_idx. Keys: {list(self.base_feature_name_to_idx.keys())}. Using zeros.")
+                # Add elif for other TF-implemented TIs here
+                # elif indicator_lower == "sma": ...
+                else:
+                    # This case is for parsed TIs that are not "ema" (and not yet TF-implemented)
+                    # Warning for this was already logged in __init__
+                    logger.debug(f"TensorFlowTALayer call: TI \'{indicator_lower}\' (from \'{ti_full_name}\') not TF-implemented. Using zeros.")
+            else:
+                # This case is for TIs that failed to parse initially
+                # Warning for this was already logged in __init__
+                logger.debug(f"TensorFlowTALayer call: TI \'{ti_full_name}\' was unparsable. Using zeros.")
+
+            calculated_ti_tensors_list.append(current_ti_tensor_for_concat)
+
+        # Concatenate base features (inputs) with all calculated TI tensors
+        if calculated_ti_tensors_list: # If there are TIs to add
+            output_tensor = tf.concat([inputs] + calculated_ti_tensors_list, axis=-1)
+        else: # No TIs to calculate, output is just the input features
+            output_tensor = inputs
+        
+        # Ensure the output tensor has the expected total number of features.
+        # self.num_total_features should be self.num_base_features + self.num_ti_features_to_calc
+        expected_feature_count_calc = self.num_base_features + self.num_ti_features_to_calc
+        
+        # This assertion helps catch mismatches during development/debugging.
+        # tf.debugging.assert_equal(tf.shape(output_tensor)[-1], expected_feature_count_calc, 
+        #                           message=f"Output feature count mismatch in TensorFlowTALayer. Expected {expected_feature_count_calc}, Got {tf.shape(output_tensor)[-1]}")
+
+        # If self.num_total_features is the ultimate source of truth for the *expected* output shape by downstream layers:
+        if tf.shape(output_tensor)[-1] != self.num_total_features:
+            logger.warning(f"TensorFlowTALayer call: Output tensor feature count {tf.shape(output_tensor)[-1]} "
+                           f"does not match self.num_total_features {self.num_total_features}. "
+                           f"This might happen if not all TIs in ti_names_to_calculate are implemented "
+                           f"or if num_total_features was misconfigured. "
+                           f"The layer produced {self.num_base_features} base + {self.num_ti_features_to_calc} TIs = {expected_feature_count_calc} features.")
+            # Decide on a strategy: pad with zeros, raise error, or allow if dynamic.
+            # For now, we will rely on set_shape to catch this if it's a static shape issue.
+            # If num_total_features is just an expectation, the actual output is what we have.
+
+        output_shape = [None, self.seq_len, self.num_total_features] 
+        try:
+            output_tensor.set_shape(output_shape)
+        except ValueError as e:
+            logger.error(f"TensorFlowTALayer call: Failed to set output shape to {output_shape}. "
+                         f"Actual tensor shape is {output_tensor.shape}. Error: {e}. "
+                         f"This usually means the number of calculated features ({expected_feature_count_calc}) "
+                         f"does not match the expected self.num_total_features ({self.num_total_features}).")
+            # Fallback: try to set shape with actual calculated features if num_total_features was too optimistic
+            # This might break downstream layers if they strictly expect num_total_features.
+            try:
+                fallback_shape = [None, self.seq_len, expected_feature_count_calc]
+                output_tensor.set_shape(fallback_shape)
+                logger.warning(f"TensorFlowTALayer call: Set output shape to fallback {fallback_shape} due to mismatch with self.num_total_features.")
+            except ValueError as e_fallback:
+                logger.error(f"TensorFlowTALayer call: Fallback set_shape also failed. Error: {e_fallback}")
+                # Let the error propagate if even fallback fails.
+                raise e
+
+        return output_tensor
 
     def get_config(self):
         config = super().get_config()
         config.update({
-            "base_feature_names": self.base_feature_names,
+            "base_feature_names": self.base_feature_names_ordered, # Use the renamed attribute
             "ti_names_to_calculate": self.ti_names_to_calculate,
             "num_base_features": self.num_base_features,
             "num_total_features": self.num_total_features,
