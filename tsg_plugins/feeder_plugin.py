@@ -451,7 +451,7 @@ class FeederPlugin:
         latent_seq_len, latent_features = latent_s[0], latent_s[1]
 
         method = self.params.get("sampling_method")
-        technique = self.params.get("encoder_sampling_technique") # May have been forced to 'direct'
+        technique = self.params.get("encoder_sampling_technique") # May have been forced to \'direct\'
         context_dim = self.params.get("context_vector_dim")
         context_strategy = self.params.get("context_vector_strategy")
         
@@ -462,91 +462,128 @@ class FeederPlugin:
 
         if method == "from_encoder":
             if self._empirical_z_means is None or self._empirical_z_log_vars is None:
-                raise RuntimeError("FeederPlugin: 'from_encoder' selected, but empirical z_mean/z_log_var are not loaded. Call set_params or ensure config is correct.")
+                raise RuntimeError("FeederPlugin: \'from_encoder\' selected, but empirical z_mean/z_log_var are not loaded. Call set_params or ensure config is correct.")
             if self._empirical_z_means.ndim != 3 or self._empirical_z_log_vars.ndim != 3:
                  raise RuntimeError(f"FeederPlugin: Empirical z_mean/z_log_var must be 3D for sequential latent space. Got shapes: {self._empirical_z_means.shape}, {self._empirical_z_log_vars.shape}")
             
             if technique not in ["direct"]:
-                print(f"FeederPlugin: Warning (generate) - Encoder technique '{technique}' for 3D latent space is not fully supported. Using 'direct' sampling.")
+                print(f"FeederPlugin: Warning (generate) - Encoder technique \'{technique}\' for 3D latent space is not fully supported. Using \'direct\' sampling.")
             
             num_available_empirical = self._empirical_z_means.shape[0]
-            indices = np.random.choice(num_available_empirical, size=n_ticks_to_generate, replace=True)
+            if num_available_empirical == 0 and n_ticks_to_generate > 0:
+                raise RuntimeError("FeederPlugin: \'from_encoder\' selected, but no empirical samples available from encoder.")
             
-            sampled_z_means_batch = self._empirical_z_means[indices] 
-            sampled_z_log_vars_batch = self._empirical_z_log_vars[indices]
-
-            epsilon_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
-            Z_samples_batch = sampled_z_means_batch + np.exp(0.5 * sampled_z_log_vars_batch) * epsilon_batch
+            if n_ticks_to_generate > 0: # Only sample if we need to generate ticks
+                indices = np.random.choice(num_available_empirical, size=n_ticks_to_generate, replace=True)
+                sampled_z_means_batch = self._empirical_z_means[indices] 
+                sampled_z_log_vars_batch = self._empirical_z_log_vars[indices]
+                epsilon_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
+                Z_samples_batch = sampled_z_means_batch + np.exp(0.5 * sampled_z_log_vars_batch) * epsilon_batch
+            # If n_ticks_to_generate is 0, Z_samples_batch remains empty with shape (0, seq, feat)
         
         elif method == "standard_normal":
-            Z_samples_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
+            if n_ticks_to_generate > 0:
+                Z_samples_batch = np.random.normal(loc=0.0, scale=1.0, size=(n_ticks_to_generate, latent_seq_len, latent_features))
+            # If n_ticks_to_generate is 0, Z_samples_batch remains empty with shape (0, seq, feat)
         else:
-            raise ValueError(f"FeederPlugin: Unknown sampling_method '{method}'.")
+            raise ValueError(f"FeederPlugin: Unknown sampling_method \'{method}\'.")
 
         if is_gan_mode:
-            # GAN mode: return batches of Z, conditional_data, and context_h
             conditional_data_list = []
             context_h_list = []
             
-            # Use a single datetime for the whole batch if in GAN mode and target_datetimes is None
-            # This is a simplification; more advanced conditional GANs might need diverse conditional inputs.
             dt_for_batch_conditioning = self._default_datetime_for_gan if self._default_datetime_for_gan else pd.Timestamp(datetime.now())
 
             for i in range(n_ticks_to_generate):
                 scaled_date_features_tick = self._get_scaled_date_features(dt_for_batch_conditioning)
                 scaled_fundamental_features_tick = self._get_scaled_fundamental_features(dt_for_batch_conditioning)
                 
-                # Handle NaNs from fundamental features if real data wasn't loaded/aligned
                 if np.isnan(scaled_fundamental_features_tick).any():
                     num_fund_feats = len(self.params.get("fundamental_feature_names_for_conditioning", []))
-                    scaled_fundamental_features_tick = np.zeros(num_fund_feats, dtype=np.float32) # Default to zeros if NaN
+                    if num_fund_feats > 0: # Only print warning if fundamentals were expected
+                        print(f"FeederPlugin: Warning - NaNs found in fundamental features for tick {i} with datetime {dt_for_batch_conditioning}. Replacing with zeros.")
+                    scaled_fundamental_features_tick = np.nan_to_num(scaled_fundamental_features_tick) # Replace NaNs with 0
 
-                conditional_data_for_tick = np.concatenate(
-                    [scaled_date_features_tick, scaled_fundamental_features_tick]
-                ).reshape(1, -1)
-                conditional_data_list.append(conditional_data_for_tick)
+                conditional_data_tick = np.concatenate((scaled_date_features_tick, scaled_fundamental_features_tick))
+                
+                current_context_dim = self.get_context_vector_dim() # Use method to get current dim
+                context_vector_tick = np.array([], dtype=np.float32) # Default to empty
+                if current_context_dim > 0:
+                    if context_strategy == "zeros":
+                        context_vector_tick = np.zeros(current_context_dim, dtype=np.float32)
+                    elif context_strategy == "random":
+                        context_vector_tick = np.random.normal(size=current_context_dim).astype(np.float32)
+                    else: # Default to zeros if strategy is unknown or dim is somehow non-zero but strategy is off
+                        context_vector_tick = np.zeros(current_context_dim, dtype=np.float32)
+                
+                conditional_data_list.append(conditional_data_tick)
+                context_h_list.append(context_vector_tick)
 
-                context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
-                if context_strategy == "random":
-                    context_h_tick = np.random.normal(loc=0.0, scale=1.0, size=(1, context_dim)).astype(np.float32)
-                elif context_strategy != "zeros":
-                    print(f"FeederPlugin: Warning - Unknown context_vector_strategy '{context_strategy}'. Defaulting to 'zeros'.")
-                context_h_list.append(context_h_tick)
+            _cond_dim = self.get_conditional_dim()
+            _context_dim = self.get_context_vector_dim()
 
-            conditional_data_batch = np.concatenate(conditional_data_list, axis=0).astype(np.float32)
-            context_h_batch = np.concatenate(context_h_list, axis=0).astype(np.float32)
-            
-            return {
-                "latent_vector_batch": Z_samples_batch.astype(np.float32),
-                "conditional_data_batch": conditional_data_batch,
-                "context_h_batch": context_h_batch
+            if n_ticks_to_generate == 0:
+                conditional_data_batch = np.empty((0, _cond_dim), dtype=np.float32)
+                context_h_batch = np.empty((0, _context_dim), dtype=np.float32)
+            else:
+                conditional_data_batch = np.array(conditional_data_list, dtype=np.float32)
+                context_h_batch = np.array(context_h_list, dtype=np.float32)
+                
+                # Ensure correct final shape, especially if a dimension is 0
+                if conditional_data_batch.shape != (n_ticks_to_generate, _cond_dim):
+                     conditional_data_batch = np.empty((n_ticks_to_generate, _cond_dim), dtype=np.float32) if _cond_dim == 0 and conditional_data_batch.size == 0 else conditional_data_batch.reshape(n_ticks_to_generate, _cond_dim)
+
+                if context_h_batch.shape != (n_ticks_to_generate, _context_dim):
+                    context_h_batch = np.empty((n_ticks_to_generate, _context_dim), dtype=np.float32) if _context_dim == 0 and context_h_batch.size == 0 else context_h_batch.reshape(n_ticks_to_generate, _context_dim)
+
+
+            latent_input_name = self.params.get("generator_decoder_input_name_latent", "decoder_input_z_seq")
+            conditional_input_name = self.params.get("generator_decoder_input_name_conditional", "decoder_input_conditions")
+            context_input_name = self.params.get("generator_decoder_input_name_context_h", "decoder_input_h_context")
+
+            output_dict = {
+                latent_input_name: Z_samples_batch
             }
-        else:
-            # Original mode: return list of dictionaries for each tick
-            output_sequence = []
-            for i in range(n_ticks_to_generate):
-                datetime_obj = target_datetimes.iloc[i] # target_datetimes is guaranteed to be non-None here
-                z_tick = Z_samples_batch[i, :, :] # Shape (latent_seq_len, latent_features)
 
-                scaled_date_features_tick = self._get_scaled_date_features(datetime_obj)
-                scaled_fundamental_features_tick = self._get_scaled_fundamental_features(datetime_obj)
-                
-                conditional_data_for_tick = np.concatenate(
-                    [scaled_date_features_tick, scaled_fundamental_features_tick]
-                ).reshape(1, -1)
-
-                context_h_tick = np.zeros((1, context_dim), dtype=np.float32)
-                if context_strategy == "random":
-                    context_h_tick = np.random.normal(loc=0.0, scale=1.0, size=(1, context_dim)).astype(np.float32)
-                elif context_strategy != "zeros":
-                    if context_strategy != "zeros": 
-                        print(f"FeederPlugin: Warning - Unknown context_vector_strategy '{context_strategy}'. Defaulting to 'zeros'.")
-                
-                output_sequence.append({
-                    "Z": z_tick.astype(np.float32), 
-                    "conditional_data": conditional_data_for_tick.astype(np.float32),
-                    "context_h": context_h_tick.astype(np.float32),
-                    "datetimes": datetime_obj
-                })
+            if _cond_dim > 0:
+                output_dict[conditional_input_name] = conditional_data_batch
             
-            return output_sequence
+            if _context_dim > 0:
+                output_dict[context_input_name] = context_h_batch
+            
+            return output_dict
+        else: # target_datetimes is not None (non-GAN mode, used for VAE training/evaluation)
+            output_list = []
+            # Ensure Z_samples_batch is correctly populated for this path if n_ticks_to_generate > 0
+            # The Z_samples_batch is already prepared above based on method.
+
+            for i in range(n_ticks_to_generate):
+                current_datetime = target_datetimes.iloc[i]
+                
+                scaled_date_features_tick = self._get_scaled_date_features(current_datetime)
+                scaled_fundamental_features_tick = self._get_scaled_fundamental_features(current_datetime)
+                if np.isnan(scaled_fundamental_features_tick).any():
+                    scaled_fundamental_features_tick = np.nan_to_num(scaled_fundamental_features_tick)
+                
+                conditional_data_tick = np.concatenate((scaled_date_features_tick, scaled_fundamental_features_tick))
+
+                current_context_dim = self.get_context_vector_dim()
+                context_vector_tick = np.array([], dtype=np.float32)
+                if current_context_dim > 0:
+                    if context_strategy == "zeros":
+                        context_vector_tick = np.zeros(current_context_dim, dtype=np.float32)
+                    elif context_strategy == "random":
+                        context_vector_tick = np.random.normal(size=current_context_dim).astype(np.float32)
+                    else:
+                        context_vector_tick = np.zeros(current_context_dim, dtype=np.float32)
+
+                # For non-GAN mode, the keys are fixed as per original likely intent or common usage for VAEs
+                # These keys might need to align with what a VAE trainer plugin would expect if this mode is used.
+                # For now, using descriptive generic keys.
+                tick_data_dict: Dict[str, np.ndarray] = {
+                    "latent_vector": Z_samples_batch[i], # This is a single Z sequence (seq_len, features)
+                    "conditional_data": conditional_data_tick, # This is (conditional_dim,)
+                    "context_h": context_vector_tick # This is (context_dim,)
+                }
+                output_list.append(tick_data_dict)
+            return output_list
