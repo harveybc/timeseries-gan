@@ -471,7 +471,7 @@ class GANTrainerPlugin:
         self.gen_input_latent_dim: int = self.params.get("latent_dim", 32)
         self.generator_output_actual_seq_len: int = self.params.get("gan_generator_output_actual_seq_len", 1)
         self.actual_generator_output_dim: int = 0
-
+        self.generator: Optional[Model] = None # Initialize generator attribute
 
         self.generator_plugin_instance = generator_plugin_instance
         self.feeder_plugin_instance = feeder_plugin_instance
