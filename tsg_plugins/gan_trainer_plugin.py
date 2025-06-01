@@ -940,7 +940,28 @@ class GANTrainerPlugin:
             self.logger.info(f"Discriminator architecture plot saved to {plot_path}")
         except Exception as e:
             self.logger.warning(f"Could not plot Discriminator model: {e}. Ensure pydot and graphviz are installed.")
-        return model
+        
+        # Ensure optimizer is ready
+        if not hasattr(self, 'discriminator_optimizer') or self.discriminator_optimizer is None:
+            self.d_lr = self._get_config_param('discriminator_lr', 1e-4)
+            self.d_beta1 = self._get_config_param('discriminator_beta1', 0.5)
+            self.discriminator_optimizer = Adam(learning_rate=self.d_lr, beta_1=self.d_beta1)
+            logger.info(f"Discriminator optimizer explicitly created/verified in _build_discriminator with LR: {self.d_lr}, Beta1: {self.d_beta1}")
+        
+        d_metrics = [
+            'accuracy', 
+            tf.keras.metrics.Precision(name='d_precision'), 
+            tf.keras.metrics.Recall(name='d_recall'), 
+            tf.keras.metrics.AUC(name='d_auc')
+        ]
+        self.discriminator.compile(
+            optimizer=self.discriminator_optimizer,
+            loss='binary_crossentropy',
+            metrics=d_metrics
+        )
+        logger.info(f"Discriminator compiled with optimizer {self.discriminator_optimizer.__class__.__name__}, loss 'binary_crossentropy', and metrics: {[m.name if hasattr(m, 'name') else str(m) for m in d_metrics]}.")
+        
+        return self.discriminator
 
     def _build_gan(self) -> Model:
         if not self.generator:
@@ -1152,7 +1173,7 @@ class GANTrainerPlugin:
              # keras.Model requires inputs. If the generator has no inputs, it cannot be part of a standard Keras model graph this way.
              # This implies _initialize_core_parameters_from_config ensures some form of input for G if G exists.
              # If self.generator.inputs was empty, gan_keras_inputs_for_model_definition will be empty.
-             # A Keras model must have inputs. If the generator has no inputs, it cannot be part of a standard Keras model graph this way.
+             # A Keras model must have inputs. If the generator has no Keras inputs, it cannot be part of a standard Keras model graph this way.
              # This scenario should be caught earlier or handled by a different GAN structure.
              # For now, if gan_keras_inputs_for_model_definition is empty, this will error out when creating Model.
              if not self.generator.inputs: # Double check
@@ -1165,21 +1186,25 @@ class GANTrainerPlugin:
         
         # Compile GAN model (Optimizer for generator, as discriminator is frozen)
         # Loss is binary cross-entropy as we want generator to fool discriminator (output 1)
-        gan_model.compile(optimizer=self.g_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
-        self.logger.info("GAN model compiled.")
-        gan_model.summary(print_fn=self.logger.info)
-
-        try:
-            plot_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_plot_dir", "plots"))
-            os.makedirs(plot_dir, exist_ok=True)
-            plot_file_name = self.params.get("gan_model_plot_file", "gan_architecture.png")
-            plot_path = os.path.join(plot_dir, plot_file_name)
-            dpi = self.params.get("model_plot_dpi", 300)
-            plot_model(gan_model, to_file=plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
-            self.logger.info(f"GAN architecture plot saved to {plot_path}")
-        except Exception as e:
-            self.logger.warning(f"Could not plot GAN model: {e}. Ensure pydot and graphviz are installed.")
+        g_metrics = [
+            'accuracy', # Discriminator's accuracy on fake samples (generator wants this high)
+            tf.keras.metrics.Precision(name='g_precision_on_fake'), 
+            tf.keras.metrics.Recall(name='g_recall_on_fake'),    
+            tf.keras.metrics.AUC(name='g_auc_on_fake')          
+        ]
+        gan_model.compile(
+            optimizer=self.generator_optimizer,
+            loss='binary_crossentropy', # Generator tries to make discriminator output 1 (real)
+            metrics=g_metrics
+        )
+        logger.info(f"GAN model re-compiled/verified with optimizer {self.generator_optimizer.__class__.__name__}, loss 'binary_crossentropy', and metrics: {[m.name if hasattr(m, 'name') else str(m) for m in g_metrics]}.")
         
+        # Log model summary (assuming this is already done as per logs)
+        # self.gan_model.summary(print_fn=logger.info)
+        
+        # Plot model (assuming this is already done as per logs)
+        # self._plot_model_architecture(self.gan_model, self.gan_model_plot_file_path)
+
         return gan_model
 
     def _calculate_technical_indicators(self, data: pd.DataFrame, strategy: List[Dict[str, Any]], feature_names_for_output: Optional[List[str]] = None) -> pd.DataFrame:
@@ -1433,7 +1458,7 @@ class GANTrainerPlugin:
                     # Prepare the list of input arrays for generator.predict() in the correct order.
                     # self.generator_actual_input_names_ordered contains the Keras names.
                     # We need to find which feeder key corresponds to which Keras input name.
-                    # The hints (e.g., self.gan_latent_input_keras_name_hint) store the Keras name for a given role (latent, conditional).
+                    # The roles (e.g., self.gan_latent_input_keras_name_hint) store the Keras name for a given role (latent, conditional).
                     # The feeder keys (e.g., self.feeder_key_name_latent) are used to get data from feeder_output_dict.
 
                     generator_inputs_for_predict = []
