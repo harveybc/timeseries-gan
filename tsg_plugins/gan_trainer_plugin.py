@@ -650,7 +650,7 @@ class GANTrainerPlugin:
         # e.g., (None, 18, 21)
 
         ti_calculator_layer = TensorFlowTALayer(
-            base_feature_names=self.base_feature_names,
+            base_feature_names=self.base_feature_names_ordered, # CORRECTED
             ti_names_to_calculate=self.ti_names_to_calculate,
             num_base_features=self.num_base_features,
             num_total_features=self.num_features_for_discriminator, # This is num_base_features + num_ti_features
