@@ -1315,3 +1315,126 @@ class GANTrainerPlugin:
 
         logger.info(f"Technical indicators calculation complete. Features available: {all_feature_names}")
         return df_ti, all_feature_names
+
+    def train(self, x_train_file: Optional[str] = None, **kwargs) -> None:
+        """
+        Main training loop for the GAN.
+        """
+        self.logger.info(f"GANTrainerPlugin train method called. x_train_file: {x_train_file}")
+        self.logger.info(f"Received additional kwargs: {kwargs}")
+
+        if not self.generator or not self.discriminator or not self.gan_model:
+            self.logger.error("Models are not built. Cannot start training. Ensure generator is loaded and set_params has been called.")
+            return
+
+        epochs = self.params.get("gan_epochs", 1000)
+        batch_size = self.params.get("gan_batch_size", 32)
+        save_interval = self.params.get("gan_save_interval", 500)
+
+        # Placeholder for loading real data
+        if x_train_file:
+            self.logger.info(f"Attempting to load real data from: {x_train_file}")
+            # real_data = pd.read_csv(x_train_file) # Example
+            # self.logger.info(f"Loaded real data with shape: {real_data.shape}")
+            # Further processing to prepare real_data_processed for discriminator
+        else:
+            self.logger.warning("x_train_file not provided. Real data cannot be loaded for training.")
+            # Depending on the GAN design, this might be an error or handled by synthetic data only.
+            # For now, we'll proceed but log a warning.
+
+        self.logger.info(f"Starting GAN training for {epochs} epochs with batch size {batch_size}.")
+
+        for epoch in range(epochs):
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
+
+            # Generate a batch of synthetic data using the FeederPlugin and GeneratorPlugin
+            # This requires feeder_plugin_instance to be available and have a generate() method
+            # that returns data compatible with the generator's input requirements.
+            
+            # feeder_output_d = None # Placeholder
+            # if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'generate'):
+            #     try:
+            #         # The feeder's generate method needs to produce inputs compatible with self.generator_actual_input_names_ordered
+            #         # For example, if generator expects ['latent_input', 'conditional_input'], 
+            #         # feeder_output_d should be a list or dict that can be mapped to these.
+            #         # This is a complex part that needs careful alignment with FeederPlugin's output structure.
+            #         # Assuming feeder_plugin_instance.generate() returns a list of input arrays for the generator,
+            #         # matching the order in self.generator_actual_input_names_ordered.
+                     
+            #         # Example: feeder_output_d = self.feeder_plugin_instance.generate(n_samples=batch_size) 
+            #         # generated_samples_raw = self.generator.predict(feeder_output_d) # This is raw output
+                     
+            #         # The generated_samples_raw then needs to be processed (slicing, TIs) similar to _build_gan's logic
+            #         # before being fed to the discriminator. This part is non-trivial.
+            #         self.logger.debug(f"Epoch {epoch+1}/{epochs} - Placeholder for generating synthetic data for D.")
+            #         # For now, let's assume we have some `generated_samples_for_d`
+            #         # generated_samples_for_d = np.random.rand(batch_size, self.seq_len, self.num_features_for_discriminator) # Dummy data
+            #     except Exception as e_gen:
+            #         self.logger.error(f"Error generating data for discriminator training: {e_gen}", exc_info=True)
+            #         continue # Skip this batch if data generation fails
+            # else:
+            #     self.logger.warning("Feeder plugin instance not available or no generate method. Cannot generate synthetic data for D.")
+            #     # Create dummy generated samples if no feeder
+            #     # generated_samples_for_d = np.random.rand(batch_size, self.seq_len, self.num_features_for_discriminator)
+
+            # # Select a random batch of real samples (requires real_data_processed)
+            # # real_samples_for_d = ... # Placeholder for selecting real data batch
+            # # For now, dummy real samples
+            # # real_samples_for_d = np.random.rand(batch_size, self.seq_len, self.num_features_for_discriminator)
+
+
+            # # Train the discriminator
+            # # d_loss_real = self.discriminator.train_on_batch(real_samples_for_d, np.ones((batch_size, 1)))
+            # # d_loss_fake = self.discriminator.train_on_batch(generated_samples_for_d, np.zeros((batch_size, 1)))
+            # # d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+            d_loss = [0.0, 0.0] # Placeholder for d_loss [total_loss, accuracy]
+
+            # ---------------------
+            #  Train Generator
+            # ---------------------
+            
+            # Generate inputs for the GAN model (which internally calls the generator)
+            # This also requires feeder_plugin_instance.
+            # gan_input_data = None # Placeholder
+            # if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'generate'):
+            #     try:
+            #         # Similar to above, feeder_output_g should provide inputs for the GAN model's inputs
+            #         # (which correspond to the generator's inputs).
+            #         # gan_input_data = self.feeder_plugin_instance.generate(n_samples=batch_size)
+            #         self.logger.debug(f"Epoch {epoch+1}/{epochs} - Placeholder for generating GAN input data for G.")
+            #     except Exception as e_gan_input:
+            #         self.logger.error(f"Error generating GAN input data for generator training: {e_gan_input}", exc_info=True)
+            #         continue
+            # else:
+            #     self.logger.warning("Feeder plugin instance not available or no generate method. Cannot generate GAN input data for G.")
+            #     # Create dummy GAN input if no feeder. This needs to match the GAN model's input structure.
+            #     # gan_input_data = [] # This will likely fail if GAN expects inputs.
+                
+
+            # # Train the generator (via the GAN model)
+            # # The GAN model's inputs (self.gan_model.inputs) are derived from self.generator.inputs.
+            # # We need to prepare a list or dict of numpy arrays matching these inputs.
+            # # The labels for generator training are all "real" (1s) because we want the generator
+            # # to fool the discriminator.
+            # # g_loss = self.gan_model.train_on_batch(gan_input_data, np.ones((batch_size, 1)))
+            g_loss = 0.0 # Placeholder for g_loss
+
+            # Log progress
+            if (epoch + 1) % 100 == 0: # Log every 100 epochs
+                self.logger.info(f"Epoch {epoch+1}/{epochs} [D loss: {d_loss[0]:.4f}, acc.: {d_loss[1]*100:.2f}%] [G loss: {g_loss:.4f}]")
+
+            # Save models and plots at intervals
+            if save_interval > 0 and (epoch + 1) % save_interval == 0:
+                self.logger.info(f"Saving models at epoch {epoch+1}...")
+                # self._save_models(epoch=epoch + 1) # Assuming _save_models method exists
+                # self._plot_losses(epoch=epoch + 1) # Assuming _plot_losses method exists
+                # self._generate_and_save_sample_data(epoch=epoch + 1) # Assuming this method exists
+
+        self.logger.info("GAN Training finished.")
+        # Save final models
+        # self._save_models(epoch="final")
+        # self._plot_losses(epoch="final")
+        # self._generate_and_save_sample_data(epoch="final")
+        # self._save_training_metrics() # Assuming this method exists
