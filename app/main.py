@@ -544,6 +544,10 @@ def main():
 
     # --- (The old generate_datetime_column function can be removed or kept if used elsewhere) ---
 
+    # --- DEFINE EXECUTION MODE FLAGS EARLIER ---
+    is_gan_training_mode = current_config.get("gan_training_mode", False)
+    is_hyperparam_opt_mode = current_config.get("hyperparameter_optimization_mode", False) and current_config.get("run_hyperparameter_optimization", True)
+
     # --- DYNAMICALLY DEFINE TARGET_CSV_COLUMNS ---
     # This should be based on the generator's full feature list, which includes the datetime column.
     # The order should match how the final CSV is expected.
@@ -572,8 +576,8 @@ def main():
     # GAN TRAINING OR VAE‐GENERATE + EVALUATE / PREPEND
     # -------------------------------------------------------------------------
     
-    is_gan_training_mode = current_config.get("gan_training_mode", False) 
-    is_hyperparam_opt_mode = current_config.get("hyperparameter_optimization_mode", False) and current_config.get("run_hyperparameter_optimization", True)
+    # is_gan_training_mode = current_config.get("gan_training_mode", False) # MOVED EARLIER
+    # is_hyperparam_opt_mode = current_config.get("hyperparameter_optimization_mode", False) and current_config.get("run_hyperparameter_optimization", True) # MOVED EARLIER
 
     if is_gan_training_mode:
         print("▶ Starting GAN training mode...")
