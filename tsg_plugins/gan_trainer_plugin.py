@@ -764,12 +764,27 @@ class GANTrainerPlugin:
             
             # Get a random batch of real samples
             idx = np.random.randint(0, x_train_data.shape[0], self.params["gan_batch_size"])
-            real_data_batch_raw = x_train_data[idx] # (batch_size, seq_len, num_base_features)
+            # real_data_batch_raw = x_train_data[idx] # OLD LINE
+            real_data_batch_raw_full_features = x_train_data[idx] # (batch_size, seq_len, features_from_preprocessor)
+
+            # Slice to get only base features for TI calculation
+            # Ensure self.num_base_features is valid before slicing
+            if hasattr(self, 'num_base_features') and self.num_base_features > 0 and \
+               real_data_batch_raw_full_features.shape[-1] > self.num_base_features:
+                real_data_batch_base_features = real_data_batch_raw_full_features[:, :, :self.num_base_features]
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.info(
+                        f"GANTrainerPlugin (train): Sliced real_data_batch_raw_full_features from {real_data_batch_raw_full_features.shape[-1]} "
+                        f"to {self.num_base_features} features for TI calculation (real data)."
+                    )
+            else:
+                real_data_batch_base_features = real_data_batch_raw_full_features
             
             # Calculate TIs for the real data batch to match discriminator's expected input
-            # real_data_batch_raw should have shape (batch_size, seq_len, self.num_base_features)
+            # real_data_batch_base_features should have shape (batch_size, seq_len, self.num_base_features)
             # The _calculate_technical_indicators method will verify this.
-            real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_raw)
+            # real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_raw) # OLD LINE
+            real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_base_features)
 
             # Generate a batch of new series using the FeederPlugin and Generator
             feeder_output = self.feeder_plugin_instance.generate(n_ticks_to_generate=self.params["gan_batch_size"])
