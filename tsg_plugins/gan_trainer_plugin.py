@@ -1,20 +1,18 @@
 # optimizer/plugins/gan_plugin.py
 
-import copy  # For deep-copying configuration dicts
-import logging  # Standard logging module
-import random  # Random number generation
-import time  # Timing execution
-from typing import Any, Dict, List, Tuple, Union, Optional # Added Optional
-
-import numpy as np
-import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.optimizers import Adam # Corrected import
-from tensorflow.keras.utils import plot_model # ADDED for model architecture plots
-import matplotlib.pyplot as plt
+from tensorflow import keras
+from tensorflow.keras import layers, Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import plot_model
+import pandas as pd
+import pandas_ta as ta
 import numpy as np
-import os # Added os for path operations
-import sys # Added sys for exit operations
+import logging
+import os
+import time
+from copy import deepcopy
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 # Assuming your generator plugin (like VAEGeneratorPlugin) and a new discriminator model definition exist
 # from .generator_plugin import VAEGeneratorPlugin # Or your specific generator plugin
@@ -23,6 +21,8 @@ import sys # Added sys for exit operations
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Set default log level
+# ADD INFO MESSAGE ABOUT GENERATOR WARNING
+logger.info("GANTrainerPlugin: The VAE generator is intended to be frozen during GAN training. A 'UserWarning: The model does not have any trainable weights.' may appear when generator.predict() is called; this is expected for the frozen generator and does not affect discriminator or GAN training.")
 
 
 class GANTrainerPlugin:
@@ -34,11 +34,15 @@ class GANTrainerPlugin:
         "discriminator_lr": 1e-4,
         "discriminator_beta1": 0.5,
         "gan_save_interval": 500,
-        "latent_dim": 32, 
-        "seq_len": 18,    
+        "latent_dim": 32,
+        "seq_len": 18,
         "gan_model_dir": "models/gan_trained",
+        # Discriminator architecture params
+        "discriminator_conv_filters": [64, 128], # List of filters for Conv1D layers
+        "discriminator_conv_kernel_size": 3,      # Kernel size for Conv1D layers
         "discriminator_lstm_units": 64,
-        "discriminator_dense_units": 128,
+        "discriminator_dropout_rate": 0.3,
+        # "discriminator_dense_units": 128, # REMOVED - Replaced by Conv1D/LSTM focus
         "gan_generator_output_actual_seq_len": 1,
         # Callbacks parameters
         "enable_reduce_lr_on_plateau": True,
@@ -55,82 +59,78 @@ class GANTrainerPlugin:
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
-        logger.info("Initializing GANTrainerPlugin.")
-        self.config = copy.deepcopy(config)
+        self.config = deepcopy(config)
         self.params = self.plugin_params.copy()
-        # Update self.params with config, ensuring plugin_params defaults are taken if not in config
-        for key in self.plugin_params:
-            if key in self.config:
-                self.params[key] = self.config[key]
-        # Add any keys from config that were not in plugin_params (e.g. dynamic ones)
-        self.params.update(self.config)
+        self.set_params(**self.config)
 
+        self.generator_plugin_instance = generator_plugin_instance
+        self.feeder_plugin_instance = feeder_plugin_instance
+        self.preprocessor_plugin_instance = preprocessor_plugin_instance
 
-        self.generator_plugin = generator_plugin_instance
-        self.feeder_plugin = feeder_plugin_instance
-        self.preprocessor_plugin = preprocessor_plugin_instance
+        if not self.generator_plugin_instance:
+            raise ValueError("Generator plugin instance is required for GANTrainerPlugin.")
+        if not self.feeder_plugin_instance:
+            raise ValueError("Feeder plugin instance is required for GANTrainerPlugin.")
+            
+        self.generator: Optional[Model] = self.generator_plugin_instance.get_model()
+        if self.generator is None:
+            raise ValueError("Could not retrieve model from generator_plugin_instance.")
+        self.generator.trainable = False # Freeze the generator
+
+        # Feature configuration for TI calculation
+        self.base_feature_names = self.config.get("base_feature_names_ordered", [])
+        self.discriminator_feature_names = self.config.get("feature_names_for_discriminator_ordered", [])
+
+        if not self.base_feature_names:
+            raise ValueError("Config 'base_feature_names_ordered' is required for TI calculation.")
+        if not self.discriminator_feature_names:
+            raise ValueError("Config 'feature_names_for_discriminator_ordered' is required.")
+
+        self.num_base_features = len(self.base_feature_names)
+        self.num_features_for_discriminator = len(self.discriminator_feature_names)
         
-        # Parameters for the GENERATOR'S INPUT
-        # self.params["seq_len"] (e.g., 18) is the length of the latent sequence fed to the generator.
-        # self.params["latent_dim"] (e.g., 32) is the dim of each latent vector in that sequence.
-        self.gen_input_seq_len = self.params.get("seq_len", 18) # From latent_shape[0] via GANTrainerPlugin.plugin_params
-        self.gen_input_latent_dim = self.params.get("latent_dim", 32) # From latent_shape[1] via GANTrainerPlugin.plugin_params
+        # Verify generator output matches num_base_features
+        # Assuming generator model is already built and its output shape is known
+        # For example, via generator_plugin_instance.params.get("output_feature_dim")
+        # or self.generator.output_shape[-1]
+        gen_output_dim_config = self.generator_plugin_instance.params.get("output_feature_dim")
+        if gen_output_dim_config != self.num_base_features:
+            logger.warning(
+                f"Generator's configured output_feature_dim ({gen_output_dim_config}) "
+                f"differs from num_base_features ({self.num_base_features}) derived from "
+                f"'base_feature_names_ordered'. Ensure generator produces {self.num_base_features} base features."
+            )
+            # This could be an issue if the pre-trained generator doesn't output exactly num_base_features.
+            # For now, we proceed assuming it does, or _calculate_technical_indicators will fail.
 
-        # Parameters for the DISCRIMINATOR'S INPUT
-        # This is based on what the generator *outputs* (or what we want the GAN to focus on from it).
-        self.discriminator_target_n_features = len(self.params.get("generator_decoder_output_feature_names", []))
-        if self.discriminator_target_n_features == 0:
-            logger.warning("GANTrainerPlugin: 'generator_decoder_output_feature_names' is empty or not found. Defaulting discriminator_target_n_features to 1. THIS IS LIKELY INCORRECT.")
-            self.discriminator_target_n_features = 1
+        if not all(self.discriminator_feature_names[i] == self.base_feature_names[i] for i in range(self.num_base_features)):
+            raise ValueError("'base_feature_names_ordered' must be the prefix of 'feature_names_for_discriminator_ordered'.")
         
-        # The VAE decoder outputs a single step, so discriminator sequence length is 1.
-        self.discriminator_target_seq_len = self.params.get("gan_generator_output_actual_seq_len", 1)
+        self.ti_names_to_calculate = self.discriminator_feature_names[self.num_base_features:]
+        logger.info(f"Base features to be generated: {self.base_feature_names}")
+        logger.info(f"TIs to be calculated on generated base features: {self.ti_names_to_calculate}")
+        logger.info(f"Total features for discriminator: {self.num_features_for_discriminator} ({self.discriminator_feature_names})")
 
-        logger.info(f"GANTrainerPlugin: Generator INPUT: seq_len={self.gen_input_seq_len}, latent_dim={self.gen_input_latent_dim}")
-        logger.info(f"GANTrainerPlugin: Discriminator TARGET INPUT: seq_len={self.discriminator_target_seq_len}, n_features={self.discriminator_target_n_features}")
 
-        self.actual_generator_output_dim = None
-        if self.generator_plugin and hasattr(self.generator_plugin, 'model') and self.generator_plugin.model:
-            self.generator = self.generator_plugin.model
-            if self.generator:
-                self.generator.trainable = False # Freeze pre-trained VAE decoder
-                logger.info("GANTrainerPlugin: Set VAE decoder (generator) to trainable=False.")
-                generator_output_shape = self.generator.output_shape
-                if len(generator_output_shape) == 2: # Expected (batch_size, num_features)
-                    self.actual_generator_output_dim = generator_output_shape[1]
-                    logger.info(f"GANTrainerPlugin: Actual generator output dimension: {self.actual_generator_output_dim}")
-                    if self.actual_generator_output_dim != self.discriminator_target_n_features:
-                        logger.warning(f"GANTrainerPlugin: Generator output dim ({self.actual_generator_output_dim}) != discriminator target ({self.discriminator_target_n_features}). Output will be sliced.")
-                else:
-                    logger.error(f"GANTrainerPlugin: Generator output shape {generator_output_shape} is not 2D. Slicing might fail or be incorrect.")
-            logger.info("Using generator model from provided generator_plugin instance.")
-        else:
-            logger.warning("Generator plugin instance or its model not provided. Generator will be None.")
-            self.generator = None
-
-        # Get shapes for conditional and context inputs for the VAE DECODER (Generator)
-        if self.feeder_plugin and hasattr(self.feeder_plugin, 'params'):
-            num_date_feats = len(self.feeder_plugin.params.get("feeder_date_features_for_conditioning", [])) * 2
-            num_fund_feats = len(self.feeder_plugin.params.get("feeder_fundamental_features_for_conditioning", []))
-            self.conditional_dim_for_generator = num_date_feats + num_fund_feats
-            self.context_dim_for_generator = self.feeder_plugin.params.get("feeder_context_vector_dim", 64)
-        else:
-            # Corrected keys: removed "_names"
-            num_date_feats = len(self.params.get("feeder_date_features_for_conditioning", [])) * 2
-            num_fund_feats = len(self.params.get("feeder_fundamental_features_for_conditioning", []))
-            self.conditional_dim_for_generator = num_date_feats + num_fund_feats
-            self.context_dim_for_generator = self.params.get("feeder_context_vector_dim", 64) # Ensure this key is also correct if feeder_plugin is None
-        logger.info(f"GANTrainer determined for VAE Decoder (Generator) inputs: conditional_dim={self.conditional_dim_for_generator}, context_dim_gan={self.context_dim_for_generator}")
-
-        self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
-        self.discriminator_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
+        self.seq_len = self.params["seq_len"]
+        self.latent_dim = self.params["latent_dim"]
         
-        self.discriminator = self._build_discriminator()
-        self.gan = self._build_gan()
+        # Corrected conditional_dim for generator based on feeder plugin's output
+        self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_dim()
+        self.context_vector_dim_for_generator = self.feeder_plugin_instance.get_context_vector_dim()
+
+
+        self.discriminator: Optional[Model] = self._build_discriminator()
+        self.gan: Optional[Model] = self._build_gan()
+
+        self.d_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
+        self.g_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
         
-        self.gan_model_dir = self.params.get("gan_model_dir", "models/gan_trained")
-        os.makedirs(self.gan_model_dir, exist_ok=True)
-        logger.info(f"GAN models will be saved in: {os.path.abspath(self.gan_model_dir)}")
+        # For manual callbacks
+        self.best_lr_metric = float('inf')
+        self.lr_patience_counter = 0
+        self.best_es_metric = float('inf')
+        self.es_patience_counter = 0
 
     def set_params(self, **params: Any) -> None:
         logger.info(f"GANTrainerPlugin updating parameters: {list(params.keys())}")
@@ -175,32 +175,39 @@ class GANTrainerPlugin:
         # self.gan = self._build_gan()
 
 
-    def _build_discriminator(self) -> tf.keras.Model:
-        logger.info("Building Discriminator model...")
-        # Discriminator input shape is based on the (potentially sliced and reshaped) generator output
-        input_shape_disc = (self.discriminator_target_seq_len, self.discriminator_target_n_features)
-        logger.info(f"Discriminator input shape: {input_shape_disc}")
-
-        model = tf.keras.Sequential(name="discriminator")
-        # If seq_len is 1, LSTM might be overkill or behave like a Dense layer on flattened input.
-        model.add(tf.keras.layers.LSTM(self.params.get("discriminator_lstm_units", 64), input_shape=input_shape_disc, return_sequences=True if self.discriminator_target_seq_len > 1 else False))
-        if self.discriminator_target_seq_len > 1: # Add Flatten only if LSTM returns sequences
-            model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dense(self.params.get("discriminator_dense_units", 128), activation='relu'))
-        model.add(tf.keras.layers.Dropout(0.3))
-        model.add(tf.keras.layers.Dense(1, activation='sigmoid'))
+    def _build_discriminator(self) -> Model:
+        logger.info("Building Discriminator...")
         
-        model.compile(loss='binary_crossentropy', optimizer=self.discriminator_optimizer, metrics=['accuracy'])
-        logger.info("Discriminator model built and compiled.")
+        data_input = layers.Input(shape=(self.seq_len, self.num_features_for_discriminator), name="discriminator_input")
+        
+        x = data_input
+        
+        # Conv1D layers
+        conv_filters = self.params.get("discriminator_conv_filters", [64, 128])
+        kernel_size = self.params.get("discriminator_conv_kernel_size", 3)
+        for filters in conv_filters:
+            x = layers.Conv1D(filters=filters, kernel_size=kernel_size, padding='causal', activation='relu')(x)
+            x = layers.BatchNormalization()(x) # Added BatchNormalization
+            x = layers.SpatialDropout1D(self.params.get("discriminator_dropout_rate", 0.3) / 2)(x) # Added SpatialDropout1D
+
+        # Bidirectional LSTM layer
+        lstm_units = self.params.get("discriminator_lstm_units", 64)
+        # x = layers.Bidirectional(layers.LSTM(units=lstm_units, return_sequences=True))(x) # If another LSTM or TimeDistributed Dense follows
+        # x = layers.BatchNormalization()(x) # Added BatchNormalization
+        x = layers.Bidirectional(layers.LSTM(units=lstm_units, return_sequences=False))(x) # return_sequences=False for final feature vector
+        x = layers.BatchNormalization()(x) # Added BatchNormalization
+        
+        x = layers.Dropout(self.params.get("discriminator_dropout_rate", 0.3))(x)
+        
+        # Output layer
+        output = layers.Dense(1, activation='sigmoid', name="discriminator_output")(x)
+        
+        model = Model(data_input, output, name="Discriminator")
+        logger.info("Discriminator built successfully.")
         model.summary(print_fn=logger.info)
-        try:
-            plot_model(model, to_file=os.path.join(self.gan_model_dir, 'discriminator_model_plot.png'), show_shapes=True, show_layer_names=True)
-            logger.info(f"Discriminator model plot saved to {os.path.join(self.gan_model_dir, 'discriminator_model_plot.png')}")
-        except Exception as e:
-            logger.warning(f"Could not plot discriminator model: {e}. Ensure pydot and graphviz are installed.")
         return model
 
-    def _build_gan(self) -> tf.keras.Model:
+    def _build_gan(self) -> Model:
         if not self.generator or not self.discriminator:
             logger.error("Generator or Discriminator not initialized. Cannot build GAN.")
             raise ValueError("Generator or Discriminator not initialized.")
@@ -275,307 +282,335 @@ class GANTrainerPlugin:
         return gan
 
     def train(self, x_train_file: Optional[str] = None, data: Optional[np.ndarray] = None) -> None:
-        if self.generator is None or self.discriminator is None or self.gan is None:
-            logger.error("Models not built. Cannot start training.")
-            return
+        if data is None and x_train_file is None:
+            raise ValueError("Either data or x_train_file must be provided for training.")
 
-        logger.info("--- Discriminator Model Summary (at start of training) ---")
-        self.discriminator.summary(print_fn=logger.info)
-        logger.info("--- End Discriminator Model Summary ---")
-        
-        # Ensure model directory exists for plots even before first save_models call
-        os.makedirs(self.gan_model_dir, exist_ok=True)
-        # Attempt to plot models here if not done in _build_gan or if dir wasn't ready
-        if not os.path.exists(os.path.join(self.gan_model_dir, 'discriminator_model_plot.png')):
+        if data is None:
+            logger.info(f"Loading training data from {x_train_file}...")
+            # Assuming x_train_file is a numpy file or similar loadable format
+            # This part needs to align with how data is actually stored/loaded.
+            # For now, let's assume it's a .npy file with shape (num_samples, seq_len, num_features_from_preprocessor)
+            # The preprocessor outputs 54 features.
             try:
-                plot_model(self.discriminator, to_file=os.path.join(self.gan_model_dir, 'discriminator_model_plot.png'), show_shapes=True, show_layer_names=True)
-            except Exception: pass # Ignore if fails, already tried in build
-        if not os.path.exists(os.path.join(self.gan_model_dir, 'gan_model_plot.png')):
-            try:
-                plot_model(self.gan, to_file=os.path.join(self.gan_model_dir, 'gan_model_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
-            except Exception: pass # Ignore if fails
-        if self.generator and not os.path.exists(os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png')):
-            try:
-                plot_model(self.generator, to_file=os.path.join(self.gan_model_dir, 'gan_generator_component_plot.png'), show_shapes=True, show_layer_names=True, expand_nested=True)
-            except Exception: pass
-
-
-        # Configure preprocessor to output data suitable for discriminator
-        # (seq_len=self.discriminator_target_seq_len, features=self.discriminator_target_n_features)
-        preprocess_config_for_gan = self.config.copy()
-        # The preprocessor should use 'generator_decoder_output_feature_names' for feature selection (now target_n_features)
-        # And its 'window_size' or equivalent should be set to self.discriminator_target_seq_len (which is 1)
-        # This assumes preprocessor can be configured this way.
-        
-        preprocess_config_for_gan['seq_len'] = self.discriminator_target_seq_len
-        preprocess_config_for_gan['window_size'] = self.discriminator_target_seq_len
-        # The line for 'feature_names_to_use' is removed/kept commented as preprocessor cannot be changed.
-
-
-        real_data_numpy: Optional[np.ndarray] = None # Initialize to ensure it's defined
-
-        if data is None and x_train_file is not None:
-            logger.info(f"Loading training data from: {x_train_file} for GAN using preprocessor.")
-            if not self.preprocessor_plugin:
-                logger.error("Preprocessor plugin not available.")
-                raise ValueError("Preprocessor plugin required for x_train_file.")
-            
-            processed_data_dict = self.preprocessor_plugin.run_preprocessing(config=preprocess_config_for_gan)
-            real_data_from_preprocessor = processed_data_dict.get("x_train")
-            all_feature_names_from_preprocessor = processed_data_dict.get("feature_names")
-            
-            if real_data_from_preprocessor is None:
-                logger.error(f"Preprocessor did not return 'x_train' data from {x_train_file}.")
-                raise ValueError("Failed to load/process training data via preprocessor.")
-            if not all_feature_names_from_preprocessor:
-                logger.error(f"Preprocessor did not return 'feature_names'. Cannot select features for discriminator.")
-                raise ValueError("Preprocessor must return 'feature_names'.")
-
-            if isinstance(real_data_from_preprocessor, pd.DataFrame):
-                real_data_from_preprocessor = real_data_from_preprocessor.values
-            if not isinstance(real_data_from_preprocessor, np.ndarray):
-                real_data_from_preprocessor = np.array(real_data_from_preprocessor)
-
-            # Ensure data from preprocessor is 3D: (samples, seq_len, features_all)
-            # The preprocessor output is (N, 1, 54), so it should be 3D.
-            if real_data_from_preprocessor.ndim == 2 and self.discriminator_target_seq_len == 1:
-                logger.info(f"Reshaping data from preprocessor from {real_data_from_preprocessor.shape} to 3D for GAN.")
-                real_data_from_preprocessor = np.reshape(real_data_from_preprocessor, (-1, 1, real_data_from_preprocessor.shape[1]))
-            elif real_data_from_preprocessor.ndim != 3:
-                logger.error(f"Data from preprocessor has unexpected shape {real_data_from_preprocessor.shape}. Expected 3D or 2D (if seq_len=1).")
-                raise ValueError("Preprocessor output shape not suitable for GAN.")
-
-            # --- Select specific features for the discriminator ---
-            discriminator_expected_feature_names = self.params.get("generator_decoder_output_feature_names")
-            if not discriminator_expected_feature_names:
-                logger.error("'generator_decoder_output_feature_names' not configured. Cannot select features for discriminator.")
-                raise ValueError("Missing 'generator_decoder_output_feature_names' in configuration.")
-
-            logger.info(f"Preprocessor output {real_data_from_preprocessor.shape[2]} features: {all_feature_names_from_preprocessor}")
-            logger.info(f"Discriminator expects {len(discriminator_expected_feature_names)} features: {discriminator_expected_feature_names}")
-
-            try:
-                selected_feature_indices = [all_feature_names_from_preprocessor.index(name) for name in discriminator_expected_feature_names]
-            except ValueError as e:
-                missing_feature = str(e).split("'")[1] # Extract missing feature name
-                logger.error(f"Feature selection error: A feature expected by the discriminator ('{missing_feature}') was not found in the preprocessor's output. ")
-                logger.error(f"Expected features by discriminator: {discriminator_expected_feature_names}")
-                logger.error(f"Available features from preprocessor: {all_feature_names_from_preprocessor}")
-                raise ValueError(f"Feature mismatch: '{missing_feature}' not in preprocessor output.") from e
-            
-            real_data_numpy = real_data_from_preprocessor[:, :, selected_feature_indices]
-            logger.info(f"Data sliced from {real_data_from_preprocessor.shape} to {real_data_numpy.shape} for discriminator based on 'generator_decoder_output_feature_names'.")
-
-        elif data is not None:
-            logger.info("Using provided 'data' array for training. Assuming it has the correct shape and features for the discriminator.")
-            real_data_numpy = data
-            if not isinstance(real_data_numpy, np.ndarray):
-                real_data_numpy = np.array(real_data_numpy)
+                real_data_full = np.load(x_train_file)
+                logger.info(f"Loaded data shape: {real_data_full.shape}")
+            except Exception as e:
+                logger.error(f"Failed to load data from {x_train_file}: {e}")
+                raise
         else:
-            logger.error("No training data provided (neither x_train_file nor data array).")
-            return
+            real_data_full = data
+            logger.info(f"Using provided data with shape: {real_data_full.shape}")
 
-        # Validate the final shape of real_data_numpy before proceeding
-        logger.info(f"Shape of final training data for GAN (real_data_numpy): {real_data_numpy.shape}")
-        if real_data_numpy.ndim != 3 or \
-           real_data_numpy.shape[1] != self.discriminator_target_seq_len or \
-           real_data_numpy.shape[2] != self.discriminator_target_n_features:
-            logger.error(f"Final training data shape {real_data_numpy.shape} MISMATCHES discriminator input expectation (samples, {self.discriminator_target_seq_len}, {self.discriminator_target_n_features}).")
-            raise ValueError("Real data final shape mismatch for discriminator after processing.")
-        
-        # Use real_data_numpy for training from here onwards
-        epochs = self.params["gan_epochs"]
+        if real_data_full.shape[-1] < self.num_features_for_discriminator:
+            raise ValueError(
+                f"Loaded data has {real_data_full.shape[-1]} features, but discriminator expects "
+                f"{self.num_features_for_discriminator} features after slicing/TI calculation. "
+                f"Ensure input data (from preprocessor) has at least {self.num_features_for_discriminator} features."
+            )
+
+        gan_epochs = self.params["gan_epochs"]
         batch_size = self.params["gan_batch_size"]
-        save_interval = self.params["gan_save_interval"]
+        gan_save_interval = self.params["gan_save_interval"]
 
-        # Callback: ReduceLROnPlateau settings
-        enable_reduce_lr = self.params.get("enable_reduce_lr_on_plateau", False)
-        lr_reduction_factor = self.params.get("lr_reduction_factor", 0.5)
-        lr_patience = self.params.get("lr_patience", 50)
-        lr_min_delta = self.params.get("lr_min_delta", 0.001)
-        min_lr_g = self.params.get("min_lr_g", 1e-7)
-        min_lr_d = self.params.get("min_lr_d", 1e-7)
-        lr_monitor_metric_name = self.params.get("lr_monitor_metric", "g_loss")
-
-        best_lr_metric_val = float('inf')
-        lr_patience_counter = 0
-        lr_reductions_count = 0
-
-        # Callback: EarlyStopping settings
-        enable_early_stop = self.params.get("enable_early_stopping", False)
-        es_patience = self.params.get("es_patience", 200)
-        es_min_delta = self.params.get("es_min_delta", 0.001)
-        es_monitor_metric_name = self.params.get("es_monitor_metric", "g_loss")
-        
-        best_es_metric_val = float('inf')
-        es_patience_counter = 0
-
-
+        # Adversarial ground truths
         valid = np.ones((batch_size, 1))
         fake = np.zeros((batch_size, 1))
-        d_losses, g_losses = [], []
 
-        for epoch in range(epochs):
+        # For storing losses
+        d_losses_history = []
+        g_losses_history = []
+        d_accs_history = []
+
+        # Initialize learning rates for manual callback tracking
+        current_lr_g = float(self.g_optimizer.learning_rate.numpy())
+        current_lr_d = float(self.d_optimizer.learning_rate.numpy())
+
+        logger.info(f"Starting GAN training for {gan_epochs} epochs with batch size {batch_size}...")
+        logger.info(f"Initial Generator LR: {current_lr_g}, Discriminator LR: {current_lr_d}")
+        logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
+        logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
+        logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
+
+
+        for epoch in range(gan_epochs):
             start_time_epoch = time.time()
             
-            idx = np.random.randint(0, real_data_numpy.shape[0], batch_size)
-            real_batch = real_data_numpy[idx] # Shape (batch_size, disc_target_seq_len, disc_target_n_features)
-
-            if not self.feeder_plugin:
-                logger.error("Feeder plugin not available.")
-                raise ValueError("Feeder plugin required.")
-
-            # Feeder generates inputs for the VAE Decoder (Generator)
-            feeder_output_for_gen = self.feeder_plugin.generate(
-                n_ticks_to_generate=batch_size,
-                # Feeder needs to know the generator's input sequence length (gen_input_seq_len)
-                # This should be handled by FeederPlugin's own config (e.g. latent_shape)
-            )
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
             
-            latent_input_for_generator = feeder_output_for_gen.get('latent_vector_batch') # Shape (batch, gen_input_seq_len, gen_input_latent_dim)
-            conditional_input_for_generator = feeder_output_for_gen.get('conditional_data_batch') # Shape (batch, conditional_dim_for_generator)
-            context_input_for_generator = feeder_output_for_gen.get('context_h_batch') # Shape (batch, context_dim_for_generator)
-
-            # (Error handling for missing feeder outputs as before)
-            if latent_input_for_generator is None or conditional_input_for_generator is None or context_input_for_generator is None:
-                logger.error("FeederPlugin did not return all required inputs for the generator.")
-                # Simplified fallback for brevity, ensure shapes are correct
-                latent_input_for_generator = np.random.normal(0, 1, (batch_size, self.gen_input_seq_len, self.gen_input_latent_dim))
-                conditional_input_for_generator = np.zeros((batch_size, self.conditional_dim_for_generator))
-                context_input_for_generator = np.zeros((batch_size, self.context_dim_for_generator))
-
-            # Order inputs for self.generator.predict
-            generator_input_names_from_model = [inp.name.split(':')[0] for inp in self.generator.inputs]
-            cfg_latent_name = self.params.get("generator_decoder_input_name_latent")
-            cfg_context_name = self.params.get("generator_decoder_input_name_context")
-            cfg_conditional_name = self.params.get("generator_decoder_input_name_conditions")
-            input_data_map_predict = {
-                cfg_latent_name: latent_input_for_generator,
-                cfg_context_name: context_input_for_generator,
-                cfg_conditional_name: conditional_input_for_generator,
-            }
-            generator_predict_inputs_ordered = []
-            for model_input_name in generator_input_names_from_model:
-                found_match = False
-                for cfg_name, data_array in input_data_map_predict.items():
-                    if cfg_name and model_input_name.startswith(cfg_name):
-                        generator_predict_inputs_ordered.append(data_array)
-                        found_match = True
-                        break
-                if not found_match: logger.warning(f"Train loop: Predict input '{model_input_name}' not mapped.")
+            # Get a random batch of real samples
+            idx = np.random.randint(0, real_data_full.shape[0], batch_size)
+            real_data_batch_raw = real_data_full[idx] # (batch_size, seq_len, features_from_preprocessor)
             
-            # Change this line:
-            # generated_batch_raw = self.generator.predict(generator_predict_inputs_ordered)
-            # To this:
-            generated_batch_raw = self.generator.predict(generator_predict_inputs_ordered, verbose=0)
+            # Slice to the features the discriminator will see (first N features from preprocessor output)
+            # These are assumed to be correctly ordered (base + TIs) by the unmodifiable preprocessor
+            real_data_for_discriminator = real_data_batch_raw[:, :, :self.num_features_for_discriminator]
 
+            # Generate a batch of new series using the FeederPlugin and Generator
+            # FeederPlugin provides latent_input, conditional_input, context_input
+            feeder_outputs = self.feeder_plugin_instance.generate(n_samples=batch_size)
+            latent_input_batch = feeder_outputs["latent_vectors"]
+            conditional_input_batch = feeder_outputs["conditional_vectors"]
+            context_input_batch = feeder_outputs["context_vectors"]
 
-            # Slice if needed
-            generated_batch_for_disc = generated_batch_raw
-            if self.actual_generator_output_dim and self.actual_generator_output_dim != self.discriminator_target_n_features:
-                generated_batch_for_disc = generated_batch_raw[:, :self.discriminator_target_n_features] # Slice to (bs, 21)
+            generator_inputs = [latent_input_batch, conditional_input_batch, context_input_batch]
             
-            # Reshape for discriminator
-            generated_batch_reshaped = np.reshape(
-                generated_batch_for_disc, 
-                (-1, self.discriminator_target_seq_len, self.discriminator_target_n_features) # e.g. (bs, 1, 21)
-            )
+            # Generator produces base features
+            generated_base_features_raw = self.generator.predict(generator_inputs, verbose=0) # (batch, seq_len, num_base_features)
 
-            d_loss_real = self.discriminator.train_on_batch(real_batch, valid)
-            d_loss_fake = self.discriminator.train_on_batch(generated_batch_reshaped, fake)
-            d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+            # Calculate TIs for generated data
+            generated_features_with_tis = self._calculate_technical_indicators(generated_base_features_raw) # (batch, seq_len, num_features_for_discriminator)
+            generated_data_for_discriminator = generated_features_with_tis
 
-            # Train Generator (GAN)
-            # Feeder generates inputs for VAE Decoder again for GAN's forward pass
-            feeder_output_for_gan_train = self.feeder_plugin.generate(n_ticks_to_generate=batch_size)
-            latent_input_for_gan_train = feeder_output_for_gan_train.get('latent_vector_batch')
-            conditional_input_for_gan_train = feeder_output_for_gan_train.get('conditional_data_batch')
-            context_input_for_gan_train = feeder_output_for_gan_train.get('context_h_batch')
-            # (Error handling for missing feeder outputs as before)
-            if latent_input_for_gan_train is None or conditional_input_for_gan_train is None or context_input_for_gan_train is None:
-                logger.error("FeederPlugin did not return all required inputs for GAN training step.")
-                latent_input_for_gan_train = np.random.normal(0, 1, (batch_size, self.gen_input_seq_len, self.gen_input_latent_dim))
-                conditional_input_for_gan_train = np.zeros((batch_size, self.conditional_dim_for_generator))
-                context_input_for_gan_train = np.zeros((batch_size, self.context_dim_for_generator))
-
-            gan_train_inputs_ordered = [latent_input_for_gan_train, conditional_input_for_gan_train, context_input_for_gan_train]
-            g_loss = self.gan.train_on_batch(gan_train_inputs_ordered, valid)
+            # Train the discriminator
+            # Note: tf.GradientTape is used for custom training loops.
+            # If using model.compile() and model.train_on_batch(), this is handled internally.
+            # The current structure seems to use train_on_batch.
             
-            epoch_time = time.time() - start_time_epoch
-            d_losses.append(d_loss[0])
-            g_losses.append(g_loss)
+            d_loss_real = self.discriminator.train_on_batch(real_data_for_discriminator, valid)
+            d_loss_fake = self.discriminator.train_on_batch(generated_data_for_discriminator, fake)
+            d_loss = 0.5 * np.add(d_loss_real[0], d_loss_fake[0]) # Loss is typically the first element
+            d_acc = 0.5 * np.add(d_loss_real[1], d_loss_fake[1]) # Accuracy is typically the second
 
-            # --- Callback Logic ---
-            current_lr_metric_val = g_loss if lr_monitor_metric_name == "g_loss" else d_loss[0]
-            current_es_metric_val = g_loss if es_monitor_metric_name == "g_loss" else d_loss[0]
+            # ---------------------
+            #  Train Generator
+            # ---------------------
+            # The GAN model (combined) trains the generator to fool the discriminator
+            
+            # Generate new inputs for the generator for this training step
+            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_samples=batch_size)
+            latent_input_batch_g = feeder_outputs_for_g["latent_vectors"]
+            conditional_input_batch_g = feeder_outputs_for_g["conditional_vectors"]
+            context_input_batch_g = feeder_outputs_for_g["context_vectors"]
+            
+            gan_inputs = [latent_input_batch_g, conditional_input_batch_g, context_input_batch_g]
+            g_loss = self.gan.train_on_batch(gan_inputs, valid) # Generator tries to make discriminator output "valid"
 
-            # ReduceLROnPlateau
-            if enable_reduce_lr:
-                if current_lr_metric_val < best_lr_metric_val - lr_min_delta:
-                    best_lr_metric_val = current_lr_metric_val
-                    lr_patience_counter = 0
+            # Store losses
+            d_losses_history.append(d_loss)
+            g_losses_history.append(g_loss) # g_loss from gan.train_on_batch is a single value (or list if multiple losses)
+            d_accs_history.append(d_acc)
+
+            epoch_duration = time.time() - start_time_epoch
+
+            # Print the progress
+            print(f"Epoch {epoch+1}/{gan_epochs} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.1e}, LR D: {current_lr_d:.1e})")
+
+            # Manual ReduceLROnPlateau
+            if self.params["enable_reduce_lr_on_plateau"]:
+                metric_to_monitor_lr = g_loss if self.params["lr_monitor_metric"] == "g_loss" else d_loss # Adjust as needed
+                if metric_to_monitor_lr < (self.best_lr_metric - self.params["lr_min_delta"]):
+                    self.best_lr_metric = metric_to_monitor_lr
+                    self.lr_patience_counter = 0
                 else:
-                    lr_patience_counter += 1
-                
-                if lr_patience_counter >= lr_patience:
-                    lr_patience_counter = 0
-                    lr_reductions_count += 1
-                    
-                    old_lr_g = float(tf.keras.backend.get_value(self.generator_optimizer.learning_rate))
-                    new_lr_g_val = max(old_lr_g * lr_reduction_factor, min_lr_g)
-                    # Directly assign the new learning rate
-                    if hasattr(self.generator_optimizer.learning_rate, 'assign'):
-                        self.generator_optimizer.learning_rate.assign(new_lr_g_val)
-                    else:
-                        self.generator_optimizer.learning_rate = new_lr_g_val # Fallback for older Keras/TF
-                    
-                    old_lr_d = float(tf.keras.backend.get_value(self.discriminator_optimizer.learning_rate))
-                    new_lr_d_val = max(old_lr_d * lr_reduction_factor, min_lr_d)
-                    # Directly assign the new learning rate
-                    if hasattr(self.discriminator_optimizer.learning_rate, 'assign'):
-                        self.discriminator_optimizer.learning_rate.assign(new_lr_d_val)
-                    else:
-                        self.discriminator_optimizer.learning_rate = new_lr_d_val # Fallback for older Keras/TF
+                    self.lr_patience_counter += 1
 
-                    # For logging, get the newly set value
-                    log_new_lr_g = float(tf.keras.backend.get_value(self.generator_optimizer.learning_rate))
-                    log_new_lr_d = float(tf.keras.backend.get_value(self.discriminator_optimizer.learning_rate))
-                    logger.info(f"ReduceLROnPlateau: Epoch {epoch}. Reducing LRs. G: {old_lr_g:.2e}->{log_new_lr_g:.2e}, D: {old_lr_d:.2e}->{log_new_lr_d:.2e}. Reductions: {lr_reductions_count}.")
-            
-            # EarlyStopping
-            if enable_early_stop:
-                if current_es_metric_val < best_es_metric_val - es_min_delta:
-                    best_es_metric_val = current_es_metric_val
-                    es_patience_counter = 0
+                if self.lr_patience_counter >= self.params["lr_patience"]:
+                    new_lr_g = max(current_lr_g * self.params["lr_reduction_factor"], self.params["min_lr_g"])
+                    new_lr_d = max(current_lr_d * self.params["lr_reduction_factor"], self.params["min_lr_d"])
+                    if new_lr_g < current_lr_g :
+                        self.g_optimizer.learning_rate.assign(new_lr_g)
+                        current_lr_g = new_lr_g
+                        logger.info(f"Reduced generator LR to {current_lr_g:.1e}")
+                    if new_lr_d < current_lr_d:
+                        self.d_optimizer.learning_rate.assign(new_lr_d)
+                        current_lr_d = new_lr_d
+                        logger.info(f"Reduced discriminator LR to {current_lr_d:.1e}")
+                    self.lr_patience_counter = 0 # Reset counter after reduction
+                print(f"  ReduceLROnPlateau: Counter {self.lr_patience_counter}/{self.params['lr_patience']}, Best Metric: {self.best_lr_metric:.4f}")
+
+
+            # Manual EarlyStopping
+            if self.params["enable_early_stopping"]:
+                metric_to_monitor_es = g_loss if self.params["es_monitor_metric"] == "g_loss" else d_loss # Adjust
+                if metric_to_monitor_es < (self.best_es_metric - self.params["es_min_delta"]):
+                    self.best_es_metric = metric_to_monitor_es
+                    self.es_patience_counter = 0
                 else:
-                    es_patience_counter += 1
+                    self.es_patience_counter += 1
 
-                if es_patience_counter >= es_patience:
-                    logger.info(f"EarlyStopping: Epoch {epoch}. Monitored metric ({es_monitor_metric_name}) did not improve for {es_patience} epochs. Stopping training.")
-                    break # Exit epoch loop
-
-            log_message_parts = [
-                f"{epoch}/{epochs}",
-                f"[D loss: {d_loss[0]:.4f}, acc.: {100*d_loss[1]:.2f}%]",
-                f"[G loss: {g_loss:.4f}]",
-                f"time: {epoch_time:.2f}s"
-            ]
-            if enable_reduce_lr:
-                log_message_parts.append(f"[LR Patience: {lr_patience_counter}/{lr_patience}, Reductions: {lr_reductions_count}]")
-            if enable_early_stop:
-                log_message_parts.append(f"[ES Patience: {es_patience_counter}/{es_patience}]")
-
-            if epoch % 100 == 0 or epoch == epochs -1 :
-                logger.info(" ".join(log_message_parts))
+                if self.es_patience_counter >= self.params["es_patience"]:
+                    logger.info(f"Early stopping triggered at epoch {epoch+1}.")
+                    print(f"  EarlyStopping: Counter {self.es_patience_counter}/{self.params['es_patience']}, Best Metric: {self.best_es_metric:.4f}. Stopping training.")
+                    break 
+                print(f"  EarlyStopping: Counter {self.es_patience_counter}/{self.params['es_patience']}, Best Metric: {self.best_es_metric:.4f}")
 
 
-            if epoch % save_interval == 0 and epoch > 0:
+            if epoch % gan_save_interval == 0 and epoch > 0:
                 self.save_models(epoch)
-        
-        self.save_models(epochs)
-        logger.info("GAN Training completed.")
-        self._plot_losses(d_losses, g_losses)
+                self._plot_losses(d_losses_history, g_losses_history) # Plot intermediate losses
 
+        logger.info("GAN Training finished.")
+        self.save_models(gan_epochs) # Save final models
+        self._plot_losses(d_losses_history, g_losses_history) # Plot final losses
+
+    def _calculate_technical_indicators(self, base_features_batch_np: np.ndarray) -> np.ndarray:
+        """
+        Calculates technical indicators on the generated base features.
+        Input: base_features_batch_np (batch_size, seq_len, num_base_features)
+        Output: combined_features_batch_np (batch_size, seq_len, num_features_for_discriminator)
+        """
+        batch_size, seq_len, num_base_feat_input = base_features_batch_np.shape
+
+        if num_base_feat_input != self.num_base_features:
+            error_msg = (
+                f"Input for TI calculation has {num_base_feat_input} features, "
+                f"expected {self.num_base_features} base features based on 'base_feature_names_ordered': {self.base_feature_names}."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if not self.ti_names_to_calculate:
+            if self.num_base_features == self.num_features_for_discriminator:
+                logger.info("No TIs to calculate, and base features count matches discriminator's expected features count. Skipping TI calculation.")
+                return base_features_batch_np
+            else:
+                error_msg = (
+                    f"TI Calculation: Configuration Error. No TIs are specified in 'ti_names_to_calculate', "
+                    f"but the number of base features ({self.num_base_features} from 'base_feature_names_ordered') "
+                    f"does not match the total number of features expected by the discriminator "
+                    f"({self.num_features_for_discriminator} from 'feature_names_for_discriminator_ordered'). "
+                    "This implies 'feature_names_for_discriminator_ordered' is not simply 'base_feature_names_ordered' + TIs, "
+                    "or there's a mismatch in counts."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+        all_combined_features_list = []
+
+        for i in range(batch_size):
+            sample_base_features_df = pd.DataFrame(base_features_batch_np[i, :, :], columns=self.base_feature_names)
+            # df_with_tas will accumulate base features and TIs
+            df_with_tas = sample_base_features_df.copy()
+
+            # --- Define OHLCV column mapping (simplified fallback) ---
+            # A more robust solution would involve explicit configuration for these mappings.
+            base_cols = self.base_feature_names
+            col_map = {}
+            col_map['close'] = base_cols[0] if 'close' not in base_cols else 'close'
+            col_map['high'] = base_cols[1] if len(base_cols) > 1 and 'high' not in base_cols else col_map['close']
+            if 'high' in base_cols: col_map['high'] = 'high'
+            col_map['low'] = base_cols[2] if len(base_cols) > 2 and 'low' not in base_cols else col_map['close']
+            if 'low' in base_cols: col_map['low'] = 'low'
+            col_map['open'] = base_cols[3] if len(base_cols) > 3 and 'open' not in base_cols else col_map['close']
+            if 'open' in base_cols: col_map['open'] = 'open'
+            col_map['volume'] = base_cols[4] if len(base_cols) > 4 and 'volume' not in base_cols else None
+            if 'volume' in base_cols: col_map['volume'] = 'volume'
+            # --- End OHLCV Mapping ---
+
+            # Store unique (indicator_type, params_tuple) to avoid redundant calls for TIs that generate multiple columns (e.g. MACD, BBANDS)
+            # This set will store tuples like ('macd', (12, 26, 9))
+            processed_indicator_calls = set()
+
+            # Iterate through a predefined list of supported TA functions and check if their outputs are needed
+            # This is more robust than parsing each string in self.ti_names_to_calculate individually if one call generates multiple TIs.
+
+            # MACD (e.g., MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9)
+            macd_configs = set()
+            for ti_name in self.ti_names_to_calculate:
+                if ti_name.startswith("MACD_") or ti_name.startswith("MACDh_") or ti_name.startswith("MACDs_"):
+                    parts = ti_name.split('_')
+                    if len(parts) == 4: # MACD_F_S_SIG
+                        try:
+                            f, s, sig = int(parts[1]), int(parts[2]), int(parts[3])
+                            macd_configs.add((f, s, sig))
+                        except ValueError:
+                            logger.warning(f"Could not parse MACD params from {ti_name}")
+            for f,s,sig in macd_configs:
+                if ('macd', (f,s,sig)) not in processed_indicator_calls:
+                    try:
+                        df_with_tas.ta.macd(close=df_with_tas[col_map['close']], fast=f, slow=s, signal=sig, append=True)
+                        processed_indicator_calls.add(('macd', (f,s,sig)))
+                    except Exception as e:
+                        logger.warning(f"Error calculating MACD({f},{s},{sig}): {e}")
+            
+            # BBANDS (e.g., BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, BBB_20_2.0, BBP_20_2.0)
+            bbands_configs = set()
+            for ti_name in self.ti_names_to_calculate:
+                if ti_name.startswith("BBL_") or ti_name.startswith("BBM_") or \
+                   ti_name.startswith("BBU_") or ti_name.startswith("BBB_") or \
+                   ti_name.startswith("BBP_"):
+                    parts = ti_name.split('_') # e.g. BBL_20_2.0
+                    if len(parts) == 3:
+                        try:
+                            l, st = int(parts[1]), float(parts[2])
+                            bbands_configs.add((l,st))
+                        except ValueError:
+                             logger.warning(f"Could not parse BBANDS params from {ti_name}")
+            for l, st in bbands_configs:
+                if ('bbands', (l,st)) not in processed_indicator_calls:
+                    try:
+                        df_with_tas.ta.bbands(close=df_with_tas[col_map['close']], length=l, std=st, append=True)
+                        processed_indicator_calls.add(('bbands', (l,st)))
+                    except Exception as e:
+                        logger.warning(f"Error calculating BBANDS({l},{st}): {e}")
+
+            # RSI, SMA, EMA (these typically generate one column per call matching the TI name)
+            for ti_name in self.ti_names_to_calculate:
+                parts = ti_name.split('_')
+                indicator_type = parts[0].lower()
+                
+                if indicator_type == "rsi" and len(parts) == 2:
+                    if (ti_name) not in processed_indicator_calls:
+                        try:
+                            length = int(parts[1])
+                            df_with_tas.ta.rsi(close=df_with_tas[col_map['close']], length=length, append=True) # Appends e.g. RSI_14
+                            processed_indicator_calls.add(ti_name)
+                        except Exception as e:
+                            logger.warning(f"Error calculating {ti_name}: {e}")
+                elif indicator_type == "sma" and len(parts) == 2:
+                    if (ti_name) not in processed_indicator_calls:
+                        try:
+                            length = int(parts[1])
+                            df_with_tas.ta.sma(close=df_with_tas[col_map['close']], length=length, append=True) # Appends e.g. SMA_20
+                            processed_indicator_calls.add(ti_name)
+                        except Exception as e:
+                            logger.warning(f"Error calculating {ti_name}: {e}")
+                elif indicator_type == "ema" and len(parts) == 2:
+                    if (ti_name) not in processed_indicator_calls:
+                        try:
+                            length = int(parts[1])
+                            df_with_tas.ta.ema(close=df_with_tas[col_map['close']], length=length, append=True) # Appends e.g. EMA_50
+                            processed_indicator_calls.add(ti_name)
+                        except Exception as e:
+                            logger.warning(f"Error calculating {ti_name}: {e}")
+                # Add more indicators here: ATR, ADX, STOCH, OBV etc. following similar parsing.
+                # Example for ATR (needs HLC):
+                # elif indicator_type == "atr" and len(parts) == 2: # Assumes ATR_L, pandas-ta creates ATRr_L
+                #     if ('atr', parts[1]) not in processed_indicator_calls: # ATRr_14
+                #         try:
+                #             length = int(parts[1])
+                #             # Ensure high, low, close columns are valid
+                #             if col_map['high'] and col_map['low'] and col_map['close']:
+                #                 df_with_tas.ta.atr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, append=True)
+                #                 processed_indicator_calls.add(('atr', parts[1]))
+                #         except Exception as e:
+                #             logger.warning(f"Error calculating ATR with params {parts[1:]}: {e}")
+            
+            # Ensure all columns required by discriminator are present, fill NaNs, and order correctly.
+            # Columns in self.discriminator_feature_names that are not in df_with_tas after TA calculation will be added with NaNs.
+            df_final_sample = df_with_tas.reindex(columns=self.discriminator_feature_names)
+            
+            # Fill NaNs - common at the start of series due to TA lookback periods.
+            # Using 0 for now. Consider ffill() then 0, or other strategies.
+            df_final_sample = df_final_sample.fillna(0) 
+
+            all_combined_features_list.append(df_final_sample.to_numpy())
+
+        combined_batch_np = np.stack(all_combined_features_list, axis=0)
+        
+        if combined_batch_np.shape[-1] != self.num_features_for_discriminator:
+            error_msg = (
+                f"Output of TI calculation has {combined_batch_np.shape[-1]} features, "
+                f"but discriminator expects {self.num_features_for_discriminator}. "
+                f"Expected feature names: {self.discriminator_feature_names}. "
+                f"Resulting columns: {list(df_final_sample.columns) if 'df_final_sample' in locals() else 'Error before final df construction'}."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        return combined_batch_np
 
     def _plot_losses(self, d_losses: List[float], g_losses: List[float]):
         """Plots generator and discriminator loss."""
@@ -617,10 +652,10 @@ class GANTrainerPlugin:
         #     self.gan.save(gan_path)
         #     logger.info(f"Saved GAN model to {gan_path}")
 
-    def get_generator(self) -> Optional[tf.keras.Model]:
+    def get_generator(self) -> Optional[Model]: # Corrected Keras Model type
         """Returns the trained generator model."""
         return self.generator
 
-    def get_discriminator(self) -> Optional[tf.keras.Model]:
+    def get_discriminator(self) -> Optional[Model]: # Corrected Keras Model type
         """Returns the trained discriminator model."""
         return self.discriminator
