@@ -472,6 +472,7 @@ class GANTrainerPlugin:
         self.generator_output_actual_seq_len: int = self.params.get("gan_generator_output_actual_seq_len", 1)
         self.actual_generator_output_dim: int = 0
         self.generator: Optional[Model] = None # Initialize generator attribute
+        self.generator_actual_input_names_ordered: List[str] = [] # Initialize attribute
 
         self.generator_plugin_instance = generator_plugin_instance
         self.feeder_plugin_instance = feeder_plugin_instance
@@ -485,6 +486,12 @@ class GANTrainerPlugin:
             self.generator: Optional[Model] = self.generator_plugin_instance.get_model()
             if self.generator:
                 self.logger.info("Successfully retrieved generator model from plugin via get_model().")
+                if hasattr(self.generator, 'inputs') and self.generator.inputs:
+                    self.generator_actual_input_names_ordered = [inp.name.split(':')[0] for inp in self.generator.inputs]
+                    self.logger.info(f"Generator actual input names ordered: {self.generator_actual_input_names_ordered}")
+                else:
+                    self.logger.warning("Generator model retrieved but has no inputs or inputs attribute is missing.")
+                    self.generator_actual_input_names_ordered = []
                 # Plot and save generator model architecture
                 try:
                     plot_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
@@ -529,19 +536,28 @@ class GANTrainerPlugin:
                 self.logger.error("Failed to get generator model from generator_plugin_instance (get_model() returned None).")
                 self.generator = None # Ensure it's None
                 self.actual_generator_output_dim = 0
+                self.generator_actual_input_names_ordered = [] # Ensure it's empty if no generator
         elif self.generator_plugin_instance and hasattr(self.generator_plugin_instance, 'sequential_model'): # Fallback to direct attribute
             self.generator: Optional[Model] = self.generator_plugin_instance.sequential_model
             if self.generator:
                  self.logger.info("Retrieved generator model from plugin via sequential_model attribute.")
+                 if hasattr(self.generator, 'inputs') and self.generator.inputs:
+                    self.generator_actual_input_names_ordered = [inp.name.split(':')[0] for inp in self.generator.inputs]
+                    self.logger.info(f"Generator actual input names ordered (from sequential_model): {self.generator_actual_input_names_ordered}")
+                 else:
+                    self.logger.warning("Generator model (sequential_model) retrieved but has no inputs or inputs attribute is missing.")
+                    self.generator_actual_input_names_ordered = []
                  # (Plotting and dim check logic as above) ...
             else:
                 self.logger.error("Generator model (sequential_model) is None in generator_plugin_instance.")
                 self.generator = None
                 self.actual_generator_output_dim = 0
+                self.generator_actual_input_names_ordered = [] # Ensure it's empty if no generator
         else:
             self.logger.error("GeneratorPlugin instance not provided or does not have get_model method or sequential_model attribute.")
             self.generator = None
             self.actual_generator_output_dim = 0
+            self.generator_actual_input_names_ordered = [] # Ensure it's empty if no generator
         
         # _initialize_core_parameters_from_config() is called within set_params in my typical structure,
         # or should be called after set_params if it relies on fully merged params.
