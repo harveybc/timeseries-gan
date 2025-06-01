@@ -587,40 +587,65 @@ class GANTrainerPlugin:
             logger.warning(f"Could not plot GAN model: {e}. Ensure pydot and graphviz are installed.")
         return gan
 
-    def train(self, x_train_file: Optional[str] = None, data: Optional[np.ndarray] = None) -> None:
-        if data is None and x_train_file is None:
-            raise ValueError("Either data or x_train_file must be provided for training.")
+    def train(self, x_train_file: str, y_train_file: str = None, x_test_file: str = None, y_test_file: str = None):
+        self.logger.info(f"GANTrainerPlugin (train): Starting GAN training with x_train_file: {x_train_file}")
 
-        if data is None:
-            logger.info(f"Loading training data from {x_train_file}...")
-            # Assuming x_train_file is a numpy file or similar loadable format
-            # This part needs to align with how data is actually stored/loaded.
-            # For now, let's assume it's a .npy file with shape (num_samples, seq_len, num_features_from_preprocessor)
-            # The preprocessor outputs 54 features.
-            try:
-                real_data_full = np.load(x_train_file)
-                logger.info(f"Loaded data shape: {real_data_full.shape}")
-            except Exception as e:
-                logger.error(f"Failed to load data from {x_train_file}: {e}")
-                raise
-        else:
-            real_data_full = data
-            logger.info(f"Using provided data with shape: {real_data_full.shape}")
+        # Load data using pandas for CSV
+        try:
+            data_df = pd.read_csv(x_train_file)
+            self.logger.info(f"GANTrainerPlugin (train): Successfully loaded CSV data from {x_train_file}. Shape: {data_df.shape}")
+        except Exception as e:
+            self.logger.error(f"GANTrainerPlugin (train): Error loading CSV file {x_train_file}. Error: {e}")
+            raise
 
-        if real_data_full.shape[-1] < self.num_features_for_discriminator:
-            raise ValueError(
-                f"Loaded data has {real_data_full.shape[-1]} features, but discriminator expects "
-                f"{self.num_features_for_discriminator} features after slicing/TI calculation. "
-                f"Ensure input data (from preprocessor) has at least {self.num_features_for_discriminator} features."
-            )
+        # Drop DATE_TIME column if it exists
+        if 'DATE_TIME' in data_df.columns:
+            data_df = data_df.drop(columns=['DATE_TIME'])
+            self.logger.info(f"GANTrainerPlugin (train): Dropped 'DATE_TIME' column. New shape: {data_df.shape}")
+        
+        # Convert to numpy array
+        x_train_data_full = data_df.to_numpy()
+        self.logger.info(f"GANTrainerPlugin (train): Converted data to NumPy array. Shape: {x_train_data_full.shape}")
 
-        gan_epochs = self.params["gan_epochs"]
-        batch_size = self.params["gan_batch_size"]
-        gan_save_interval = self.params["gan_save_interval"]
+        # Create sequences
+        seq_len = self.params.get('seq_len', 18) # Get seq_len from params, default to 18
+        if x_train_data_full.shape[0] < seq_len:
+            self.logger.error(f"GANTrainerPlugin (train): Data length ({x_train_data_full.shape[0]}) is less than seq_len ({seq_len}). Cannot create sequences.")
+            raise ValueError(f"Data length ({x_train_data_full.shape[0]}) is less than seq_len ({seq_len}).")
+
+        num_samples = x_train_data_full.shape[0] - seq_len + 1
+        num_features = x_train_data_full.shape[1]
+        
+        x_train_sequences = np.array([x_train_data_full[i:i+seq_len] for i in range(num_samples)])
+        
+        if x_train_sequences.ndim == 2: # Should be 3D, but if num_features is 1 and seq_len is also 1, it might become 2D.
+            # This case might indicate an issue or a very specific scenario.
+            # For now, let's ensure it's 3D if num_samples > 0
+            if num_samples > 0 :
+                 x_train_sequences = x_train_sequences.reshape(num_samples, seq_len, num_features if num_features > 0 else 1)
+            else: # if num_samples is 0, it means not enough data to form even one sequence
+                self.logger.error(f"GANTrainerPlugin (train): Not enough data to form any sequences. num_samples: {num_samples}, seq_len: {seq_len}, data_shape: {x_train_data_full.shape}")
+                # Decide how to handle this: raise error, return, or proceed with empty data if the rest of the code can handle it.
+                # For now, let's make it an empty array with the correct number of dimensions if possible, or raise error.
+                if num_features > 0:
+                    x_train_sequences = np.empty((0, seq_len, num_features))
+                else: # This case (0 features) is highly problematic
+                    self.logger.error(f"GANTrainerPlugin (train): Data has 0 features after processing. Original shape: {data_df.shape}, after numpy conversion: {x_train_data_full.shape}")
+                    raise ValueError("Data has 0 features after processing.")
+
+
+        self.logger.info(f"GANTrainerPlugin (train): Created sequences. Shape: {x_train_sequences.shape}")
+        
+        # x_train_data = np.load(x_train_file, allow_pickle=True) # Old way, for .npy files
+        x_train_data = x_train_sequences # Use the processed sequences
+
+        if x_train_data.ndim == 2:
+            x_train_data = np.expand_dims(x_train_data, axis=1) # Add sequence length dimension
+            self.logger.info(f"GANTrainerPlugin (train): Expanded dims for 2D data. New shape: {x_train_data.shape}")
 
         # Adversarial ground truths
-        valid = np.ones((batch_size, 1))
-        fake = np.zeros((batch_size, 1))
+        valid = np.ones((x_train_data.shape[0], 1))
+        fake = np.zeros((x_train_data.shape[0], 1))
 
         # For storing losses
         d_losses_history = []
@@ -631,14 +656,14 @@ class GANTrainerPlugin:
         current_lr_g = float(tf.keras.backend.get_value(self.g_optimizer.learning_rate))
         current_lr_d = float(tf.keras.backend.get_value(self.d_optimizer.learning_rate))
 
-        logger.info(f"Starting GAN training for {gan_epochs} epochs with batch size {batch_size}...")
+        logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs with batch size {self.params['gan_batch_size']}...")
         logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
         logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
         logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
         logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
 
 
-        for epoch in range(gan_epochs):
+        for epoch in range(self.params['gan_epochs']):
             start_time_epoch = time.time()
             
             # ---------------------
@@ -646,8 +671,8 @@ class GANTrainerPlugin:
             # ---------------------
             
             # Get a random batch of real samples
-            idx = np.random.randint(0, real_data_full.shape[0], batch_size)
-            real_data_batch_raw = real_data_full[idx] # (batch_size, seq_len, features_from_preprocessor)
+            idx = np.random.randint(0, x_train_data.shape[0], self.params["gan_batch_size"])
+            real_data_batch_raw = x_train_data[idx] # (batch_size, seq_len, features_from_preprocessor)
             
             # Slice to the features the discriminator will see (first N features from preprocessor output)
             # These are assumed to be correctly ordered (base + TIs) by the unmodifiable preprocessor
@@ -655,7 +680,7 @@ class GANTrainerPlugin:
 
             # Generate a batch of new series using the FeederPlugin and Generator
             # FeederPlugin provides latent_input, conditional_input, context_input
-            feeder_outputs = self.feeder_plugin_instance.generate(n_samples=batch_size)
+            feeder_outputs = self.feeder_plugin_instance.generate(n_samples=self.params["gan_batch_size"])
             latent_input_batch = feeder_outputs["latent_vectors"]
             conditional_input_batch = feeder_outputs["conditional_vectors"]
             context_input_batch = feeder_outputs["context_vectors"]
@@ -690,7 +715,7 @@ class GANTrainerPlugin:
             # The GAN model (combined) trains the generator to fool the discriminator
             
             # Generate new inputs for the generator for this training step
-            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_samples=batch_size)
+            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_samples=self.params["gan_batch_size"])
             latent_input_batch_g = feeder_outputs_for_g["latent_vectors"]
             conditional_input_batch_g = feeder_outputs_for_g["conditional_vectors"]
             context_input_batch_g = feeder_outputs_for_g["context_vectors"]
@@ -706,7 +731,7 @@ class GANTrainerPlugin:
             epoch_duration = time.time() - start_time_epoch
 
             # Print the progress
-            print(f"Epoch {epoch+1}/{gan_epochs} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.1e}, LR D: {current_lr_d:.1e})")
+            print(f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.1e}, LR D: {current_lr_d:.1e})")
 
             # Manual ReduceLROnPlateau
             if self.params["enable_reduce_lr_on_plateau"]:
@@ -758,12 +783,12 @@ class GANTrainerPlugin:
                 print(f"  EarlyStopping: Counter {self.es_patience_counter}/{self.params['es_patience']}, Best Metric: {self.best_es_metric:.4f}")
 
 
-            if epoch % gan_save_interval == 0 and epoch > 0:
+            if epoch % self.params["gan_save_interval"] == 0 and epoch > 0:
                 self.save_models(epoch)
                 self._plot_losses(d_losses_history, g_losses_history) # Plot intermediate losses
 
         logger.info("GAN Training finished.")
-        self.save_models(gan_epochs) # Save final models
+        self.save_models(self.params['gan_epochs']) # Save final models
         self._plot_losses(d_losses_history, g_losses_history) # Plot final losses
 
     def _calculate_technical_indicators(self, base_features_batch_np: np.ndarray) -> np.ndarray:
@@ -906,7 +931,7 @@ class GANTrainerPlugin:
                     # Expect MACD_F_S_SIG, MACDh_F_S_SIG, MACDs_F_S_SIG
                     if len(parts) == 4:
                         try: macd_configs.add((int(parts[1]), int(parts[2]), int(parts[3])))
-                        except ValueError: logger.warning(f"Could not parse MACD params from {ti_name}")
+                        except ValueError: logger.warning(f"Could not parse MACD params from ti_name {ti_name}")
             for f,s,sig in macd_configs:
                 call_key = ('macd', str((f,s,sig)))
                 if call_key not in processed_indicator_calls:
@@ -970,9 +995,6 @@ class GANTrainerPlugin:
                         try:
                             # mamode="rma" is often default for "true range" ATR.
                             # pandas-ta default is mamode="sma". ATRr uses rma.
-                            # If config implies "true range" (ATRr), use mamode="rma"
-                            # For simplicity, we'll assume if "ATRr" is in config, user wants rma.
-                            # The column name from pandas-ta will be ATRr_LENGTH if mamode='rma'
                             df_with_tas.ta.atr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, mamode="rma", append=True)
                             processed_indicator_calls.add(call_key)
                             logger.debug(f"Calculated ATRr_{length}")
