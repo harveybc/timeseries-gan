@@ -486,9 +486,15 @@ class GANTrainerPlugin:
             self.generator: Optional[Model] = self.generator_plugin_instance.get_model()
             if self.generator:
                 self.logger.info("Successfully retrieved generator model from plugin via get_model().")
+                self.generator.summary(print_fn=self.logger.info) # Print generator summary
                 if hasattr(self.generator, 'inputs') and self.generator.inputs:
                     self.generator_actual_input_names_ordered = [inp.name.split(':')[0] for inp in self.generator.inputs]
                     self.logger.info(f"Generator actual input names ordered: {self.generator_actual_input_names_ordered}")
+                    if self.generator.built:
+                        self.logger.info("Generator Model Summary (from get_model path):")
+                        self.generator.summary(print_fn=self.logger.info)
+                    else:
+                        self.logger.info("Generator model (from get_model path) is not built yet, summary not printed in __init__.")
                 else:
                     self.logger.warning("Generator model retrieved but has no inputs or inputs attribute is missing.")
                     self.generator_actual_input_names_ordered = []
@@ -541,13 +547,19 @@ class GANTrainerPlugin:
             self.generator: Optional[Model] = self.generator_plugin_instance.sequential_model
             if self.generator:
                  self.logger.info("Retrieved generator model from plugin via sequential_model attribute.")
+                 self.generator.summary(print_fn=self.logger.info) # Print generator summary
                  if hasattr(self.generator, 'inputs') and self.generator.inputs:
                     self.generator_actual_input_names_ordered = [inp.name.split(':')[0] for inp in self.generator.inputs]
                     self.logger.info(f"Generator actual input names ordered (from sequential_model): {self.generator_actual_input_names_ordered}")
+                    if self.generator.built:
+                        self.logger.info("Generator Model Summary (from sequential_model attribute):")
+                        self.generator.summary(print_fn=self.logger.info)
+                    else:
+                        self.logger.info("Generator model (from sequential_model attribute) is not built yet, summary not printed in __init__.")
                  else:
                     self.logger.warning("Generator model (sequential_model) retrieved but has no inputs or inputs attribute is missing.")
                     self.generator_actual_input_names_ordered = []
-                 # (Plotting and dim check logic as above) ...
+                 # Plotting and dim check logic as above
             else:
                 self.logger.error("Generator model (sequential_model) is None in generator_plugin_instance.")
                 self.generator = None
@@ -595,7 +607,10 @@ class GANTrainerPlugin:
             self.logger.error("Discriminator model building failed in __init__.")
 
         self.gan: Optional[Model] = self._build_gan()
-        if not self.gan:
+        if self.gan: # Check if GAN model was built successfully
+             self.logger.info("GAN model built successfully.")
+             self.gan.summary(print_fn=self.logger.info) # Print GAN summary
+        else:
              self.logger.error("GAN model building failed in __init__.")
 
         self.best_lr_metric = float('inf')
@@ -1028,9 +1043,15 @@ class GANTrainerPlugin:
             if generated_base_features_raw.shape[-1] != self.num_base_features and self.num_base_features > 0:
                  generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
 
-            generated_data_for_discriminator = self._calculate_technical_indicators(generated_base_features_raw)
-            
-            # Ensure discriminator is trainable for this step
+                # Calculate TIs for generated data
+                # self.logger.info(f"Shape of generated_base_features_raw before TI calc: {generated_base_features_raw.shape}")
+                generated_features_with_tis = self._calculate_technical_indicators(
+                    generated_base_features_raw,
+                    data_type_for_logging="generated"
+                ) # (batch, seq_len_for_TI, num_features_for_discriminator)
+                # self.logger.info(f"Shape of generated_features_with_tis after TI calc: {generated_features_with_tis.shape}")
+
+                # Train Discriminator
             if self.discriminator: self.discriminator.trainable = True
 
             d_loss_real_metrics = self.discriminator.train_on_batch(real_data_for_discriminator, valid_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
@@ -1107,122 +1128,173 @@ class GANTrainerPlugin:
 
         self.logger.info(f"Final models, plots, and metrics should be in {self.params['results_base_dir']}")
 
-    def _calculate_technical_indicators(self, base_features_batch_np: np.ndarray) -> np.ndarray:
+    def _calculate_technical_indicators(self, base_features_batch_param: Union[tf.Tensor, np.ndarray], # Renamed for clarity
+        data_type_for_logging: str = "unknown") -> Union[tf.Tensor, np.ndarray]:
         """
-        Calculates technical indicators for a batch of base features.
-        Input: base_features_batch_np (batch_size, seq_len, num_base_features)
-        Output: combined_features_batch_np (batch_size, seq_len, num_features_for_discriminator)
+        Calculates technical indicators on a batch of base features.
+        Input can be a TensorFlow tensor or a NumPy array.
+        Output will be a TensorFlow tensor if TensorFlowTALayer is used, otherwise matches input type (or NumPy if conversion happened).
+        Shape: (batch_size, seq_len, num_base_features) -> (batch_size, seq_len, num_base_features + num_tis)
         """
-        batch_size, seq_len_ti, num_input_features_ti = base_features_batch_np.shape # Renamed for clarity
-        
-        logger.debug(f"[_calculate_technical_indicators] Input base_features_batch_np shape: {base_features_batch_np.shape}")
-        logger.debug(f"[_calculate_technical_indicators] self.num_base_features: {self.num_base_features}")
-        logger.debug(f"[_calculate_technical_indicators] self.base_feature_names_ordered: {self.base_feature_names_ordered}")
-        logger.debug(f"[_calculate_technical_indicators] self.ti_names_to_calculate: {self.ti_names_to_calculate}")
-        logger.debug(f"[_calculate_technical_indicators] self.tas_strategy_for_discriminator_tis: {self.tas_strategy_for_discriminator_tis}")
-        logger.debug(f"[_calculate_technical_indicators] self.discriminator_feature_names (target for reindex): {self.discriminator_feature_names}")
-        logger.debug(f"[_calculate_technical_indicators] self.num_features_for_discriminator (target for output): {self.num_features_for_discriminator}")
+        self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Received input of type: {type(base_features_batch_param)}")
 
-        if num_input_features_ti != self.num_base_features:
-            error_msg = (
-                f"Input for TI calculation has {num_input_features_ti} features, "
-                f"but expected {self.num_base_features} base features according to self.num_base_features. "
-                f"Base feature names expected: {self.base_feature_names_ordered}"
+        if self.num_tis == 0:
+            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): No TIs to calculate (self.num_tis is 0). Returning original input.")
+            return base_features_batch_param # Return original input directly
+
+        # Convert to NumPy for shape checking and pandas-ta, if not already
+        if isinstance(base_features_batch_param, tf.Tensor):
+            base_features_batch_np = base_features_batch_param.numpy()
+            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Converted TF tensor to NumPy. Shape: {base_features_batch_np.shape}")
+        else:
+            base_features_batch_np = np.array(base_features_batch_param) # Ensure it's a NumPy array if not TF tensor
+            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Input is NumPy or converted. Shape: {base_features_batch_np.shape}")
+
+        # Reshape if 2D (batch_size, features) assuming seq_len is 1
+        if base_features_batch_np.ndim == 2:
+            self.logger.info(
+                f"_calculate_technical_indicators ({data_type_for_logging}): Input is 2D (shape {base_features_batch_np.shape}). "
+                f"Assuming seq_len=1 and reshaping to 3D: (batch_size, 1, num_features)."
             )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            # Add a sequence dimension of 1. Target shape: (batch_size, 1, num_features)
+            base_features_batch_np = np.expand_dims(base_features_batch_np, axis=1)
+            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Reshaped to {base_features_batch_np.shape}")
+        elif base_features_batch_np.ndim != 3:
+            self.logger.error(
+                f"_calculate_technical_indicators ({data_type_for_logging}): Input is not 2D or 3D (ndim={base_features_batch_np.ndim}, shape={base_features_batch_np.shape}). "
+                f"Cannot proceed with TI calculation. Returning original input."
+            )
+            return base_features_batch_param # Return original input parameter
 
-        # Ensure pandas_ta is imported (consider moving to top of file if not already there)
-        try:
-            import pandas_ta as ta # type: ignore
-        except ImportError:
-            logger.error("pandas-ta is not installed. Please install it to calculate technical indicators.")
-            # Depending on desired behavior, either raise error or return base features
-            raise
-
-        all_combined_features_list = []
-
-        for i in range(batch_size):
-            sample_base_features = base_features_batch_np[i, :, :] # Shape: (seq_len, num_base_features)
-            
-            # Create DataFrame for the current sample's base features
-            # Ensure self.base_feature_names_ordered has correct number of names
-            if len(self.base_feature_names_ordered) != num_input_features_ti:
-                err_msg = f"Mismatch: len(self.base_feature_names_ordered)={len(self.base_feature_names_ordered)} but num_input_features_ti={num_input_features_ti}"
-                logger.error(err_msg)
-                raise ValueError(err_msg)
-                
-            df_sample_base = pd.DataFrame(sample_base_features, columns=self.base_feature_names_ordered)
-            
-            # Map OHLCV if necessary (adjust column names as per your actual base feature names)
-            # This mapping is crucial for pandas-ta to find the right columns.
-            # Example: if your base features are ['open', 'high', 'low', 'close', 'volume']
-            # And pandas-ta expects ['Open', 'High', 'Low', 'Close', 'Volume']
-            # ohlcv_map = {
-            #     self.ohlc_feature_map.get("open", "open"): "Open",
-            #     self.ohlc_feature_map.get("high", "high"): "High",
-            #     self.ohlc_feature_map.get("low", "low"): "Low",
-            #     self.ohlc_feature_map.get("close", "close"): "Close",
-            #     self.ohlc_feature_map.get("volume", "volume"): "Volume"
-            # }
-            # df_ta_input = df_sample_base.rename(columns=ohlcv_map)
-            # For simplicity, assuming df_sample_base column names are already what pandas-ta expects
-            # or that self.base_feature_names_ordered are directly usable by pandas-ta.
-            # If not, a renaming step like above is needed using self.ohlc_feature_map.
-            # For now, we directly use df_sample_base.
-
-            # Initialize an empty DataFrame for TIs to ensure clean concatenation
-            df_sample_tis = pd.DataFrame(index=df_sample_base.index)
-
-            if self.tas_strategy_for_discriminator_tis and isinstance(self.tas_strategy_for_discriminator_tis, ta.Strategy):
-                logger.debug(f"Sample {i}: Applying TA strategy: {self.tas_strategy_for_discriminator_tis.name}")
-                # Calculate TIs using the strategy. pandas-ta appends to the DataFrame.
-                # Make a copy to avoid modifying the original df_sample_base if it's used later without TIs.
-                df_with_appended_tis = df_sample_base.copy()
-                df_with_appended_tis.ta.strategy(self.tas_strategy_for_discriminator_tis, append=True)
-                
-                # Extract only the newly added TI columns.
-                # The columns in df_with_appended_tis that are not in df_sample_base.columns are the TIs.
-                ti_cols_added = [col for col in df_with_appended_tis.columns if col not in df_sample_base.columns]
-                if ti_cols_added:
-                    df_sample_tis = pd.concat([df_sample_tis, df_with_appended_tis[ti_cols_added]], axis=1)
-                logger.debug(f"Sample {i}: TI columns added by strategy: {ti_cols_added}")
-                logger.debug(f"Sample {i}: df_sample_tis shape after strategy: {df_sample_tis.shape}, columns: {list(df_sample_tis.columns)}")
-
+        self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): PRE-UNPACK CHECK: base_features_batch_np.shape = {base_features_batch_np.shape}, base_features_batch_np.ndim = {base_features_batch_np.ndim}")
+        if base_features_batch_np.ndim != 3:
+            self.logger.error(
+                f"_calculate_technical_indicators ({data_type_for_logging}): CRITICAL ERROR - Expected 3D array for shape unpacking "
+                f"but got {base_features_batch_np.ndim}D. Shape: {base_features_batch_np.shape}. Returning original input."
+            )
+            if isinstance(base_features_batch_param, tf.Tensor):
+                return base_features_batch_param
             else:
-                logger.warning(f"Sample {i}: No valid TA strategy found or self.ti_names_to_calculate is empty. No TIs will be calculated by strategy.")
-            
-            # Concatenate base features with calculated TIs
-            df_with_tas = pd.concat([df_sample_base, df_sample_tis], axis=1)
-            logger.debug(f"Sample {i}: df_with_tas (base + TIs) shape: {df_with_tas.shape}, columns: {list(df_with_tas.columns)}")
-            
-                       
-            # Reindex to ensure all expected features for the discriminator are present and in order
-            # This will add any missing columns (e.g., TIs that were expected but not calculated) as NaN
-            df_final_sample = df_with_tas.reindex(columns=self.discriminator_feature_names)
-            logger.debug(f"Sample {i}: df_final_sample after reindex shape: {df_final_sample.shape}, columns: {list(df_final_sample.columns)}")
-            
-            # Fill NaNs - common at the start of series due to TA lookback periods or if TIs weren't calculable.
-            df_final_sample = df_final_sample.fillna(0) 
+                return np.array(base_features_batch_np)
 
-            all_combined_features_list.append(df_final_sample.to_numpy())
+        batch_size, seq_len_input, num_base_feat_input = base_features_batch_np.shape
+        self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Shape after potential reshape: {base_features_batch_np.shape} -> Batch: {batch_size}, SeqLenIn: {seq_len_input}, FeaturesIn: {num_base_feat_input}")
 
-        combined_batch_np = np.stack(all_combined_features_list, axis=0)
-        logger.debug(f"[_calculate_technical_indicators] Final combined_batch_np shape: {combined_batch_np.shape}")
-        
-
-        
-        if combined_batch_np.shape[-1] != self.num_features_for_discriminator:
-            error_msg = (
-                f"Output of TI calculation has {combined_batch_np.shape[-1]} features, "
-                f"but discriminator expects {self.num_features_for_discriminator}. "
-                f"Expected feature names: {self.discriminator_feature_names}. " # Corrected: self.discriminator_feature_names
-                f"Resulting columns: {list(df_final_sample.columns) if 'df_final_sample' in locals() else 'Error before final df construction'}."
+        if num_base_feat_input == 0 and self.num_base_features > 0 :
+             self.logger.warning(
+                f"_calculate_technical_indicators ({data_type_for_logging}): Input num_base_feat_input is 0, "
+                f"but self.num_base_features is {self.num_base_features}. This is problematic."
             )
-            logger.error(error_msg) # Corrected indentation
-            raise ValueError(error_msg) # Corrected indentation
+        elif num_base_feat_input != self.num_base_features and self.num_base_features > 0 : # only warn if self.num_base_features is set
+            self.logger.warning(
+                f"_calculate_technical_indicators ({data_type_for_logging}): Mismatch or issue! "
+                f"Input num_base_feat_input ({num_base_feat_input} from shape {base_features_batch_np.shape}) "
+                f"does not match configured self.num_base_features ({self.num_base_features}). "
+                f"This could be due to generator outputting different feature count or an issue with data processing."
+            )
+            # Potentially problematic, but proceed if TIs don't rely on exact match or if TF TA layer handles it.
+
+        # Check if TensorFlowTALayer should be used
+        if self.params.get("use_tensorflow_ta_layer", False) and hasattr(self, 'tf_ta_layer') and self.tf_ta_layer is not None:
+            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Using TensorFlowTALayer.")
+            if base_features_batch_np.shape[-1] != self.num_base_features:
+                self.logger.error(
+                    f"_calculate_technical_indicators ({data_type_for_logging}): Shape mismatch for TF TA Layer: "
+                    f"input features {base_features_batch_np.shape[-1]} (from shape {base_features_batch_np.shape}), "
+                    f"expected {self.num_base_features}. Returning input as is."
+                )
+                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32)
+
+            base_features_tensor = tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32)
+            features_with_tis = self.tf_ta_layer(base_features_tensor)
+            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): TensorFlowTALayer output shape: {features_with_tis.shape}")
+            return features_with_tis
+        else: # Fallback to pandas-ta or no TIs (if num_tis > 0)
+            if self.num_tis == 0: # Double check, though initial function check should catch this
+                self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): No TIs to calculate (pandas-ta path). Returning base features.")
+                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
+
+            if not self.tas_strategy_for_discriminator_tis:
+                self.logger.warning(f"_calculate_technical_indicators ({data_type_for_logging}): tas_strategy_for_discriminator_tis is None. Cannot calculate TIs with pandas-ta. Returning base features.")
+                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
             
-        return combined_batch_np
+            if num_base_feat_input == 0:
+                self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): num_base_feat_input is 0. Cannot create DataFrame for pandas-ta. Returning base features.")
+                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
+
+            all_ti_features_batch = [] # Initialize list here
+            for i in range(batch_size):
+                single_sample_base_features_np = base_features_batch_np[i, :, :]
+                # Create DataFrame for pandas-ta
+                # Ensure columns are named correctly if base_feature_names_ordered is shorter than num_base_feat_input
+                # This could happen if generator outputs more features than configured as 'base'
+                current_feature_names = self.base_feature_names_ordered
+                if num_base_feat_input > len(self.base_feature_names_ordered):
+                    self.logger.warning(
+                        f"_calculate_technical_indicators ({data_type_for_logging}): Sample {i} has {num_base_feat_input} features, "
+                        f"but only {len(self.base_feature_names_ordered)} base_feature_names_ordered. "
+                        f"Using generic names for excess features in pandas-ta DataFrame."
+                    )
+                    current_feature_names = list(self.base_feature_names_ordered) + \
+                                            [f"gen_extra_feat_{j}" for j in range(len(self.base_feature_names_ordered), num_base_feat_input)]
+                elif num_base_feat_input < len(self.base_feature_names_ordered):
+                     self.logger.warning(
+                        f"_calculate_technical_indicators ({data_type_for_logging}): Sample {i} has {num_base_feat_input} features, "
+                        f"but {len(self.base_feature_names_ordered)} base_feature_names_ordered. "
+                        f"Slicing base_feature_names_ordered for pandas-ta DataFrame."
+                    )
+                     current_feature_names = self.base_feature_names_ordered[:num_base_feat_input]
+
+                # Ensure single_sample_base_features_np has the correct number of columns for current_feature_names
+                if single_sample_base_features_np.shape[1] != len(current_feature_names):
+                    self.logger.error(
+                        f"_calculate_technical_indicators ({data_type_for_logging}): Shape mismatch for DataFrame creation. Sample {i} features: {single_sample_base_features_np.shape[1]}, current_feature_names: {len(current_feature_names)}. Skipping TIs for this sample."
+                    )
+                    # Create a NaN array for all expected discriminator features for this sample
+                    # Use seq_len_input (derived from this sample's shape) and self.discriminator_feature_names
+                    nan_data = np.full((seq_len_input, len(self.discriminator_feature_names)), np.nan)
+                    all_ti_features_batch.append(nan_data)
+                    continue
+
+                df = pd.DataFrame(single_sample_base_features_np, columns=current_feature_names)
+
+                # Add standard OHLC columns if not present and strategy needs them (common for many TIs)
+                # This is a heuristic. A more robust way is to check specific TI needs.
+                if 'open' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['open'] = df[self.base_feature_names_ordered[0]]
+                if 'high' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['high'] = df[self.base_feature_names_ordered[0]] # Simplistic, use first col
+                if 'low' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['low'] = df[self.base_feature_names_ordered[0]]
+                if 'close' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[-1] in df.columns: df['close'] = df[self.base_feature_names_ordered[-1]] # Simplistic, use last col
+                if 'volume' not in df.columns: df['volume'] = 1 # Dummy volume if not present
+
+                try:
+                    df.ta.strategy(self.tas_strategy_for_discriminator_tis)
+                except Exception as e_ta:
+                    self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): Error applying pandas_ta.strategy for sample {i}: {e_ta}. Appending NaNs for this sample.", exc_info=True)
+                    nan_data = np.full((seq_len_input, len(self.discriminator_feature_names)), np.nan)
+                    all_ti_features_batch.append(nan_data)
+                    continue
+                
+                # Ensure all expected discriminator features are present, fill with NaN if not
+                for col_name in self.discriminator_feature_names:
+                    if col_name not in df.columns:
+                        df[col_name] = np.nan
+            
+                # Order and select columns as per self.discriminator_feature_names
+                ordered_df = df[self.discriminator_feature_names]
+                all_ti_features_batch.append(ordered_df.values)
+
+            if not all_ti_features_batch: # If loop didn't run or all samples failed
+                 self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): all_ti_features_batch is empty after processing all samples. Returning original input.")
+                 return base_features_batch_param # Return original input parameter
+
+            features_with_tis_np = np.array(all_ti_features_batch)
+            features_with_tis_np = np.nan_to_num(features_with_tis_np, nan=0.0, posinf=0.0, neginf=0.0) # Replace NaNs
+            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Calculated TIs with pandas-ta. Output shape: {features_with_tis_np.shape}")
+
+            if isinstance(base_features_batch_param, tf.Tensor):
+                return tf.convert_to_tensor(features_with_tis_np, dtype=tf.float32)
+            else:
+                return features_with_tis_np
 
     def _plot_losses(self, d_losses: List[float], g_losses: List[float], epoch: Union[int, str]):
         if not d_losses or not g_losses:
