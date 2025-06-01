@@ -395,7 +395,7 @@ class GANTrainerPlugin:
         self.gen_input_latent_dim = self.params.get("latent_dim", 32) # Used for GAN latent input
         
         self.base_feature_names_ordered = self.params.get("base_feature_names_ordered", []) # CORRECTED
-        self.num_base_features = len(self.base_feature_names_ordered) # CORRECTED to use _ordered
+        self.num_base_features = len(self.base_feature_names_ordered) # CORRECTED
         
         # Derive ti_names_to_calculate from discriminator features and base features
         all_discriminator_features = self.params.get("feature_names_for_discriminator_ordered", [])
@@ -410,7 +410,8 @@ class GANTrainerPlugin:
 
         self.num_tis = len(self.ti_names_to_calculate)
         
-        self.num_features_for_discriminator = self.num_base_features + self.num_tis
+        # self.num_features_for_discriminator = self.num_base_features + self.num_tis # OLD LOGIC
+        self.num_features_for_discriminator = len(self.discriminator_feature_names) # CORRECTED LOGIC
         self.seq_len = self.params.get("seq_len", 18) # Used for discriminator input and TI layer
 
         # Initialize TA Strategy for Discriminator TIs
@@ -528,7 +529,8 @@ class GANTrainerPlugin:
         self.num_tis = len(self.ti_names_to_calculate)
         
         # This is crucial for discriminator input shape and TI layer
-        self.num_features_for_discriminator = self.num_base_features + self.num_tis
+        # self.num_features_for_discriminator = self.num_base_features + self.num_tis # OLD LOGIC
+        self.num_features_for_discriminator = len(self.discriminator_feature_names) # CORRECTED LOGIC
         self.seq_len = self.params.get("seq_len", 18) # Also ensure self.seq_len is updated for discriminator
 
         if self.num_base_features == 0:
@@ -1163,6 +1165,7 @@ class GANTrainerPlugin:
             loss_plot_file = self.params.get("loss_plot_file", os.path.join(self.gan_model_dir, "gan_loss_plot.png"))
             plt.savefig(loss_plot_file)
             plt.close()
+           
             logger.info(f"GAN loss plot saved to {loss_plot_file}")
         except ImportError:
             logger.warning("Matplotlib not installed. Skipping loss plotting.")
