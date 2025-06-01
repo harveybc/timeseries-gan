@@ -1241,7 +1241,42 @@ class GANTrainerPlugin:
 
                     self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Feeder data shape: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}")
 
-                    expected_input_config = self.generator.inputs[i] # This is a KerasTensor
+                    expected_keras_tensor = self.generator.inputs[i] 
+                    expected_shape = expected_keras_tensor.shape
+                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}', Keras Input: '{expected_keras_tensor.name}'): Model expects input shape: {expected_shape}")
+
+                    # Basic Slicing/Shaping for Generator Inputs
+                    if data_from_feeder is not None and hasattr(data_from_feeder, 'shape'):
+                        # Case 1: Generator expects 2D (batch, features), Feeder provides 2D (batch, features_feeder)
+                        if len(expected_shape) == 2 and expected_shape[1] is not None and data_from_feeder.ndim == 2:
+                            if data_from_feeder.shape[1] > expected_shape[1]:
+                                self.logger.info(f"  Slicing 2D input '{name}' from {data_from_feeder.shape[1]} to {expected_shape[1]} features to match model input '{expected_keras_tensor.name}'.")
+                                data_from_feeder = data_from_feeder[:, :expected_shape[1]]
+                            elif data_from_feeder.shape[1] < expected_shape[1]:
+                                self.logger.warning(f"  Feeder 2D features ({data_from_feeder.shape[1]}) for '{name}' < expected by model input '{expected_keras_tensor.name}' ({expected_shape[1]}). Potential downstream error.")
+                        
+                        # Case 2: Generator expects 3D (batch, seq, features), Feeder provides 3D (batch, seq, features_feeder)
+                        elif len(expected_shape) == 3 and expected_shape[2] is not None and data_from_feeder.ndim == 3:
+                            # Slice features if feeder has more
+                            if data_from_feeder.shape[2] > expected_shape[2]:
+                                self.logger.info(f"  Slicing 3D input '{name}' features from {data_from_feeder.shape[2]} to {expected_shape[2]} to match model input '{expected_keras_tensor.name}'.")
+                                data_from_feeder = data_from_feeder[:, :, :expected_shape[2]]
+                            elif data_from_feeder.shape[2] < expected_shape[2]:
+                                self.logger.warning(f"  Feeder 3D features ({data_from_feeder.shape[2]}) for '{name}' < expected by model input '{expected_keras_tensor.name}' ({expected_shape[2]}). Potential downstream error.")
+                            
+                            # Check sequence length mismatch (optional: add slicing if feeder is longer, or padding if shorter)
+                            if expected_shape[1] is not None and data_from_feeder.shape[1] != expected_shape[1]:
+                                self.logger.warning(f"  Feeder 3D seq_len ({data_from_feeder.shape[1]}) for '{name}' != expected by model input '{expected_keras_tensor.name}' ({expected_shape[1]}). Model will receive {data_from_feeder.shape[1]} sequence length.")
+                        
+                        # Case 3: Dimensionality mismatch (e.g. feeder 2D, model expects 3D or vice-versa)
+                        elif data_from_feeder.ndim != len(expected_shape):
+                            self.logger.warning(f"  Dimensionality mismatch for input '{name}': Feeder is {data_from_feeder.ndim}D (shape {data_from_feeder.shape}), model input '{expected_keras_tensor.name}' expects {len(expected_shape)}D (shape {expected_shape}). No auto-slicing/reshaping applied for this mismatch. This will likely cause an error.")
+                        else:
+                            self.logger.info(f"  No specific slicing applied for input '{name}' with feeder shape {data_from_feeder.shape} and expected model shape {expected_shape} for input '{expected_keras_tensor.name}'.")
+                    
+                    inputs_for_generator_predict.append(data_from_feeder)
+                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Appended data. Final shape for predict: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}. List size: {len(inputs_for_generator_predict)}")
+
             elif not self.generator:
                  self.logger.error("GAN training: Generator model is None. Cannot make predictions or train GAN.")
                  raise ValueError("Generator model is None, cannot proceed.")
