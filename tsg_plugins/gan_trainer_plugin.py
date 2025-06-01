@@ -583,7 +583,17 @@ class GANTrainerPlugin:
         if self.generator_output_actual_seq_len != self.seq_len:
             if self.generator_output_actual_seq_len == 1 and self.seq_len > 1:
                 logger.info(f"GAN build: Generator output seq_len ({self.generator_output_actual_seq_len}) differs from TI/Discriminator seq_len ({self.seq_len}). Repeating generator output.")
-                base_features_from_generator = tf.keras.layers.RepeatVector(self.seq_len, name="repeat_vector_for_ti_layer")(base_features_from_generator)
+                # base_features_from_generator shape: (None, 1, self.num_base_features)
+                # Squeeze the middle dimension (axis=1) before RepeatVector
+                squeezed_features = tf.keras.layers.Lambda(
+                    lambda x: tf.squeeze(x, axis=1),
+                    name="squeeze_time_dim_for_repeat"
+                )(base_features_from_generator)
+                # Now squeezed_features shape is (None, self.num_base_features)
+                base_features_from_generator = tf.keras.layers.RepeatVector(
+                    self.seq_len,
+                    name="repeat_vector_for_ti_layer"
+                )(squeezed_features) # Apply RepeatVector to the 2D tensor
                 logger.info(f"GAN build: Repeated generator output to shape: {base_features_from_generator.shape}")
             else:
                 error_msg = (
