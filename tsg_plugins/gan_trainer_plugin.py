@@ -850,6 +850,19 @@ class GANTrainerPlugin:
         current_lr_g = float(tf.keras.backend.get_value(self.g_optimizer.learning_rate))
         current_lr_d = float(tf.keras.backend.get_value(self.d_optimizer.learning_rate))
 
+        # Print model summaries
+        if hasattr(self, 'generator') and self.generator:
+            logger.info("Generator Summary:")
+            self.generator.summary(print_fn=logger.info)
+        else:
+            logger.warning("Generator model not available for summary.")
+
+        if hasattr(self, 'discriminator') and self.discriminator:
+            logger.info("Discriminator Summary:")
+            self.discriminator.summary(print_fn=logger.info)
+        else:
+            logger.warning("Discriminator model not available for summary.")
+
         logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs with batch size {self.params['gan_batch_size']}...")
         logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
         logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
