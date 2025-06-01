@@ -443,7 +443,7 @@ class GANTrainerPlugin:
                             current_definition = {"kind": "adx", "length": int(parts[1])}
                             processed_complex_indicators.add("adx")
                     elif indicator_name_part == "ATRr" and len(parts) == 2: # e.g., ATRr_14
-                        current_definition = {"kind": "atrr", "length": int(parts[1])}
+                        current_definition = {"kind": "atr", "length": int(parts[1])} # Corrected "atrr" to "atr"
                     elif indicator_name_part == "CCI" and len(parts) >= 2: # e.g., CCI_14 or CCI_14_0.015
                         params_cci = {"length": int(parts[1])}
                         if len(parts) == 3: params_cci["constant"] = float(parts[2])
