@@ -386,56 +386,96 @@ class GANTrainerPlugin:
     def set_params(self, **params: Any) -> None:
         logger.info(f"GANTrainerPlugin updating parameters: {list(params.keys())}")
         # Update self.config with any new params passed directly to set_params
-        self.config.update(params) 
+        self.config.update(params)
         
-        # Re-initialize self.params: Start with plugin defaults, then override with self.config
-        updated_params_dict = self.plugin_params.copy() 
-        # Update self.params with config, ensuring plugin_params defaults are taken if not in config
-        for key in self.plugin_params: # Iterate over known default keys
-            if key in self.config:
-                self.params[key] = self.config[key]
-        # Add any keys from config that were not in plugin_params (e.g. dynamic ones from main config)
-        self.params.update(self.config) # Ensures all items from self.config are in self.params
+        # self.params should be the union of plugin_params and self.config.
+        # Assuming self.params was initialized with self.plugin_params.copy() in __init__,
+        # then updated with self.config in __init__.
+        # Here, we ensure self.params reflects the latest self.config.
+        current_params = self.plugin_params.copy() # Start with defaults
+        current_params.update(self.config) # Override with current config (which includes updates from **params)
+        self.params = current_params # Assign the fully updated params
 
         # Initialize sequence length and latent dimension attributes used by model builders
-        # These are derived from self.params, which should now be fully populated.
-        self.gen_input_seq_len = self.params["seq_len"]
-        self.gen_input_latent_dim = self.params["latent_dim"]
+        self.gen_input_seq_len = self.params.get("seq_len", 18) # Default to 18 if not specified
+        self.gen_input_latent_dim = self.params.get("latent_dim", 32) # Default to 32
         
-        # Determine the number of features the discriminator's input (target) should have.
-        # This is based on 'base_feature_names_ordered', which should list the base features.
-        self.discriminator_target_n_features = len(self.params.get("base_feature_names_ordered", [])) # Should be num_base_features
-        if self.discriminator_target_n_features == 0:
-            logger.warning("GANTrainerPlugin (set_params): 'base_feature_names_ordered' is empty or not found in params. Defaulting discriminator_target_n_features to 1.")
-            self.discriminator_target_n_features = 1 # Fallback, but indicates a config issue.
+        # Update feature-related attributes based on the latest self.params
+        self.base_feature_names = self.params.get("base_feature_names_ordered", [])
+        self.num_base_features = len(self.base_feature_names)
+        
+        self.ti_names_to_calculate = self.params.get("ti_names_to_calculate", [])
+        self.num_tis = len(self.ti_names_to_calculate)
+        
+        # This is crucial for discriminator input shape and TI layer
+        self.num_features_for_discriminator = self.num_base_features + self.num_tis
+        self.seq_len = self.params.get("seq_len", 18) # Also ensure self.seq_len is updated for discriminator
+
+        if self.num_base_features == 0:
+            logger.warning(
+                "GANTrainerPlugin (set_params): 'base_feature_names_ordered' is empty or not found in parameters. "
+                "Number of base features (self.num_base_features) is 0. This will likely cause issues in model building or data processing, "
+                "as the generator is expected to produce these base features."
+            )
             
-        self.discriminator_target_seq_len = self.params.get("gan_generator_output_actual_seq_len", 1)
+        # This is the sequence length of the generator's output, if it's fixed (e.g., 1 for single-step generation)
+        # and different from the main seq_len used by discriminator. Often, it might be the same as self.seq_len.
+        self.generator_output_actual_seq_len = self.params.get("gan_generator_output_actual_seq_len", self.seq_len) 
 
-        logger.info(f"GANTrainerPlugin (set_params): Gen INPUT seq_len={self.gen_input_seq_len}, latent_dim={self.gen_input_latent_dim}")
-        logger.info(f"GANTrainerPlugin (set_params): Disc TARGET INPUT (from generator path) seq_len={self.discriminator_target_seq_len}, n_features={self.discriminator_target_n_features}")
+        logger.info(f"GANTrainerPlugin (set_params): GAN Input: Generator input seq_len={self.gen_input_seq_len}, latent_dim={self.gen_input_latent_dim}")
+        logger.info(f"GANTrainerPlugin (set_params): Features Config: num_base_features={self.num_base_features} (from 'base_feature_names_ordered')")
+        logger.info(f"GANTrainerPlugin (set_params): Features Config: num_TIs_to_calculate={self.num_tis} (from 'ti_names_to_calculate')")
+        logger.info(f"GANTrainerPlugin (set_params): Discriminator Input: expected total_features={self.num_features_for_discriminator}, seq_len={self.seq_len}")
+        logger.info(f"GANTrainerPlugin (set_params): Generator Output: expected base_features={self.num_base_features}, actual_output_seq_len={self.generator_output_actual_seq_len}")
 
-        if self.generator: # self.generator must exist at this point (checked in __init__)
-            generator_output_shape = self.generator.output_shape
-            if isinstance(generator_output_shape, tuple) and len(generator_output_shape) >= 2: # Can be (batch, features) or (batch, seq, features)
-                self.actual_generator_output_dim = generator_output_shape[-1]
-                # This warning compares actual generator output (num_base_features) vs. discriminator_target_n_features (should also be num_base_features)
-                if self.actual_generator_output_dim != self.discriminator_target_n_features:
+        if self.generator:
+            # Ensure generator model is loaded to get its actual output dimension
+            if hasattr(self.generator, 'output_shape'):
+                self.actual_generator_output_dim = self.generator.output_shape[-1]
+                logger.info(f"GANTrainerPlugin (set_params): Loaded generator model's actual output feature dimension: {self.actual_generator_output_dim}")
+                
+                if self.actual_generator_output_dim != self.num_base_features:
                     logger.warning(
-                        f"GANTrainerPlugin (set_params): Actual generator output feature dimension ({self.actual_generator_output_dim}) "
-                        f"differs from discriminator_target_n_features ({self.discriminator_target_n_features}) derived from 'base_feature_names_ordered'. "
-                        f"Ensure 'base_feature_names_ordered' correctly reflects the generator's output base features."
+                        f"GANTrainerPlugin (set_params): MISMATCH! Actual generator output feature dimension ({self.actual_generator_output_dim}) "
+                        f"differs from configured num_base_features ({self.num_base_features}) derived from 'base_feature_names_ordered'. "
+                        f"The GAN's _build_gan method will attempt to slice the generator's output to the first {self.num_base_features} features."
                     )
+                else:
+                    logger.info(f"GANTrainerPlugin (set_params): Generator output dimension ({self.actual_generator_output_dim}) matches configured num_base_features ({self.num_base_features}).")
             else:
-                 logger.error(f"GANTrainerPlugin (set_params): Gen output shape {generator_output_shape} not as expected (tuple of at least 2D).")
+                logger.warning("GANTrainerPlugin (set_params): Generator model is loaded but has no 'output_shape' attribute. Cannot verify output dimension.")
+                self.actual_generator_output_dim = self.num_base_features # Assume it matches to avoid downstream errors, but log clearly
         else:
-            logger.error("GANTrainerPlugin (set_params): self.generator is None, cannot determine actual_generator_output_dim.")
+            logger.info("GANTrainerPlugin (set_params): Generator model not loaded yet. Cannot check its output dimension at this stage.")
+            # self.actual_generator_output_dim will be checked again in _build_gan or if generator is loaded later.
 
-        # REMOVE Redundant optimizer initializations - they are done in __init__
-        # self.generator_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
-        # self.discriminator_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
-        
-        self.gan_model_dir = self.params.get("gan_model_dir", "models/gan_trained") # Use existing if not in params
+        self.gan_model_dir = self.params.get("gan_model_dir", "models/gan_trained")
         os.makedirs(self.gan_model_dir, exist_ok=True)
+
+        # Re-initialize optimizers if learning rates might have changed in self.params
+        # Ensure __init__ also initializes these with values from self.params
+        if hasattr(self, 'g_optimizer') and self.g_optimizer is not None:
+            current_lr_g = self.params.get("generator_lr", 1e-4)
+            current_beta1_g = self.params.get("generator_beta1", 0.5)
+            if self.g_optimizer.learning_rate != current_lr_g or self.g_optimizer.beta_1 != current_beta1_g:
+                self.g_optimizer = Adam(learning_rate=current_lr_g, beta_1=current_beta1_g)
+                logger.info(f"GANTrainerPlugin (set_params): Generator optimizer re-initialized with LR={current_lr_g}, Beta1={current_beta1_g}")
+        else:
+            self.g_optimizer = Adam(learning_rate=self.params.get("generator_lr", 1e-4), beta_1=self.params.get("generator_beta1", 0.5))
+
+        if hasattr(self, 'd_optimizer') and self.d_optimizer is not None:
+            current_lr_d = self.params.get("discriminator_lr", 1e-4)
+            current_beta1_d = self.params.get("discriminator_beta1", 0.5)
+            if self.d_optimizer.learning_rate != current_lr_d or self.d_optimizer.beta_1 != current_beta1_d:
+                self.d_optimizer = Adam(learning_rate=current_lr_d, beta_1=current_beta1_d)
+                logger.info(f"GANTrainerPlugin (set_params): Discriminator optimizer re-initialized with LR={current_lr_d}, Beta1={current_beta1_d}")
+        else:
+            self.d_optimizer = Adam(learning_rate=self.params.get("discriminator_lr", 1e-4), beta_1=self.params.get("discriminator_beta1", 0.5))
+        
+        # Models might need to be rebuilt if critical dimensions (seq_len, feature counts) change
+        # For simplicity, we assume they are built in __init__ and might need re-evaluation if params change significantly.
+        # A more robust system might explicitly rebuild them here or set a flag.
+        logger.info("GANTrainerPlugin (set_params): Parameters updated. Models (Discriminator, GAN) may need to be re-built if structural params changed.")
 
     def _build_discriminator(self) -> Model:
         logger.info("Building Discriminator...")
