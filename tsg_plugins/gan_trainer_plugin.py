@@ -1027,13 +1027,91 @@ class GANTrainerPlugin:
             # Generate a batch of new series using the FeederPlugin and Generator
             feeder_output_d = self.feeder_plugin_instance.generate(n_ticks_to_generate=current_batch_size) # Renamed from feeder_output
             
-            # Prepare inputs for the generator model in the correct order
-            # self.generator_actual_input_names_ordered is set in __init__ based on generator.inputs
-            generator_inputs_d = []
-            for input_name in self.generator_actual_input_names_ordered: # Assumes this is set
-                generator_inputs_d.append(feeder_output_d[input_name])
-            
-            generated_base_features_raw = self.generator.predict(generator_inputs_d, verbose=0)
+            # Prepare inputs for the generator model (used for predicting base features)
+            # This list of inputs will also be used for the GAN model training step later.
+            generator_inputs_for_prediction_and_gan_step = [] 
+            if self.generator and hasattr(self, 'generator_actual_input_names_ordered') and self.generator_actual_input_names_ordered:
+                for i, name in enumerate(self.generator_actual_input_names_ordered):
+                    if name not in feeder_output_d:
+                        self.logger.error(
+                            f"GAN training: Critical error - Expected input '{name}' for generator (index {i}) "
+                            f"not found in FeederPlugin output. Available keys: {list(feeder_output_d.keys())}. "
+                            f"Generator input names expected: {self.generator_actual_input_names_ordered}"
+                        )
+                        raise KeyError(f"Generator input '{name}' missing from feeder output. Check feeder plugin and generator_actual_input_names_ordered.")
+                    
+                    data_from_feeder = feeder_output_d[name]
+                    
+                    if not isinstance(data_from_feeder, np.ndarray):
+                        self.logger.warning(f"Data for input '{name}' from feeder is not a numpy array (type: {type(data_from_feeder)}). Attempting to convert.")
+                        try:
+                            data_from_feeder = np.array(data_from_feeder)
+                        except Exception as e_conv:
+                            self.logger.error(f"Failed to convert input '{name}' to numpy array: {e_conv}")
+                            raise TypeError(f"Input '{name}' from feeder could not be converted to a numpy array.")
+
+                    expected_input_config = self.generator.inputs[i] # This is a KerasTensor
+                    expected_input_shape_from_generator = expected_input_config.shape # e.g., TensorShape([None, 10]) or TensorShape([None, 18, 1])
+
+                    # Adjust shape if needed (primarily for 2D inputs like latent_vector, conditional_data, context_vector)
+                    if len(expected_input_shape_from_generator) == 2 and expected_input_shape_from_generator[1] is not None:
+                        expected_features = expected_input_shape_from_generator[1]
+                        if data_from_feeder.ndim == 2 and data_from_feeder.shape[1] != expected_features:
+                            self.logger.warning(
+                                f"GAN/Generator input '{name}' (index {i}): Mismatch between feeder output features ({data_from_feeder.shape[1]}) "
+                                f"and generator's expected features ({expected_features}) for this input. "
+                                f"Slicing feeder output to the first {expected_features} features."
+                            )
+                            data_from_feeder = data_from_feeder[:, :expected_features]
+                        elif data_from_feeder.ndim != 2:
+                            self.logger.error(
+                                f"GAN/Generator input '{name}' (index {i}): Expected 2D array from feeder but got {data_from_feeder.ndim}D. "
+                                f"Feeder shape: {data_from_feeder.shape}, Generator expects: {expected_input_shape_from_generator}. This is a critical mismatch."
+                            )
+                            raise ValueError(f"Shape mismatch for GAN/Generator input '{name}'. Expected 2D, got {data_from_feeder.ndim}D.")
+                    elif len(expected_input_shape_from_generator) == 3 and expected_input_shape_from_generator[1] is not None and expected_input_shape_from_generator[2] is not None:
+                        # Handling for 3D sequence inputs, e.g. (None, seq_len, features)
+                        expected_seq_len = expected_input_shape_from_generator[1]
+                        expected_features = expected_input_shape_from_generator[2]
+                        if data_from_feeder.ndim == 3:
+                            if data_from_feeder.shape[1] != expected_seq_len:
+                                self.logger.warning(
+                                    f"GAN/Generator input '{name}' (index {i}): Mismatch in sequence length. Feeder: {data_from_feeder.shape[1]}, Expected: {expected_seq_len}. Slicing/padding may be needed if critical."
+                                )
+                                # Add slicing/padding for seq_len if necessary, e.g. data_from_feeder = data_from_feeder[:, :expected_seq_len, :]
+                            if data_from_feeder.shape[2] != expected_features:
+                                self.logger.warning(
+                                    f"GAN/Generator input '{name}' (index {i}): Mismatch in features for sequence. Feeder: {data_from_feeder.shape[2]}, Expected: {expected_features}. Slicing."
+                                )
+                                data_from_feeder = data_from_feeder[:, :, :expected_features]
+                        elif data_from_feeder.ndim != 3:
+                             self.logger.error(
+                                f"GAN/Generator input '{name}' (index {i}): Expected 3D array from feeder but got {data_from_feeder.ndim}D. "
+                                f"Feeder shape: {data_from_feeder.shape}, Generator expects: {expected_input_shape_from_generator}. This is a critical mismatch."
+                            )
+                             raise ValueError(f"Shape mismatch for GAN/Generator input '{name}'. Expected 3D, got {data_from_feeder.ndim}D.")
+                    
+                    generator_inputs_for_prediction_and_gan_step.append(data_from_feeder)
+                
+                if not generator_inputs_for_prediction_and_gan_step and self.generator.inputs: # Check if list is empty despite generator having inputs
+                    self.logger.error(
+                        f"GAN training: Generator input list is empty after processing feeder_output_d (keys: {list(feeder_output_d.keys())}), "
+                        f"but generator expects inputs: {self.generator_actual_input_names_ordered}."
+                    )
+                    raise ValueError("Failed to prepare inputs for generator prediction: Resulting input list is empty.")
+
+            elif not self.generator:
+                 self.logger.error("GAN training: Generator model is None. Cannot make predictions or train GAN.")
+                 raise ValueError("Generator model is None, cannot proceed.")
+            else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
+                 self.logger.error(
+                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine GAN inputs. "
+                     f"Generator defined inputs: {[inp.name for inp in self.generator.inputs] if self.generator and self.generator.inputs else 'N/A'}."
+                 )
+                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for GAN training.")
+
+            generated_base_features_raw = self.generator.predict(generator_inputs_for_prediction_and_gan_step, verbose=0)
+            self.logger.info(f"GANTrainerPlugin (train): Raw generator output shape after predict(): {generated_base_features_raw.shape if generated_base_features_raw is not None else 'None'}") # DIAGNOSTIC LOG
 
             # Ensure generated_base_features_raw is 3D before TI calculation
             if generated_base_features_raw.ndim == 2:
@@ -1063,45 +1141,15 @@ class GANTrainerPlugin:
             if self.discriminator: self.discriminator.trainable = False
 
             # Train the generator (via the GAN model)
-            if self.discriminator: self.discriminator.trainable = False
-
-            gan_model_inputs_for_batch = []
-            if self.generator and hasattr(self, 'generator_actual_input_names_ordered') and self.generator_actual_input_names_ordered:
-                try:
-                    gan_model_inputs_for_batch = [feeder_output_d[name] for name in self.generator_actual_input_names_ordered]
-                    if not gan_model_inputs_for_batch and self.generator.inputs: # Check if list is empty despite generator having inputs
-                        self.logger.error(
-                            f"GAN training: Generator has inputs ({[inp.name for inp in self.generator.inputs]}) "
-                            f"but no inputs were prepared from feeder_output_d using names: {self.generator_actual_input_names_ordered}. "
-                            f"Feeder output keys: {list(feeder_output_d.keys())}."
-                        )
-                        raise ValueError("Failed to prepare inputs for GAN model: Resulting input list is empty.")
-                except KeyError as e:
-                    self.logger.error(
-                        f"GAN training: Failed to retrieve input for GAN model from feeder_output_d. Missing key: {str(e)}. "
-                        f"Generator expects inputs named: {self.generator_actual_input_names_ordered}. "
-                        f"Feeder output provided keys: {list(feeder_output_d.keys())}."
-                    )
-                    raise  # Re-raise the KeyError to stop training as this is critical
-            elif not self.generator:
-                 self.logger.error("GAN training: Generator model is None. Cannot train GAN.")
-                 raise ValueError("Generator model is None, cannot proceed with GAN training step.")
-            else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
-                 self.logger.error(
-                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine GAN inputs. "
-                     f"Generator defined inputs: {[inp.name for inp in self.generator.inputs] if self.generator and self.generator.inputs else 'N/A'}."
-                 )
-                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for GAN training.")
-
-            if not gan_model_inputs_for_batch:
+            # Use the same prepared inputs: generator_inputs_for_prediction_and_gan_step
+            if not generator_inputs_for_prediction_and_gan_step:
                 self.logger.error(
-                    "GAN training: The list of inputs for the GAN model is empty even after attempting to prepare them. "
-                    f"Generator inputs expected: {self.generator_actual_input_names_ordered}, "
-                    f"Feeder output keys: {list(feeder_output_d.keys())}."
+                    "GAN training: The list of inputs for the GAN model (derived from generator_inputs_for_prediction_and_gan_step) is empty. "
+                    "This should have been caught earlier. Cannot proceed."
                 )
                 raise ValueError("GAN model inputs list is empty before train_on_batch. Cannot proceed.")
 
-            g_loss_metrics = self.gan.train_on_batch(gan_model_inputs_for_batch, valid_labels, return_dict=True)
+            g_loss_metrics = self.gan.train_on_batch(generator_inputs_for_prediction_and_gan_step, valid_labels, return_dict=True)
 
             # Log progress
             elapsed_time = time.time() - start_time_epoch
@@ -1378,7 +1426,7 @@ class GANTrainerPlugin:
             # but the discriminator was built using `expected_num_ti_features` (from self.num_tis),
             # then a mismatch here will cause the ValueError.
             # The logic above (padding with zeros if ti_results_df is empty or reshape_error) handles the case where N_calc is effectively 0.
-            # What if N_calc > 0 but N_calc != N_exp?
+            # What about if N_calc > 0 but N_calc != N_exp?
             # Example: self.num_tis = 20. Strategy actually produces 18 TIs.
             # Then final_num_features = base + 18. Discriminator expects base + 20. Error.
             # Or strategy produces 22 TIs. final_num_features = base + 22. Discriminator expects base + 20. Error.
