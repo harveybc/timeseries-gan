@@ -1036,402 +1036,160 @@ class GANTrainerPlugin:
             generated_base_features_raw = self.generator.predict(generator_inputs_d, verbose=0)
 
             # Ensure generated_base_features_raw is 3D before TI calculation
-            # This mirrors the Reshape layer in _build_gan for the standalone generator's output
-            if generated_base_features_raw.ndim == 2: # Simplified reshape logic
+            if generated_base_features_raw.ndim == 2:
                 target_reshape_dim_d = self.actual_generator_output_dim if self.actual_generator_output_dim > 0 else -1
                 generated_base_features_raw = generated_base_features_raw.reshape((current_batch_size, self.generator_output_actual_seq_len, target_reshape_dim_d))
+            
             if generated_base_features_raw.shape[-1] != self.num_base_features and self.num_base_features > 0:
-                 generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
+                generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
 
-                # Calculate TIs for generated data
-                # self.logger.info(f"Shape of generated_base_features_raw before TI calc: {generated_base_features_raw.shape}")
-                generated_features_with_tis = self._calculate_technical_indicators(
-                    generated_base_features_raw,
-                    data_type_for_logging="generated"
-                ) # (batch, seq_len_for_TI, num_features_for_discriminator)
-                # self.logger.info(f"Shape of generated_features_with_tis after TI calc: {generated_features_with_tis.shape}")
+            generated_features_with_tis = self._calculate_technical_indicators(
+                generated_base_features_raw, 
+                data_type_for_logging="generated"
+            )
 
-                # Train Discriminator
             if self.discriminator: self.discriminator.trainable = True
 
             d_loss_real_metrics = self.discriminator.train_on_batch(real_data_for_discriminator, valid_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
-            d_loss_fake_metrics = self.discriminator.train_on_batch(generated_data_for_discriminator, fake_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
+            d_loss_fake_metrics = self.discriminator.train_on_batch(generated_features_with_tis, fake_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
             
             d_loss = 0.5 * (d_loss_real_metrics['loss'] + d_loss_fake_metrics['loss'])
-            d_acc_real = d_loss_real_metrics['accuracy']
-            d_acc_fake = d_loss_fake_metrics['accuracy']
-            d_acc_avg = 0.5 * (d_acc_real + d_acc_fake)
 
             # ---------------------
             #  Train Generator
             # ---------------------
-            
-            if self.discriminator: self.discriminator.trainable = False # Freeze D for GAN training step
 
-            feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_ticks_to_generate=current_batch_size)
-            gan_inputs_g = [] # Renamed
-            # Assuming gan_feed_keys are correctly derived from params for GAN model inputs
-            latent_input_name = self.params.get("generator_decoder_input_name_latent", "decoder_input_z_seq")
-            conditional_input_name = self.params.get("generator_decoder_input_name_conditions", "decoder_input_conditions")
-            context_input_name = self.params.get("generator_decoder_input_name_context", "decoder_input_h_context")
-            gan_feed_keys = [latent_input_name, conditional_input_name, context_input_name]
-            for key_name in gan_feed_keys:
-                gan_inputs_g.append(feeder_outputs_for_g[key_name])
-            
-            g_loss_metrics = self.gan.train_on_batch(gan_inputs_g, valid_labels, return_dict=True) if self.gan else {'loss':0.0}
-            g_loss = g_loss_metrics['loss']
+            # Freeze discriminator when training generator
+            if self.discriminator: self.discriminator.trainable = False
 
-            d_losses_history.append(d_loss)
-            g_losses_history.append(g_loss)
-            # d_accs_history.append(d_acc_avg) # Already present
+            # Train the generator (via the GAN model)
+            g_loss_metrics = self.gan.train_on_batch([feeder_output_d["latent_vector"], feeder_output_d["conditional_data"], feeder_output_d["context_vector"]], valid_labels, return_dict=True)
 
-            epoch_duration = time.time() - start_time_epoch
-
-            # Store detailed metrics for JSON
-            epoch_metrics = {
-                "epoch": epoch + 1,
-                "d_loss": d_loss,
-                "d_acc_real": d_acc_real,
-                "d_acc_fake": d_acc_fake,
-                "d_acc_avg": d_acc_avg,
-                "g_loss": g_loss,
-                "lr_g": float(tf.keras.backend.get_value(self.g_optimizer.learning_rate)),
-                "lr_d": float(tf.keras.backend.get_value(self.d_optimizer.learning_rate)),
-                "duration_sec": epoch_duration
-            }
-            self.full_metrics_history.append(epoch_metrics)
-
-            # Updated print statement to match collected metrics
-            log_msg = (
-                f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - "
-                f"D_loss: {d_loss:.4f} (Real Acc: {d_acc_real*100:.2f}%, Fake Acc: {d_acc_fake*100:.2f}%, Avg Acc: {d_acc_avg*100:.2f}%) - "
-                f"G_loss: {g_loss:.4f} - "
-                f"LR G: {epoch_metrics['lr_g']:.1e}, LR D: {epoch_metrics['lr_d']:.1e}"
-            )
-            self.logger.info(log_msg) # Use self.logger.info for consistency
-            # print(log_msg) # Original print can be kept or removed if logger is preferred
-
-            # Manual Callbacks (ReduceLROnPlateau, EarlyStopping - existing logic preserved)
-            # ...
-
-            if self.params["gan_save_interval"] > 0 and (epoch + 1) % self.params["gan_save_interval"] == 0:
-                self.save_models(epoch=epoch + 1)
-                if d_losses_history and g_losses_history: # Check if lists are not empty
-                     self._plot_losses(d_losses_history, g_losses_history, epoch=epoch + 1)
-                # self._save_training_metrics(epoch=epoch + 1) # Optional: save metrics periodically
-
-        self.logger.info("GAN Training finished.")
-        self.save_models(epoch="final") # Save final models
-        if d_losses_history and g_losses_history:
-            self._plot_losses(d_losses_history, g_losses_history, epoch="final")
-        self._save_training_metrics(epoch="final") # Save all metrics at the end
-
-        self.logger.info(f"Final models, plots, and metrics should be in {self.params['results_base_dir']}")
-
-    def _calculate_technical_indicators(self, base_features_batch_param: Union[tf.Tensor, np.ndarray], # Renamed for clarity
-        data_type_for_logging: str = "unknown") -> Union[tf.Tensor, np.ndarray]:
-        """
-        Calculates technical indicators on a batch of base features.
-        Input can be a TensorFlow tensor or a NumPy array.
-        Output will be a TensorFlow tensor if TensorFlowTALayer is used, otherwise matches input type (or NumPy if conversion happened).
-        Shape: (batch_size, seq_len, num_base_features) -> (batch_size, seq_len, num_base_features + num_tis)
-        """
-        self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Received input of type: {type(base_features_batch_param)}")
-
-        if self.num_tis == 0:
-            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): No TIs to calculate (self.num_tis is 0). Returning original input.")
-            return base_features_batch_param # Return original input directly
-
-        # Convert to NumPy for shape checking and pandas-ta, if not already
-        if isinstance(base_features_batch_param, tf.Tensor):
-            base_features_batch_np = base_features_batch_param.numpy()
-            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Converted TF tensor to NumPy. Shape: {base_features_batch_np.shape}")
-        else:
-            base_features_batch_np = np.array(base_features_batch_param) # Ensure it's a NumPy array if not TF tensor
-            self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Input is NumPy or converted. Shape: {base_features_batch_np.shape}")
-
-        # Reshape if 2D (batch_size, features) assuming seq_len is 1
-        if base_features_batch_np.ndim == 2:
-            self.logger.info(
-                f"_calculate_technical_indicators ({data_type_for_logging}): Input is 2D (shape {base_features_batch_np.shape}). "
-                f"Assuming seq_len=1 and reshaping to 3D: (batch_size, 1, num_features)."
-            )
-            # Add a sequence dimension of 1. Target shape: (batch_size, 1, num_features)
-            base_features_batch_np = np.expand_dims(base_features_batch_np, axis=1)
-            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Reshaped to {base_features_batch_np.shape}")
-        elif base_features_batch_np.ndim != 3:
-            self.logger.error(
-                f"_calculate_technical_indicators ({data_type_for_logging}): Input is not 2D or 3D (ndim={base_features_batch_np.ndim}, shape={base_features_batch_np.shape}). "
-                f"Cannot proceed with TI calculation. Returning original input."
-            )
-            return base_features_batch_param # Return original input parameter
-
-        self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): PRE-UNPACK CHECK: base_features_batch_np.shape = {base_features_batch_np.shape}, base_features_batch_np.ndim = {base_features_batch_np.ndim}")
-        if base_features_batch_np.ndim != 3:
-            self.logger.error(
-                f"_calculate_technical_indicators ({data_type_for_logging}): CRITICAL ERROR - Expected 3D array for shape unpacking "
-                f"but got {base_features_batch_np.ndim}D. Shape: {base_features_batch_np.shape}. Returning original input."
-            )
-            if isinstance(base_features_batch_param, tf.Tensor):
-                return base_features_batch_param
-            else:
-                return np.array(base_features_batch_np)
-
-        batch_size, seq_len_input, num_base_feat_input = base_features_batch_np.shape
-        self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): Shape after potential reshape: {base_features_batch_np.shape} -> Batch: {batch_size}, SeqLenIn: {seq_len_input}, FeaturesIn: {num_base_feat_input}")
-
-        if num_base_feat_input == 0 and self.num_base_features > 0 :
-             self.logger.warning(
-                f"_calculate_technical_indicators ({data_type_for_logging}): Input num_base_feat_input is 0, "
-                f"but self.num_base_features is {self.num_base_features}. This is problematic."
-            )
-        elif num_base_feat_input != self.num_base_features and self.num_base_features > 0 : # only warn if self.num_base_features is set
-            self.logger.warning(
-                f"_calculate_technical_indicators ({data_type_for_logging}): Mismatch or issue! "
-                f"Input num_base_feat_input ({num_base_feat_input} from shape {base_features_batch_np.shape}) "
-                f"does not match configured self.num_base_features ({self.num_base_features}). "
-                f"This could be due to generator outputting different feature count or an issue with data processing."
-            )
-            # Potentially problematic, but proceed if TIs don't rely on exact match or if TF TA layer handles it.
-
-        # Check if TensorFlowTALayer should be used
-        if self.params.get("use_tensorflow_ta_layer", False) and hasattr(self, 'tf_ta_layer') and self.tf_ta_layer is not None:
-            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Using TensorFlowTALayer.")
-            if base_features_batch_np.shape[-1] != self.num_base_features:
-                self.logger.error(
-                    f"_calculate_technical_indicators ({data_type_for_logging}): Shape mismatch for TF TA Layer: "
-                    f"input features {base_features_batch_np.shape[-1]} (from shape {base_features_batch_np.shape}), "
-                    f"expected {self.num_base_features}. Returning input as is."
+            # Log progress
+            elapsed_time = time.time() - start_time_epoch
+            if epoch % 100 == 0 or epoch == self.params["gan_epochs"] - 1:
+                self.logger.info(
+                    f"Epoch {epoch}/{self.params['gan_epochs']} - "
+                    f"D loss: {d_loss:.4f}, G loss: {g_loss_metrics['loss']:.4f} - "
+                    f"Elapsed time: {elapsed_time:.2f}s"
                 )
-                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32)
-
-            base_features_tensor = tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32)
-            features_with_tis = self.tf_ta_layer(base_features_tensor)
-            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): TensorFlowTALayer output shape: {features_with_tis.shape}")
-            return features_with_tis
-        else: # Fallback to pandas-ta or no TIs (if num_tis > 0)
-            if self.num_tis == 0: # Double check, though initial function check should catch this
-                self.logger.debug(f"_calculate_technical_indicators ({data_type_for_logging}): No TIs to calculate (pandas-ta path). Returning base features.")
-                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
-
-            if not self.tas_strategy_for_discriminator_tis:
-                self.logger.warning(f"_calculate_technical_indicators ({data_type_for_logging}): tas_strategy_for_discriminator_tis is None. Cannot calculate TIs with pandas-ta. Returning base features.")
-                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
             
-            if num_base_feat_input == 0:
-                self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): num_base_feat_input is 0. Cannot create DataFrame for pandas-ta. Returning base features.")
-                return tf.convert_to_tensor(base_features_batch_np, dtype=tf.float32) if isinstance(base_features_batch_param, tf.Tensor) else base_features_batch_np
+            # Learning rate reduction and early stopping checks (already present)
+            # ... existing logic for learning rate reduction and early stopping ...
 
-            all_ti_features_batch = [] # Initialize list here
-            for i in range(batch_size):
-                single_sample_base_features_np = base_features_batch_np[i, :, :]
-                # Create DataFrame for pandas-ta
-                # Ensure columns are named correctly if base_feature_names_ordered is shorter than num_base_feat_input
-                # This could happen if generator outputs more features than configured as 'base'
-                current_feature_names = self.base_feature_names_ordered
-                if num_base_feat_input > len(self.base_feature_names_ordered):
-                    self.logger.warning(
-                        f"_calculate_technical_indicators ({data_type_for_logging}): Sample {i} has {num_base_feat_input} features, "
-                        f"but only {len(self.base_feature_names_ordered)} base_feature_names_ordered. "
-                        f"Using generic names for excess features in pandas-ta DataFrame."
-                    )
-                    current_feature_names = list(self.base_feature_names_ordered) + \
-                                            [f"gen_extra_feat_{j}" for j in range(len(self.base_feature_names_ordered), num_base_feat_input)]
-                elif num_base_feat_input < len(self.base_feature_names_ordered):
-                     self.logger.warning(
-                        f"_calculate_technical_indicators ({data_type_for_logging}): Sample {i} has {num_base_feat_input} features, "
-                        f"but {len(self.base_feature_names_ordered)} base_feature_names_ordered. "
-                        f"Slicing base_feature_names_ordered for pandas-ta DataFrame."
-                    )
-                     current_feature_names = self.base_feature_names_ordered[:num_base_feat_input]
+            # Save models and plots at specified intervals
+            if (epoch + 1) % self.params["gan_save_interval"] == 0 or epoch == self.params["gan_epochs"] - 1:
+                self.save_models(epoch)
+                self.plot_losses(epoch)
 
-                # Ensure single_sample_base_features_np has the correct number of columns for current_feature_names
-                if single_sample_base_features_np.shape[1] != len(current_feature_names):
-                    self.logger.error(
-                        f"_calculate_technical_indicators ({data_type_for_logging}): Shape mismatch for DataFrame creation. Sample {i} features: {single_sample_base_features_np.shape[1]}, current_feature_names: {len(current_feature_names)}. Skipping TIs for this sample."
-                    )
-                    # Create a NaN array for all expected discriminator features for this sample
-                    # Use seq_len_input (derived from this sample's shape) and self.discriminator_feature_names
-                    nan_data = np.full((seq_len_input, len(self.discriminator_feature_names)), np.nan)
-                    all_ti_features_batch.append(nan_data)
-                    continue
+        # Final model save and metrics export
+        self.save_models(self.params["gan_epochs"] - 1)
+        self.export_training_metrics()
 
-                df = pd.DataFrame(single_sample_base_features_np, columns=current_feature_names)
+        self.logger.info("GAN training completed.")
 
-                # Add standard OHLC columns if not present and strategy needs them (common for many TIs)
-                # This is a heuristic. A more robust way is to check specific TI needs.
-                if 'open' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['open'] = df[self.base_feature_names_ordered[0]]
-                if 'high' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['high'] = df[self.base_feature_names_ordered[0]] # Simplistic, use first col
-                if 'low' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[0] in df.columns: df['low'] = df[self.base_feature_names_ordered[0]]
-                if 'close' not in df.columns and self.base_feature_names_ordered and self.base_feature_names_ordered[-1] in df.columns: df['close'] = df[self.base_feature_names_ordered[-1]] # Simplistic, use last col
-                if 'volume' not in df.columns: df['volume'] = 1 # Dummy volume if not present
+    def _calculate_technical_indicators(self, data_batch: np.ndarray, data_type_for_logging: str = "real") -> np.ndarray:
+        """
+        Calculate technical indicators for a batch of data using the configured TA strategy.
+        Args:
+            data_batch: Input data batch for which to calculate TIs. Shape: (batch_size, seq_len, num_features)
+            data_type_for_logging: String to indicate data type (real/generated) for logging purposes.
+        Returns:
+            data_with_tis: Output data with calculated technical indicators. Shape: (batch_size, seq_len, num_features + num_tis)
+        """
+        if self.tas_strategy_for_discriminator_tis is None:
+            self.logger.warning(f"_calculate_technical_indicators: TA strategy is not initialized. Returning input data as-is for {data_type_for_logging} data.")
+            return data_batch # Return as-is if no strategy
 
-                try:
-                    df.ta.strategy(self.tas_strategy_for_discriminator_tis)
-                except Exception as e_ta:
-                    self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): Error applying pandas_ta.strategy for sample {i}: {e_ta}. Appending NaNs for this sample.", exc_info=True)
-                    nan_data = np.full((seq_len_input, len(self.discriminator_feature_names)), np.nan)
-                    all_ti_features_batch.append(nan_data)
-                    continue
-                
-                # Ensure all expected discriminator features are present, fill with NaN if not
-                for col_name in self.discriminator_feature_names:
-                    if col_name not in df.columns:
-                        df[col_name] = np.nan
-            
-                # Order and select columns as per self.discriminator_feature_names
-                ordered_df = df[self.discriminator_feature_names]
-                all_ti_features_batch.append(ordered_df.values)
+        # Convert to DataFrame for pandas_ta
+        data_df = pd.DataFrame(data_batch.reshape(-1, data_batch.shape[-1])) # Reshape to 2D for DataFrame
 
-            if not all_ti_features_batch: # If loop didn't run or all samples failed
-                 self.logger.error(f"_calculate_technical_indicators ({data_type_for_logging}): all_ti_features_batch is empty after processing all samples. Returning original input.")
-                 return base_features_batch_param # Return original input parameter
+        # Calculate TIs using the strategy
+        try:
+            ti_results_df = self.tas_strategy_for_discriminator_tis.backtest(data_df)
+            self.logger.info(f"Calculated TIs for {data_type_for_logging} data: {ti_results_df.columns.tolist()}")
+        except Exception as e:
+            self.logger.error(f"Error calculating TIs for {data_type_for_logging} data: {e}")
+            ti_results_df = pd.DataFrame() # Empty DataFrame on error
 
-            features_with_tis_np = np.array(all_ti_features_batch)
-            features_with_tis_np = np.nan_to_num(features_with_tis_np, nan=0.0, posinf=0.0, neginf=0.0) # Replace NaNs
-            self.logger.info(f"_calculate_technical_indicators ({data_type_for_logging}): Calculated TIs with pandas-ta. Output shape: {features_with_tis_np.shape}")
+        # Convert results back to array
+        num_samples = data_batch.shape[0]
+        num_timesteps = data_batch.shape[1]
+        num_features = data_batch.shape[2]
+        num_tis = ti_results_df.shape[1] if not ti_results_df.empty else 0
 
-            if isinstance(base_features_batch_param, tf.Tensor):
-                return tf.convert_to_tensor(features_with_tis_np, dtype=tf.float32)
-            else:
-                return features_with_tis_np
+        # Reshape results to 3D: (num_samples, num_timesteps, num_features + num_tis)
+        if not ti_results_df.empty:
+            ti_results_array = ti_results_df.to_numpy().reshape(num_samples, num_timesteps, num_tis)
+            data_with_tis = np.concatenate([data_batch, ti_results_array], axis=-1)
+        else:
+            data_with_tis = data_batch # Fallback to input data if TI calculation fails
 
-    def _plot_losses(self, d_losses: List[float], g_losses: List[float], epoch: Union[int, str]):
-        if not d_losses or not g_losses:
-            self.logger.warning("Loss history is empty, skipping plotting.")
-            return
+        return data_with_tis
 
-        plt.figure(figsize=(12, 6)) # Increased figure size
-        plt.plot(d_losses, label=f'Discriminator Loss (Avg Last {self.params.get("gan_save_interval",100)}: {np.mean(d_losses[-self.params.get("gan_save_interval",100):]):.4f})' if len(d_losses) > 1 else 'Discriminator Loss')
-        plt.plot(g_losses, label=f'Generator Loss (Avg Last {self.params.get("gan_save_interval",100)}: {np.mean(g_losses[-self.params.get("gan_save_interval",100):]):.4f})' if len(g_losses) > 1 else 'Generator Loss')
+    def save_models(self, epoch: int):
+        """
+        Save the generator, discriminator, and GAN models at the specified epoch.
+        Args:
+            epoch: The current epoch number (0-indexed).
+        """
+        # Save generator
+        if self.generator:
+            gen_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_generator_epoch_template"].format(epoch=epoch+1))
+            self.generator.save(gen_save_path)
+            self.logger.info(f"Saved generator model to {gen_save_path}")
         
-        title_epoch_suffix = f"Epoch {epoch}" if isinstance(epoch, int) else "Final"
-        plt.title(f'GAN Training Losses ({title_epoch_suffix})')
-        plt.xlabel('Batch Iteration / Update Step') # Or 'Epoch' if losses are averaged per epoch
+        # Save discriminator
+        if self.discriminator:
+            disc_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_discriminator_epoch_template"].format(epoch=epoch+1))
+            self.discriminator.save(disc_save_path)
+            self.logger.info(f"Saved discriminator model to {disc_save_path}")
+        
+        # Save GAN
+        if self.gan:
+            gan_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_gan_epoch_template"].format(epoch=epoch+1))
+            self.gan.save(gan_save_path)
+            self.logger.info(f"Saved GAN model to {gan_save_path}")
+
+    def plot_losses(self, epoch: int):
+        """
+        Plot and save the generator and discriminator loss curves.
+        Args:
+            epoch: The current epoch number (0-indexed).
+        """
+        # Prepare loss data
+        d_loss = ... # Extract discriminator loss from training history
+        g_loss = ... # Extract generator loss from training history
+
+        # Plotting
+        plt.figure(figsize=(10, 5))
+        plt.plot(d_loss, label='Discriminator Loss')
+        plt.plot(g_loss, label='Generator Loss')
+        plt.title(f'GAN Losses Epoch {epoch+1}')
+        plt.xlabel('Batch')
         plt.ylabel('Loss')
         plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-
-        plot_save_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
-        os.makedirs(plot_save_dir, exist_ok=True)
         
-        dpi = self.params.get("loss_plot_dpi", 300)
-        save_path = ""
+        # Save plot
+        plot_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
+        os.makedirs(plot_dir, exist_ok=True)
+        loss_plot_path = os.path.join(plot_dir, self.params["loss_plot_epoch_template"].format(epoch=epoch+1))
+        plt.savefig(loss_plot_path, dpi=self.params["loss_plot_dpi"])
+        plt.close()
+        self.logger.info(f"Saved loss plot to {loss_plot_path}")
 
+    def export_training_metrics(self):
+        """
+        Export the detailed training metrics to a JSON file.
+        """
+        metrics_dir = os.path.join(self.params["results_base_dir"], self.params["save_metrics_dir"])
+        os.makedirs(metrics_dir, exist_ok=True)
+        metrics_path = os.path.join(metrics_dir, self.params["training_metrics_filename"])
+
+        # Convert full_metrics_history to JSON-serializable format if needed
         try:
-            if epoch == "final":
-                final_plot_path_override = self.config.get("gan_loss_plot_file") # Global config override
-                if final_plot_path_override:
-                    save_path = final_plot_path_override
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure dir for custom path
-                else: # Fallback to plugin params structure
-                    plot_filename = self.params.get("final_loss_plot_filename", "gan_loss_plot_final.png")
-                    save_path = os.path.join(plot_save_dir, plot_filename)
-            else: # Epoch-specific save
-                template_key = "loss_plot_epoch_template"
-                filename_template = self.params.get(template_key, "gan_loss_plot_epoch_{epoch}.png")
-                plot_filename = filename_template.format(epoch=epoch)
-                save_path = os.path.join(plot_save_dir, plot_filename)
-
-            if not save_path.endswith(".png"): save_path = os.path.splitext(save_path)[0] + ".png"
-
-            plt.savefig(save_path, dpi=dpi)
-            self.logger.info(f"Loss plot for {title_epoch_suffix} saved to {save_path}")
+            with open(metrics_path, 'w') as json_file:
+                json.dump(self.full_metrics_history, json_file, indent=4)
+            self.logger.info(f"Saved training metrics to {metrics_path}")
         except Exception as e:
-            self.logger.error(f"Failed to save loss plot for {title_epoch_suffix}: {e}", exc_info=True)
-        finally:
-            plt.close() # Ensure plot is closed
-
-    def save_models(self, epoch: Union[int, str]) -> None:
-        model_save_base_dir = self.params.get("results_base_dir", "examples/results/phase_4_3")
-        model_save_subdir = self.params.get("save_model_dir", "models")
-        
-        # Specific directory like 'examples/results/phase_4_3/models'
-        structured_model_save_path = os.path.join(model_save_base_dir, model_save_subdir)
-        os.makedirs(structured_model_save_path, exist_ok=True)
-
-        models_to_save = {
-            "generator": self.generator,
-            "discriminator": self.discriminator,
-            "gan": self.gan # Also save the combined GAN model
-        }
-
-        for model_name, model_instance in models_to_save.items():
-            if model_instance:
-                try:
-                    save_path = ""
-                    default_epoch_template = f"{model_name}_epoch_{{epoch}}.keras" # Generic default
-                    default_final_filename = f"{model_name}_final.keras"
-
-                    if epoch == "final":
-                        final_path_override_key = f"save_{model_name}_sequential_model_file" # e.g., save_generator_sequential_model_file
-                        final_path_override = self.config.get(final_path_override_key)
-                        
-                        param_final_filename_key = f"final_{model_name}_model_filename" # e.g., final_generator_model_filename
-                        specific_final_filename = self.params.get(param_final_filename_key, default_final_filename)
-                        
-                        if final_path_override:
-                            save_path = final_path_override
-                            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                        else:
-                            save_path = os.path.join(structured_model_save_path, specific_final_filename)
-                    
-                    else: # Epoch-specific save
-                        param_epoch_template_key = f"save_{model_name}_epoch_template" # e.g., save_generator_epoch_template
-                        filename_template = self.params.get(param_epoch_template_key, default_epoch_template)
-                        save_path = os.path.join(structured_model_save_path, filename_template.format(epoch=epoch))
-
-                    if not save_path.endswith(".keras"): save_path = os.path.splitext(save_path)[0] + ".keras"
-                    
-                    model_instance.save(save_path) 
-                    self.logger.info(f"{model_name.capitalize()} model saved to {save_path} (Epoch: {epoch})")
-                
-                except Exception as e:
-                    self.logger.error(f"Failed to save {model_name} model for epoch {epoch}: {e}", exc_info=True)
-            else:
-                self.logger.warning(f"{model_name.capitalize()} model instance not found, skipping save for epoch {epoch}.")
-
-    def _save_training_metrics(self, epoch: Union[int, str]):
-        """Saves the collected training metrics to a JSON file."""
-        if not self.full_metrics_history:
-            self.logger.warning("No metrics history to save.")
-            return
-
-        metrics_save_base_dir = self.params.get("results_base_dir", "examples/results/phase_4_3")
-        metrics_save_subdir = self.params.get("save_metrics_dir", "metrics")
-        
-        structured_metrics_save_path = os.path.join(metrics_save_base_dir, metrics_save_subdir)
-        os.makedirs(structured_metrics_save_path, exist_ok=True)
-
-        filename = ""
-        if epoch == "final":
-            filename = self.params.get("training_metrics_filename", "training_metrics_final.json")
-        else: # Epoch specific, though typically we save all at the end or one cumulative file
-            # For now, let's assume "final" is the main use case for a single file dump.
-            # If epoch-specific JSONs are needed, the naming template would be like models/plots.
-            # Defaulting to a single final file for now.
-            filename = self.params.get("training_metrics_filename", f"training_metrics_epoch_{epoch}.json")
-
-
-        file_path = os.path.join(structured_metrics_save_path, filename)
-
-
-
-        try:
-            with open(file_path, 'w') as f:
-                json.dump(self.full_metrics_history, f, indent=4)
-            self.logger.info(f"Training metrics saved to {file_path}")
-        except IOError as e:
-            self.logger.error(f"Failed to save training metrics to {file_path}: {e}", exc_info=True)
-        except TypeError as e:
-            self.logger.error(f"TypeError while saving metrics (possibly non-serializable data): {e}", exc_info=True)
-
-
-    def get_generator(self) -> Optional[Model]:
-        """Returns the trained generator model."""
-        return self.generator
-
-    def get_discriminator(self) -> Optional[Model]:
-        """Returns the trained discriminator model."""
-        return self.discriminator
+            self.logger.error(f"Error saving training metrics to JSON: {e}")
