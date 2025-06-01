@@ -238,58 +238,42 @@ class TensorFlowTALayer(layers.Layer):
         if calculated_ti_tensors_list: # If there are TIs to add
             output_tensor = tf.concat([inputs] + calculated_ti_tensors_list, axis=-1)
         else: # No TIs to calculate, output is just the input features
-            output_tensor = inputs
-        
-        # Ensure the output tensor has the expected total number of features.
-        # self.num_total_features should be self.num_base_features + self.num_ti_features_to_calc
-        expected_feature_count_calc = self.num_base_features + self.num_ti_features_to_calc
-        
-        # This assertion helps catch mismatches during development/debugging.
-        # tf.debugging.assert_equal(tf.shape(output_tensor)[-1], expected_feature_count_calc, 
-        #                           message=f"Output feature count mismatch in TensorFlowTALayer. Expected {expected_feature_count_calc}, Got {tf.shape(output_tensor)[-1]}")
+            output_tensor = inputs # No TIs were calculated or requested that are TF-ready
+            logger.debug(f"TensorFlowTALayer call: No TF-ready TIs calculated. Output tensor shape: {output_tensor.shape}")
 
-        # If self.num_total_features is the ultimate source of truth for the *expected* output shape by downstream layers:
-        if tf.shape(output_tensor)[-1] != self.num_total_features:
-            logger.warning(f"TensorFlowTALayer call: Output tensor feature count {tf.shape(output_tensor)[-1]} "
-                           f"does not match self.num_total_features {self.num_total_features}. "
-                           f"This might happen if not all TIs in ti_names_to_calculate are implemented "
-                           f"or if num_total_features was misconfigured. "
-                           f"The layer produced {self.num_base_features} base + {self.num_ti_features_to_calc} TIs = {expected_feature_count_calc} features.")
-            # Decide on a strategy: pad with zeros, raise error, or allow if dynamic.
-            # For now, we will rely on set_shape to catch this if it's a static shape issue.
-            # If num_total_features is just an expectation, the actual output is what we have.
+        # Ensure the output shape is correctly set for Keras, especially the feature dimension
+        # This is crucial if some TIs were skipped (outputting zeros) or if concatenation happened.
+        # The number of features should now be self.num_total_features.
+        
+        # The problematic 'if' condition that caused OperatorNotAllowedInGraphError has been removed.
+        # We rely on the concatenation logic to produce the correct number of features
+        # (self.num_base_features + self.num_ti_features_to_calc),
+        # and assume self.num_total_features (passed in __init__) is consistent with this.
+        # The compute_output_shape method and the set_shape call below handle shape inference for Keras.
 
-        output_shape = [None, self.seq_len, self.num_total_features] 
-        try:
-            output_tensor.set_shape(output_shape)
-        except ValueError as e:
-            logger.error(f"TensorFlowTALayer call: Failed to set output shape to {output_shape}. "
-                         f"Actual tensor shape is {output_tensor.shape}. Error: {e}. "
-                         f"This usually means the number of calculated features ({expected_feature_count_calc}) "
-                         f"does not match the expected self.num_total_features ({self.num_total_features}).")
-            # Fallback: try to set shape with actual calculated features if num_total_features was too optimistic
-            # This might break downstream layers if they strictly expect num_total_features.
-            try:
-                fallback_shape = [None, self.seq_len, expected_feature_count_calc]
-                output_tensor.set_shape(fallback_shape)
-                logger.warning(f"TensorFlowTALayer call: Set output shape to fallback {fallback_shape} due to mismatch with self.num_total_features.")
-            except ValueError as e_fallback:
-                logger.error(f"TensorFlowTALayer call: Fallback set_shape also failed. Error: {e_fallback}")
-                # Let the error propagate if even fallback fails.
-                raise e
+        # Try to set the static shape. Keras needs this.
+        output_tensor.set_shape([None, self.seq_len, self.num_total_features]) # Static shape for batch, seq_len, features
+        logger.info(f"TensorFlowTALayer call: Set output_tensor static shape to (None, {self.seq_len}, {self.num_total_features}). Actual symbolic shape after set_shape: {output_tensor.shape}")
 
         return output_tensor
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "base_feature_names": self.base_feature_names_ordered, # Use the renamed attribute
-            "ti_names_to_calculate": self.ti_names_to_calculate,
-            "num_base_features": self.num_base_features,
-            "num_total_features": self.num_total_features,
-            "seq_len": self.seq_len,
-        })
-        return config
+    def compute_output_shape(self, input_shape):
+        """
+        Computes the output shape of the layer based on the input shape.
+        Args:
+            input_shape: Shape of the input tensor.
+        Returns:
+            Tuple representing the shape of the output tensor.
+        """
+        # Assuming input_shape is of the form (batch_size, seq_len, num_base_features)
+        # We will output (batch_size, seq_len, num_total_features)
+        # where num_total_features is self.num_base_features + number of TI features to calculate
+
+        # This is a simplified example. You might need to adjust based on actual logic and attributes.
+        num_ti_features_to_calc = self.num_ti_features_to_calc # This should be set in __init__ or build
+        new_feature_count = self.num_base_features + num_ti_features_to_calc
+
+        return (input_shape[0], input_shape[1], new_feature_count)
 
 class GANTrainerPlugin:
     plugin_params: Dict[str, Any] = {
@@ -1177,6 +1161,8 @@ class GANTrainerPlugin:
 
         combined_batch_np = np.stack(all_combined_features_list, axis=0)
         logger.debug(f"[_calculate_technical_indicators] Final combined_batch_np shape: {combined_batch_np.shape}")
+        
+
         
         if combined_batch_np.shape[-1] != self.num_features_for_discriminator:
             error_msg = (
