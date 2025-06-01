@@ -815,8 +815,11 @@ class GANTrainerPlugin:
             self.logger.info(f"GANTrainerPlugin (train): Expanded dims for 2D data. New shape: {x_train_data.shape}")
 
         # Adversarial ground truths
-        valid = np.ones((x_train_data.shape[0], 1))
-        fake = np.zeros((x_train_data.shape[0], 1))
+        # valid = np.ones((x_train_data.shape[0], 1)) # OLD: Based on full dataset size
+        # fake = np.zeros((x_train_data.shape[0], 1))  # OLD: Based on full dataset size
+        current_batch_size = self.params.get("gan_batch_size", 32) # Get batch size from params
+        valid = np.ones((current_batch_size, 1)) # CORRECTED: Based on batch size
+        fake = np.zeros((current_batch_size, 1))  # CORRECTED: Based on batch size
 
         # For storing losses
         d_losses_history = []
