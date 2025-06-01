@@ -856,6 +856,15 @@ class GANTrainerPlugin:
         logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
         logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
 
+        if self.generator:
+            logger.info("--- Initial Generator Model Summary ---")
+            self.generator.summary(print_fn=logger.info)
+            logger.info("------------------------------------")
+        if self.discriminator:
+            logger.info("--- Initial Discriminator Model Summary ---")
+            self.discriminator.summary(print_fn=logger.info)
+            logger.info("----------------------------------------")
+
 
         for epoch in range(self.params["gan_epochs"]):
             start_time_epoch = time.time()
@@ -969,6 +978,8 @@ class GANTrainerPlugin:
             d_loss_fake_metrics = self.discriminator.train_on_batch(generated_data_for_discriminator, fake)
             d_loss = 0.5 * (d_loss_real_metrics[0] + d_loss_fake_metrics[0])
             d_acc = 0.5 * (d_loss_real_metrics[1] + d_loss_fake_metrics[1]) # Assuming metric at index 1 is accuracy
+            d_acc_real = d_loss_real_metrics[1] # Accuracy on real samples
+            d_acc_fake = d_loss_fake_metrics[1] # Accuracy on fake samples
 
             # ---------------------
             #  Train Generator
@@ -1000,7 +1011,7 @@ class GANTrainerPlugin:
             epoch_duration = time.time() - start_time_epoch
 
             # Print the progress
-            print(f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.1e}, LR D: {current_lr_d:.1e})")
+            print(f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - D_loss: {d_loss:.4f}, D_acc_real: {d_acc_real:.4f}, D_acc_fake: {d_acc_fake:.4f}, D_acc_avg: {d_acc:.4f}, G_loss: {g_loss:.4f} (LR G: {current_lr_g:.2e}, LR D: {current_lr_d:.2e})")
 
             # Manual ReduceLROnPlateau
             if self.params["enable_reduce_lr_on_plateau"]:
@@ -1212,10 +1223,10 @@ class GANTrainerPlugin:
             logger.info(f"Saved discriminator model to {d_path}")
         # Also, if you save the combined GAN model, update its extension too.
         # Example if you were to save self.gan:
-        # if self.gan:
-        #     gan_path = os.path.join(self.gan_model_dir, f"gan_epoch_{epoch}.keras")
-        #     self.gan.save(gan_path)
-        #     logger.info(f"Saved GAN model to {gan_path}")
+        if self.gan:
+            gan_path = os.path.join(self.gan_model_dir, f"gan_epoch_{epoch}.keras")
+            self.gan.save(gan_path)
+            logger.info(f"Saved GAN model to {gan_path}")
 
     def get_generator(self) -> Optional[Model]: # Corrected Keras Model type
         """Returns the trained generator model."""
