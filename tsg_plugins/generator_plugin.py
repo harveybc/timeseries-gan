@@ -1143,7 +1143,7 @@ class GeneratorPlugin:
                 if feat_name in self.feature_to_idx and feat_name not in decoder_outputs_set:
                     val_denorm = calc_func(dn_o_step5, dn_h_step5, dn_l_step5, dn_c_step5)
                     if pd.notnull(val_denorm):
-                                               val_norm = self._normalize_value(val_denorm, feat_name)
+                        val_norm = self._normalize_value(val_denorm, feat_name)
                         current_tick_assembled_features[self.feature_to_idx[feat_name]] = val_norm
 
 
