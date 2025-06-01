@@ -1058,8 +1058,7 @@ class GANTrainerPlugin:
                 original_gen_input_tensor = next((inp for inp in self.generator.inputs if inp.name == actual_gen_keras_input_name), None)
 
                 if original_gen_input_tensor is None:
-                    self.logger.error(f"GAN Build: Could not find Keras input tensor named '{actual_gen_keras_input_name}' in self.generator.inputs, \"
-                                      f"even though it was listed in self.generator_actual_input_names_ordered. Inconsistency detected.")
+                    self.logger.error(f"GAN Build: Could not find Keras input tensor named '{actual_gen_keras_input_name}' in self.generator.inputs, even though it was listed in self.generator_actual_input_names_ordered. Inconsistency detected.")
                     raise ValueError(f"Inconsistent generator input specification for '{actual_gen_keras_input_name}'.")
 
                 original_shape_tuple = tuple(original_gen_input_tensor.shape[1:]) # Shape without batch dim (e.g., (latent_dim,) or (seq_len, features))
@@ -1161,9 +1160,8 @@ class GANTrainerPlugin:
         # --- Apply Technical Indicators using TensorFlowTALayer if configured ---
         if self.params.get("use_tensorflow_ta_layer", False) and self.ti_names_to_calculate:
             self.logger.info(f"GAN Build: Using TensorFlowTALayer to calculate TIs for generated data. Num TIs: {len(self.ti_names_to_calculate)}")
-            self.logger.info(f"  TensorFlowTALayer input (generated_base_features_tensor) shape: {data_for_discriminator_input.shape}\") # Log shape before TA layer
-            self.logger.info(f"  TensorFlowTALayer params: base_feature_names={self.base_feature_names_ordered}, ti_names={self.ti_names_to_calculate}, \"
-                             f"num_base_features={self.num_base_features}, num_total_features={self.num_features_for_discriminator}, seq_len={self.seq_len}\")
+            self.logger.info(f"  TensorFlowTALayer input (generated_base_features_tensor) shape: {data_for_discriminator_input.shape}") # Log shape before TA layer
+            self.logger.info(f"  TensorFlowTALayer params: base_feature_names={self.base_feature_names_ordered}, ti_names={self.ti_names_to_calculate}, num_base_features={self.num_base_features}, num_total_features={self.num_features_for_discriminator}, seq_len={self.seq_len}")
             
             input_to_ta_layer_shape = data_for_discriminator_input.shape # Check shape of tensor being passed
             if len(input_to_ta_layer_shape) != 3:
@@ -1192,8 +1190,7 @@ class GANTrainerPlugin:
             self.logger.info(f"GAN Build: Not using TensorFlowTALayer, or no TIs to calculate. Passing processed generator output directly to discriminator.")
             if self.num_base_features is not None and self.num_features_for_discriminator is not None and self.num_features_for_discriminator != self.num_base_features:
                  self.logger.error(f"GAN Build: TIs are skipped, but num_features_for_discriminator ({self.num_features_for_discriminator}) "
-                                   f"differs from num_base_features ({self.num_base_features}). \"
-                                   f"Discriminator expects {self.num_features_for_discriminator} features, but will receive {self.num_base_features}. Shape mismatch imminent.")
+                                   f"differs from num_base_features ({self.num_base_features}) Discriminator expects {self.num_features_for_discriminator} features, but will receive {self.num_base_features}. Shape mismatch imminent.")
                  raise ValueError("Discriminator feature count mismatch: TIs expected by D but not added in GAN path, and num_features_for_discriminator != num_base_features.")
 
         final_disc_input_shape = data_for_discriminator_input.shape
@@ -1205,15 +1202,13 @@ class GANTrainerPlugin:
         
         if final_disc_input_shape[1] is not None and self.seq_len is not None and final_disc_input_shape[1] != self.seq_len:
             self.logger.error(
-                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Sequence Length). \"
-                f"Data seq_len: {final_disc_input_shape[1]}, Discriminator expects: {self.seq_len}.\"
+                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Sequence Length) Data seq_len: {final_disc_input_shape[1]}, Discriminator expects: {self.seq_len}."
             )
-            raise ValueError(f"Sequence length mismatch for data entering discriminator in GAN graph: data has {final_disc_input_shape[1]}, D expects {self.seq_len}.\")
+            raise ValueError(f"Sequence length mismatch for data entering discriminator in GAN graph: data has {final_disc_input_shape[1]}, D expects {self.seq_len}.")
         
         if final_disc_input_shape[2] is not None and self.num_features_for_discriminator is not None and final_disc_input_shape[2] != self.num_features_for_discriminator:
             self.logger.error(
-                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Number of Features). \"
-                f"Data features: {final_disc_input_shape[2]}, Discriminator expects: {self.num_features_for_discriminator}.\"
+                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Number of Features) Data features: {final_disc_input_shape[2]}, Discriminator expects: {self.num_features_for_discriminator}"
             )
             raise ValueError(f"Feature count mismatch for data entering discriminator in GAN graph: data has {final_disc_input_shape[2]}, D expects {self.num_features_for_discriminator}.")
 
