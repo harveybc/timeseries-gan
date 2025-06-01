@@ -960,332 +960,105 @@ class GANTrainerPlugin:
 
     def _calculate_technical_indicators(self, base_features_batch_np: np.ndarray) -> np.ndarray:
         """
-        Calculates technical indicators on the generated base features.
+        Calculates technical indicators for a batch of base features.
         Input: base_features_batch_np (batch_size, seq_len, num_base_features)
         Output: combined_features_batch_np (batch_size, seq_len, num_features_for_discriminator)
         """
-        batch_size, seq_len, num_base_feat_input = base_features_batch_np.shape
+        batch_size, seq_len, num_input_features = base_features_batch_np.shape
+        
+        logger.debug(f"[_calculate_technical_indicators] Input base_features_batch_np shape: {base_features_batch_np.shape}")
+        logger.debug(f"[_calculate_technical_indicators] self.num_base_features: {self.num_base_features}")
+        logger.debug(f"[_calculate_technical_indicators] self.base_feature_names_ordered: {self.base_feature_names_ordered}")
+        logger.debug(f"[_calculate_technical_indicators] self.ti_names_to_calculate: {self.ti_names_to_calculate}")
+        logger.debug(f"[_calculate_technical_indicators] self.tas_strategy_for_discriminator_tis: {self.tas_strategy_for_discriminator_tis}")
+        logger.debug(f"[_calculate_technical_indicators] self.discriminator_feature_names (target for reindex): {self.discriminator_feature_names}")
+        logger.debug(f"[_calculate_technical_indicators] self.num_features_for_discriminator (target for output): {self.num_features_for_discriminator}")
 
-        if num_base_feat_input != self.num_base_features:
+        if num_input_features != self.num_base_features:
             error_msg = (
-                f"Input for TI calculation has {num_base_feat_input} features, "
-                f"expected {self.num_base_features} base features based on 'base_feature_names_ordered': {self.base_feature_names}."
+                f"Input for TI calculation has {num_input_features} features, "
+                f"but expected {self.num_base_features} base features according to self.num_base_features. "
+                f"Base feature names expected: {self.base_feature_names_ordered}"
             )
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        if not self.ti_names_to_calculate:
-            if self.num_base_features == self.num_features_for_discriminator:
-                logger.info("No TIs to calculate, and base features count matches discriminator's expected features count. Skipping TI calculation.")
-                return base_features_batch_np
-            else:
-                error_msg = (
-                    f"TI Calculation: Configuration Error. No TIs are specified in 'ti_names_to_calculate', "
-                    f"but the number of base features ({self.num_base_features} from 'base_feature_names_ordered') "
-                    f"does not match the total number of features expected by the discriminator "
-                    f"({self.num_features_for_discriminator} from 'feature_names_for_discriminator_ordered'). "
-                    "This implies 'feature_names_for_discriminator_ordered' is not simply 'base_feature_names_ordered' + TIs, "
-                    "or there's a mismatch in counts."
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg)
+        # Ensure pandas_ta is imported (consider moving to top of file if not already there)
+        try:
+            import pandas_ta as ta # type: ignore
+        except ImportError:
+            logger.error("pandas-ta is not installed. Please install it to calculate technical indicators.")
+            # Depending on desired behavior, either raise error or return base features
+            raise
 
         all_combined_features_list = []
 
         for i in range(batch_size):
-            sample_base_features_df = pd.DataFrame(base_features_batch_np[i, :, :], columns=self.base_feature_names)
-            df_with_tas = sample_base_features_df.copy()
-
-            # --- Define OHLCV column mapping ---
-            # Use direct mapping if names exist in base_feature_names, otherwise fallback or log warning.
-            base_cols_set = set(self.base_feature_names)
-            col_map = {}
-
-            # Define preferred exact names
-            ohlc_preferred_names = {
-                'open': 'OPEN', 'high': 'HIGH', 'low': 'LOW', 'close': 'CLOSE', 'volume': 'VOLUME' # Case-sensitive
-            }
-
-            # Map preferred names if they exist in base_feature_names
-            for key, preferred_name in ohlc_preferred_names.items():
-                if preferred_name in base_cols_set:
-                    col_map[key] = preferred_name
-                else:
-                    col_map[key] = None # Explicitly set to None if not found
-
-            # Fallback for CLOSE if not found by preferred name (critical for most TIs)
-            if not col_map['close']:
-                if 'CLOSE' in base_cols_set: col_map['close'] = 'CLOSE'
-                elif 'Close' in base_cols_set: col_map['close'] = 'Close'
-                elif 'close' in base_cols_set: col_map['close'] = 'close'
-                elif self.base_feature_names: col_map['close'] = self.base_feature_names[0] # Fallback to first column
-                else: raise ValueError("TI Calc: 'close' column cannot be determined and base_feature_names is empty.")
-                logger.info(f"TI Calc: 'close' mapped to '{col_map['close']}' (fallback or specific case).")
-
-            # Fallbacks for other OHLC if not found by preferred name (less critical, used by some TIs)
-            # These will try to find any case variation or use close as a last resort.
-            for ohlc_key in ['open', 'high', 'low']:
-                if not col_map[ohlc_key]: # If preferred name wasn't found
-                    found_alternative = False
-                    for base_col_name in self.base_feature_names:
-                        if base_col_name.lower() == ohlc_key:
-                            col_map[ohlc_key] = base_col_name
-                            found_alternative = True
-                            break
-                    if not found_alternative:
-                        col_map[ohlc_key] = col_map['close'] # Default to 'close' if not found
-                        logger.warning(f"TI Calc: '{ohlc_key}' not found. Defaulting to '{col_map['close']}'. Some TIs might be inaccurate.")
+            sample_base_features = base_features_batch_np[i, :, :] # Shape: (seq_len, num_base_features)
             
-            if not col_map['volume']: # If preferred 'VOLUME' wasn't found
-                found_vol_alt = False
-                for base_col_name in self.base_feature_names:
-                    if base_col_name.lower() == 'volume':
-                        col_map['volume'] = base_col_name
-                        found_vol_alt = True
-                        break
-                if not found_vol_alt:
-                     # Volume is optional for many TIs, so can be None if not found.
-                     # Some TIs (like OBV) will fail if it's None and they are requested.
-                    col_map['volume'] = None
-                    logger.info("TI Calc: 'volume' column not found. TIs requiring volume may not be calculated or may error.")
-            
-            logger.debug(f"TI Calc OHLCV Mapping for sample {i}: {col_map}")
-
-
-            processed_indicator_calls = set() # Stores (indicator_type_normalised, params_tuple_str)
-
-            # --- Technical Indicator Calculation ---
-
-            # RSI (e.g., RSI_14)
-            rsi_configs = set()
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("RSI_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2:
-                        try: rsi_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse RSI param from {ti_name}")
-            for length in rsi_configs:
-                call_key = ('rsi', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.rsi(close=df_with_tas[col_map['close']], length=length, append=True)
-                        processed_indicator_calls.add(call_key)
-                        logger.debug(f"Calculated RSI_{length}")
-                    except Exception as e: logger.warning(f"Error calculating RSI_{length}: {e}")
-
-            # EMA (e.g., EMA_14)
-            ema_configs = set()
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("EMA_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2:
-                        try: ema_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse EMA param from {ti_name}")
-            for length in ema_configs:
-                call_key = ('ema', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.ema(close=df_with_tas[col_map['close']], length=length, append=True)
-                        processed_indicator_calls.add(call_key)
-                        logger.debug(f"Calculated EMA_{length}")
-                    except Exception as e: logger.warning(f"Error calculating EMA_{length}: {e}")
+            # Create DataFrame for the current sample's base features
+            # Ensure self.base_feature_names_ordered has correct number of names
+            if len(self.base_feature_names_ordered) != num_input_features:
+                err_msg = f"Mismatch: len(self.base_feature_names_ordered)={len(self.base_feature_names_ordered)} but num_input_features={num_input_features}"
+                logger.error(err_msg)
+                raise ValueError(err_msg)
                 
-            # MACD (e.g., MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9)
-            macd_configs = set() # Stores tuples of (fast, slow, signal)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("MACD"): # Catches MACD_, MACDh_, MACDs_
-                    parts = ti_name.split('_')
-                    # Expect MACD_F_S_SIG, MACDh_F_S_SIG, MACDs_F_S_SIG
-                    if len(parts) == 4:
-                        try: macd_configs.add((int(parts[1]), int(parts[2]), int(parts[3])))
-                        except ValueError: logger.warning(f"Could not parse MACD params from ti_name {ti_name}")
-            for f,s,sig in macd_configs:
-                call_key = ('macd', str((f,s,sig)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.macd(close=df_with_tas[col_map['close']], fast=f, slow=s, signal=sig, append=True)
-                        processed_indicator_calls.add(call_key) # Marks this combination as processed
-                        logger.debug(f"Calculated MACD family for {f}_{s}_{sig}")
-                    except Exception as e: logger.warning(f"Error calculating MACD({f},{s},{sig}): {e}")
-
-            # Stochastic Oscillator (e.g., STOCHk_14_3_3, STOCHd_14_3_3)
-            stoch_configs = set() # Stores (k, d, smooth_k)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("STOCH"):
-                    parts = ti_name.split('_') # STOCHk_K_D_SmoothK or STOCHd_K_D_SmoothK
-                    if len(parts) == 4:
-                        try: stoch_configs.add((int(parts[1]), int(parts[2]), int(parts[3])))
-                        except ValueError: logger.warning(f"Could not parse STOCH params from {ti_name}")
-            for k,d,smooth_k in stoch_configs: # k,d,smooth_k from pandas-ta are k,d,smooth_k
-                call_key = ('stoch', str((k,d,smooth_k)))
-                if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
-                        try:
-                            df_with_tas.ta.stoch(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], k=k, d=d, smooth_k=smooth_k, append=True)
-                            processed_indicator_calls.add(call_key)
-                            logger.debug(f"Calculated STOCH family for {k}_{d}_{smooth_k}")
-                        except Exception as e: logger.warning(f"Error calculating STOCH({k},{d},{smooth_k}): {e}")
-                    else: logger.warning(f"Skipping STOCH({k},{d},{smooth_k}) due to missing HLC columns.")
-
-            # ADX (e.g., ADX_14, DMP_14, DMN_14)
-            adx_configs = set() # Stores (length)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("ADX_") or ti_name.upper().startswith("DMP_") or ti_name.upper().startswith("DMN_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2: # ADX_L, DMP_L, DMN_L
-                        try: adx_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse ADX/DMP/DMN param from {ti_name}")
-            for length in adx_configs:
-                call_key = ('adx', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
-                        try:
-                            df_with_tas.ta.adx(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, append=True)
-                            processed_indicator_calls.add(call_key)
-                            logger.debug(f"Calculated ADX family for {length}")
-                        except Exception as e: logger.warning(f"Error calculating ADX({length}): {e}")
-                    else: logger.warning(f"Skipping ADX({length}) due to missing HLC columns.")
+            df_sample_base = pd.DataFrame(sample_base_features, columns=self.base_feature_names_ordered)
             
-            # ATR (e.g., ATRr_14) - pandas-ta typically generates ATRr_length or ATR_length
-            atr_configs = set() # Stores (length)
-            for ti_name in self.ti_names_to_calculate:
-                # pandas-ta might produce ATRr_L or ATR_L. Config uses ATRr_L.
-                if ti_name.upper().startswith("ATRR_") or ti_name.upper().startswith("ATR_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2:
-                        try: atr_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse ATR param from {ti_name}")
-            for length in atr_configs:
-                call_key = ('atr', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
-                        try:
-                            # mamode="rma" is often default for "true range" ATR.
-                            # pandas-ta default is mamode="sma". ATRr uses rma.
-                            df_with_tas.ta.atr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, mamode="rma", append=True)
-                            processed_indicator_calls.add(call_key)
-                            logger.debug(f"Calculated ATRr_{length}")
-                        except Exception as e: logger.warning(f"Error calculating ATRr_{length}: {e}")
-                    else: logger.warning(f"Skipping ATRr_{length} due to missing HLC columns.")
+            # Map OHLCV if necessary (adjust column names as per your actual base feature names)
+            # This mapping is crucial for pandas-ta to find the right columns.
+            # Example: if your base features are ['open', 'high', 'low', 'close', 'volume']
+            # And pandas-ta expects ['Open', 'High', 'Low', 'Close', 'Volume']
+            # ohlcv_map = {
+            #     self.ohlc_feature_map.get("open", "open"): "Open",
+            #     self.ohlc_feature_map.get("high", "high"): "High",
+            #     self.ohlc_feature_map.get("low", "low"): "Low",
+            #     self.ohlc_feature_map.get("close", "close"): "Close",
+            #     self.ohlc_feature_map.get("volume", "volume"): "Volume"
+            # }
+            # df_ta_input = df_sample_base.rename(columns=ohlcv_map)
+            # For simplicity, assuming df_sample_base column names are already what pandas-ta expects
+            # or that self.base_feature_names_ordered are directly usable by pandas-ta.
+            # If not, a renaming step like above is needed using self.ohlc_feature_map.
+            # For now, we directly use df_sample_base.
 
-            # CCI (e.g., CCI_14_0.015)
-            cci_configs = set() # Stores (length, constant)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("CCI_"):
-                    parts = ti_name.split('_') # CCI_L_C
-                    if len(parts) == 3:
-                        try: cci_configs.add((int(parts[1]), float(parts[2])))
-                        except ValueError: logger.warning(f"Could not parse CCI params from {ti_name}")
-            for length, constant in cci_configs:
-                call_key = ('cci', str((length, constant)))
-                if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
-                        try:
-                            df_with_tas.ta.cci(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, c=constant, append=True)
-                            processed_indicator_calls.add(call_key)
-                            logger.debug(f"Calculated CCI_{length}_{constant}")
-                        except Exception as e: logger.warning(f"Error calculating CCI({length},{constant}): {e}")
-                    else: logger.warning(f"Skipping CCI({length},{constant}) due to missing HLC columns.")
+            # Initialize an empty DataFrame for TIs to ensure clean concatenation
+            df_sample_tis = pd.DataFrame(index=df_sample_base.index)
 
-            # Williams %R (e.g., WILLR_14)
-            willr_configs = set() # Stores (length)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("WILLR_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2:
-                        try: 
-                            willr_configs.add(int(parts[1]))
-                        except ValueError: 
-                            logger.warning(f"Could not parse WILLR param from {ti_name}") # Corrected variable
-            for length in willr_configs:
-                call_key = ('willr', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    if col_map['high'] and col_map['low'] and col_map['close']:
-                        try:
-                            df_with_tas.ta.willr(high=df_with_tas[col_map['high']], low=df_with_tas[col_map['low']], close=df_with_tas[col_map['close']], length=length, append=True)
-                            processed_indicator_calls.add(call_key)
-                            logger.debug(f"Calculated WILLR_{length}")
-                        except Exception as e: logger.warning(f"Error calculating WILLR_{length}: {e}")
-                    else: logger.warning(f"Skipping WILLR_{length} due to missing HLC columns.")
+            if self.tas_strategy_for_discriminator_tis and isinstance(self.tas_strategy_for_discriminator_tis, ta.Strategy):
+                logger.debug(f"Sample {i}: Applying TA strategy: {self.tas_strategy_for_discriminator_tis.name}")
+                # Calculate TIs using the strategy. pandas-ta appends to the DataFrame.
+                # Make a copy to avoid modifying the original df_sample_base if it's used later without TIs.
+                df_with_appended_tis = df_sample_base.copy()
+                df_with_appended_tis.ta.strategy(self.tas_strategy_for_discriminator_tis, append=True)
+                
+                # Extract only the newly added TI columns.
+                # The columns in df_with_appended_tis that are not in df_sample_base.columns are the TIs.
+                ti_cols_added = [col for col in df_with_appended_tis.columns if col not in df_sample_base.columns]
+                if ti_cols_added:
+                    df_sample_tis = pd.concat([df_sample_tis, df_with_appended_tis[ti_cols_added]], axis=1)
+                logger.debug(f"Sample {i}: TI columns added by strategy: {ti_cols_added}")
+                logger.debug(f"Sample {i}: df_sample_tis shape after strategy: {df_sample_tis.shape}, columns: {list(df_sample_tis.columns)}")
 
-            # Momentum (e.g., MOM_14)
-            mom_configs = set() # Stores (length)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("MOM_"):
-                    parts = ti_name.split('_')
-                    if len(parts) == 2:
-                        try: 
-                            mom_configs.add(int(parts[1]))
-                        except ValueError: 
-                            logger.warning(f"Could not parse MOM param from {ti_name}") # Corrected variable
-            for length in mom_configs:
-                call_key = ('mom', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.mom(close=df_with_tas[col_map['close']], length=length, append=True)
-                        processed_indicator_calls.add(call_key)
-                        logger.debug(f"Calculated MOM_{length}")
-                    except Exception as e: logger.warning(f"Error calculating MOM_{length}: {e}")
-
-           
-
-            # ROC (Rate of Change) (e.g., ROC_14)
-            roc_configs = set() # Stores (length)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("ROC_"): # ROC, not ROC_
-                    parts = ti_name.split('_')
-                    if len(parts) == 2: # ROC_L
-                        try: 
-                            roc_configs.add(int(parts[1]))
-                        except ValueError: 
-                            logger.warning(f"Could not parse ROC param from {ti_name}") # Corrected variable
-            for length in roc_configs:
-                call_key = ('roc', str((length,)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.roc(close=df_with_tas[col_map['close']], length=length, append=True)
-                        processed_indicator_calls.add(call_key)
-                        logger.debug(f"Calculated ROC_{length}")
-                    except Exception as e: logger.warning(f"Error calculating ROC_{length}: {e}")
-
-            # Bollinger Bands (e.g., BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, BBB_20_2.0, BBP_20_2.0)
-            bbands_configs = set() # Stores (length, std_dev)
-            for ti_name in self.ti_names_to_calculate:
-                if ti_name.upper().startswith("BBL_") or ti_name.upper().startswith("BBM_") or \
-                   ti_name.upper().startswith("BBU_") or ti_name.upper().startswith("BBB_") or \
-                   ti_name.upper().startswith("BBP_"):
-                    parts = ti_name.split('_') # e.g., BBL_L_STD
-                    if len(parts) == 3:
-                        try: bbands_configs.add((int(parts[1]), float(parts[2])))
-                        except ValueError: logger.warning(f"Could not parse BBANDS params from {ti_name}")
-            for length, std in bbands_configs:
-                call_key = ('bbands', str((length, std)))
-                if call_key not in processed_indicator_calls:
-                    try:
-                        df_with_tas.ta.bbands(close=df_with_tas[col_map['close']], length=length, std=std, append=True)
-                        processed_indicator_calls.add(call_key)
-                        logger.debug(f"Calculated BBANDS family for {length}_{std}")
-                    except Exception as e: logger.warning(f"Error calculating BBANDS({length},{std}): {e}")
+            else:
+                logger.warning(f"Sample {i}: No valid TA strategy found or self.ti_names_to_calculate is empty. No TIs will be calculated by strategy.")
             
-            # --- End Technical Indicator Calculation ---
-
-            # Ensure all columns required by discriminator are present, fill NaNs, and order correctly.
-            # Verify that pandas_ta generated the columns with the exact names expected in self.discriminator_feature_names
-            missing_cols = [col for col in self.discriminator_feature_names if col not in df_with_tas.columns]
-            if missing_cols:
-                logger.warning(f"Sample {i}: After TA calculation, the following expected columns are MISSING: {missing_cols}. They will be added with NaNs (then 0). This might indicate a mismatch between 'feature_names_for_discriminator_ordered' and pandas_ta output names.")
+            # Concatenate base features with calculated TIs
+            df_with_tas = pd.concat([df_sample_base, df_sample_tis], axis=1)
+            logger.debug(f"Sample {i}: df_with_tas (base + TIs) shape: {df_with_tas.shape}, columns: {list(df_with_tas.columns)}")
             
-            # Reindex to ensure correct order and presence of all expected columns (base + TIs)
-            # Columns not generated by pandas_ta (or base features if they were somehow dropped) will be added as NaN.
-            df_final_sample = df_with_tas.reindex(columns=self.discriminator_feature_names) # Corrected: self.discriminator_feature_names
+            # Reindex to ensure all expected features for the discriminator are present and in order
+            # This will add any missing columns (e.g., TIs that were expected but not calculated) as NaN
+            df_final_sample = df_with_tas.reindex(columns=self.discriminator_feature_names)
+            logger.debug(f"Sample {i}: df_final_sample after reindex shape: {df_final_sample.shape}, columns: {list(df_final_sample.columns)}")
             
-            # Fill NaNs - common at the start of series due to TA lookback periods.
-            # Using 0 for now. Consider ffill() then bfill() then 0, or other strategies.
+            # Fill NaNs - common at the start of series due to TA lookback periods or if TIs weren't calculable.
             df_final_sample = df_final_sample.fillna(0) 
 
             all_combined_features_list.append(df_final_sample.to_numpy())
 
         combined_batch_np = np.stack(all_combined_features_list, axis=0)
+        logger.debug(f"[_calculate_technical_indicators] Final combined_batch_np shape: {combined_batch_np.shape}")
         
         if combined_batch_np.shape[-1] != self.num_features_for_discriminator:
             error_msg = (
