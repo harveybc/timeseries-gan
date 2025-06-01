@@ -350,18 +350,17 @@ class GANTrainerPlugin:
 
         # Initialize dimensions for GAN model inputs (latent is from core_params, conditional/context here)
         self.conditional_dim_for_generator = 0
-        if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'get_conditional_feature_dim'):
-            self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_feature_dim()
+        if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'get_conditional_dim'): # CORRECTED
+            self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_dim() # CORRECTED
             self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from feeder: {self.conditional_dim_for_generator}")
         elif self.params: # Fallback to params if feeder doesn't provide it directly
             date_cond_feats = self.params.get('feeder_date_features_for_conditioning', [])
             fund_cond_feats = self.params.get('feeder_fundamental_features_for_conditioning', [])
             # This logic assumes simple concatenation. Adjust if FeederPlugin structures conditions differently.
-            self.conditional_dim_for_generator = len(date_cond_feats) + len(fund_cond_feats) 
-            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from params: {self.conditional_dim_for_generator} (date_feats: {len(date_cond_feats)}, fund_feats: {len(fund_cond_feats)})")
+            self.conditional_dim_for_generator = (len(date_cond_feats) * 2) + len(fund_cond_feats) 
+            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from params (fallback): {self.conditional_dim_for_generator} (date_feats*2: {len(date_cond_feats)*2}, fund_feats: {len(fund_cond_feats)})")
         else:
             self.logger.warning("GANTrainerPlugin (__init__): Could not determine conditional_dim_for_generator.")
-
 
         self.context_dim_for_generator = self.params.get('context_vector_dim', 64) # from config
         self.logger.info(f"GANTrainerPlugin (__init__): context_dim_for_generator set to {self.context_dim_for_generator}")
