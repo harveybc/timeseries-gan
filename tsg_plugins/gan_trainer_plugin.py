@@ -307,6 +307,7 @@ class GANTrainerPlugin:
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
+        self.logger = logger  # Assign module-level logger to instance
         self.config = deepcopy(config) # Store initial config for reference
 
         # 1. Initialize plugin instances
@@ -552,51 +553,66 @@ class GANTrainerPlugin:
 
         generated_data_raw = self.generator(generator_feed_inputs_ordered) # Shape: (batch, seq_len_gen_output, actual_generator_output_dim)
         
-        # Slice generator output if its feature dimension differs from num_base_features
-        # self.num_base_features is derived from 'base_feature_names_ordered' (e.g., 21)
-        # self.actual_generator_output_dim is from the loaded generator model (e.g., 23)
+        # Ensure generator output is 3D for the TI layer and discriminator
+        # self.generator_output_actual_seq_len should reflect the generator's intended output sequence length (e.g., 1 or self.seq_len)
+        # self.actual_generator_output_dim is the number of features from the generator model
         
-        # Determine the actual sequence length from the generator's output shape
-        # Assuming generator_output_shape is (batch, seq, features)
-        # If generator output is (batch, features), then seq_len_from_generator = 1 (or needs reshape)
-        # For VAE decoder, it should be (batch, self.seq_len, features)
+        if tf.rank(generated_data_raw) == 2:
+            logger.info(f"GAN build: Generator output is 2D (shape {tf.shape(generated_data_raw)}). Reshaping to 3D using configured generator_output_actual_seq_len: {self.generator_output_actual_seq_len}.")
+            # Target shape: (batch_size, self.generator_output_actual_seq_len, num_features_from_generator)
+            # Use tf.shape for dynamic batch size and feature dimension from the tensor itself.
+            generated_data_raw = tf.reshape(
+                generated_data_raw, 
+                [tf.shape(generated_data_raw)[0], self.generator_output_actual_seq_len, tf.shape(generated_data_raw)[-1]]
+            )
+            logger.info(f"GAN build: Reshaped generator output to {tf.shape(generated_data_raw)}.")
         
-        # Ensure generated_data_raw is 3D: (batch, seq_len, features)
-        # The generator (VAE decoder) should output sequences of length self.seq_len (18)
-        # If generated_data_raw.shape is (None, 23) and self.seq_len is 18, this is an issue.
-        # However, the VAE decoder typically outputs the same sequence length it was trained on.
-        # Let's assume generated_data_raw is (None, self.seq_len, self.actual_generator_output_dim)
-        
+        # Now, generated_data_raw is expected to be 3D: (batch, generator_output_actual_seq_len, actual_generator_output_dim)
+
         base_features_from_generator = generated_data_raw
+        # Slice features if generator's output dim doesn't match num_base_features
         if hasattr(self, 'actual_generator_output_dim') and self.actual_generator_output_dim != self.num_base_features:
-            logger.info(f"GAN build: Slicing generator output from {self.actual_generator_output_dim} to {self.num_base_features} features.")
-            # Assuming generated_data_raw is [batch, sequence, features]
-            if len(generated_data_raw.shape) == 3:
-                base_features_from_generator = generated_data_raw[:, :, :self.num_base_features]
-            elif len(generated_data_raw.shape) == 2: # Should not happen if generator outputs sequences
-                logger.warning("GAN build: Generator output is 2D. Slicing features and expecting TIs to be calculated on seq_len=1 or this needs reshape.")
-                base_features_from_generator = generated_data_raw[:, :self.num_base_features]
-                # If seq_len is > 1, this 2D output needs reshaping to (batch, 1, num_base_features)
-                # before TI calculation, or TI calculation needs to handle it.
-                # For now, assume TI layer expects (batch, seq_len, features).
-                # If generator output is (batch, features) and self.seq_len=1, then it's (batch, 1, features) after reshape.
-                # The TensorFlowTALayer expects self.seq_len.
-                # If generator output is (batch, features) and self.seq_len > 1, this is a problem.
-                # The VAE decoder should output (batch, self.seq_len, features)
-                # So base_features_from_generator should be (batch, self.seq_len, self.num_base_features)
-            else:
-                logger.error(f"GAN build: Unexpected generator output shape {generated_data_raw.shape}")
+            logger.info(f"GAN build: Slicing generator output's feature dimension from {self.actual_generator_output_dim} to {self.num_base_features} features.")
+            # generated_data_raw is now 3D, so slicing is [:, :, :num_base_features]
+            base_features_from_generator = generated_data_raw[:, :, :self.num_base_features]
+            logger.info(f"GAN build: Sliced base_features_from_generator shape: {tf.shape(base_features_from_generator)}.")
         
-        # At this point, base_features_from_generator should have shape (None, self.seq_len, self.num_base_features)
+        # At this point, base_features_from_generator should have shape 
+        # (None, self.generator_output_actual_seq_len, self.num_base_features)
+        # e.g., (None, 1, 21) if generator_output_actual_seq_len is 1.
+
+        # The TensorFlowTALayer expects input of shape (None, self.seq_len, self.num_base_features)
+        # If self.generator_output_actual_seq_len (e.g., 1) is different from self.seq_len (e.g., 18),
+        # this is a conceptual gap. The TI layer is configured with self.seq_len.
+        # This implies that if generator produces seq_len=1, it must be tiled or repeated 
+        # to match self.seq_len BEFORE passing to TensorFlowTALayer if TIs are to be calculated over self.seq_len.
+        
+        # Current Assumption: TensorFlowTALayer will receive input with seq_len = self.generator_output_actual_seq_len
+        # and its internal seq_len parameter must match this, OR the input to TI layer must be adjusted.
+        # The TI layer is currently initialized with self.seq_len (discriminator's seq_len).
+        # This means base_features_from_generator MUST have self.seq_len as its time dimension.
+
+        if base_features_from_generator.shape[1] != self.seq_len:
+            logger.warning(
+                f"GAN build: Mismatch between generator output sequence length ({base_features_from_generator.shape[1]}) "
+                f"and discriminator/TI sequence length ({self.seq_len}). Attempting to tile/repeat generator output."
+            )
+            if base_features_from_generator.shape[1] == 1 and self.seq_len > 1:
+                # Tile the single step output to match self.seq_len for TIs/Discriminator
+                base_features_from_generator = tf.tile(base_features_from_generator, [1, self.seq_len, 1])
+                logger.info(f"GAN build: Tiled generator output to shape {tf.shape(base_features_from_generator)} to match discriminator seq_len.")
+            else:
+                # More complex scenario, e.g. generator_seq_len=5, discriminator_seq_len=18. Not straightforwardly handled by simple tiling.
+                logger.error(
+                    f"GAN build: Cannot automatically reconcile generator output seq_len ({base_features_from_generator.shape[1]}) "
+                    f"with discriminator seq_len ({self.seq_len}). This requires specific handling (e.g., padding, truncation, or model redesign)."
+                )
+                # Raising an error might be appropriate here, or allowing it to proceed if the TI layer can handle it (unlikely if configured with different seq_len)
+                raise ValueError("Generator output sequence length incompatible with discriminator sequence length after reshape/slice.")
+
+        # Now, base_features_from_generator should be (None, self.seq_len, self.num_base_features)
         # e.g., (None, 18, 21)
 
-        # REMOVE the old Reshape layer:
-        # target_shape_for_discriminator = (self.discriminator_target_seq_len, self.discriminator_target_n_features) # This was (1, 21)
-        # generated_data_reshaped = tf.keras.layers.Reshape(target_shape_for_discriminator)(generated_data_for_disc) # REMOVE
-
-        # Add Technical Indicators using the custom layer
-        # self.num_features_for_discriminator includes base features + TIs (e.g., 41)
-        # self.seq_len is the sequence length for discriminator input (e.g., 18)
         ti_calculator_layer = TensorFlowTALayer(
             base_feature_names=self.base_feature_names,
             ti_names_to_calculate=self.ti_names_to_calculate,
@@ -1067,7 +1083,7 @@ class GANTrainerPlugin:
                     parts = ti_name.split('_')
                     if len(parts) == 2:
                         try: willr_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse WILLR param from {ti_name}")
+                        except ValueError: logger.warning(f"Could not parse WILLR param from {ti_full_name}")
             for length in willr_configs:
                 call_key = ('willr', str((length,)))
                 if call_key not in processed_indicator_calls:
@@ -1086,7 +1102,7 @@ class GANTrainerPlugin:
                     parts = ti_name.split('_')
                     if len(parts) == 2:
                         try: mom_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse MOM param from {ti_name}")
+                        except ValueError: logger.warning(f"Could not parse MOM param from {ti_full_name}")
             for length in mom_configs:
                 call_key = ('mom', str((length,)))
                 if call_key not in processed_indicator_calls:
@@ -1103,7 +1119,7 @@ class GANTrainerPlugin:
                     parts = ti_name.split('_')
                     if len(parts) == 2: # ROC_L
                         try: roc_configs.add(int(parts[1]))
-                        except ValueError: logger.warning(f"Could not parse ROC param from {ti_name}")
+                        except ValueError: logger.warning(f"Could not parse ROC param from {ti_full_name}")
             for length in roc_configs:
                 call_key = ('roc', str((length,)))
                 if call_key not in processed_indicator_calls:
@@ -1195,7 +1211,7 @@ class GANTrainerPlugin:
         if self.discriminator:
             # Change .h5 to .keras
             d_path = os.path.join(self.gan_model_dir, f"discriminator_epoch_{epoch}.keras")
-            self.discriminator.save(d_path)
+                       self.discriminator.save(d_path)
             logger.info(f"Saved discriminator model to {d_path}")
         # Also, if you save the combined GAN model, update its extension too.
         # Example if you were to save self.gan:
