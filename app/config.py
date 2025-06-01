@@ -104,7 +104,8 @@ DEFAULT_VALUES = {
         "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
         "stoch_k": 14, "stoch_d": 3, "stoch_smooth_k": 3,
         "adx_length": 14, "atr_length": 14, "cci_length": 14, 
-        "willr_length": 14, "mom_length": 14, "roc_length": 14
+        "willr_length": 14, "mom_length": 14, "roc_length": 14,
+        "bb_length": 20, "bb_std": 2.0 # Added for Bollinger Bands
     },
     "generator_normalization_params_file": "examples/data/phase_3/phase_3_debug_out.json",
     "generator_decoder_input_name_latent": "decoder_input_z_seq",       
@@ -112,6 +113,41 @@ DEFAULT_VALUES = {
     "generator_decoder_input_name_conditions": "decoder_input_conditions", 
     "generator_decoder_input_name_context": "decoder_input_h_context",   
     "context_vector_dim": 64, # This is the main config value, Feeder should align
+
+    # --- Feature names for GAN Trainer (Generator output and Discriminator input) ---
+    "base_feature_names_ordered": [ # Features produced by the VAE decoder (GAN's generator)
+        "OPEN", "LOW", "HIGH",
+        "BC-BO", "BH-BL",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
+    ],
+    # feature_names_for_discriminator_ordered = base_feature_names_ordered + TIs calculated on the fly
+    # The GANTrainerPlugin will construct the full list of TIs based on ti_names_to_calculate,
+    # which is derived from this list by excluding base_feature_names_ordered.
+    # Ensure this list contains the base names first, then the *exact* TI names pandas_ta will generate.
+    "feature_names_for_discriminator_ordered": [
+        # Base features (must match base_feature_names_ordered exactly and be first)
+        "OPEN", "LOW", "HIGH",
+        "BC-BO", "BH-BL",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # Technical Indicators (ensure these names match pandas_ta output for the given params)
+        "RSI_14",
+        "EMA_14",
+        "MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9",
+        "STOCHk_14_3_3", "STOCHd_14_3_3",
+        "ADX_14", "DMP_14", "DMN_14", # ADX typically includes DMP and DMN
+        "ATRr_14", # pandas-ta uses ATRr for true range variant often
+        "CCI_14_0.015", # CCI_length_constant
+        "WILLR_14",
+        "MOM_14",
+        "ROC_14",
+        "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0", "BBB_20_2.0", "BBP_20_2.0" # Bollinger Bands
+    ],
 
     # --- Parameters for EvaluatorPlugin ---
     "evaluator_metrics": ["mmd", "acf", "wasserstein", "kstest", "discriminative_score", "predictive_score", "visual"],
