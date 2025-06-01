@@ -852,22 +852,22 @@ class GANTrainerPlugin:
 
         # Print model summaries
         if hasattr(self, 'generator') and self.generator:
-            logger.info("Generator Summary:")
-            self.generator.summary(print_fn=logger.info)
+            self.logger.info("Generator Summary:")
+            self.generator.summary(print_fn=self.logger.info)
         else:
-            logger.warning("Generator model not available for summary.")
+            self.logger.warning("Generator model not available for summary.")
 
         if hasattr(self, 'discriminator') and self.discriminator:
-            logger.info("Discriminator Summary:")
-            self.discriminator.summary(print_fn=logger.info)
+            self.logger.info("Discriminator Summary:")
+            self.discriminator.summary(print_fn=self.logger.info)
         else:
-            logger.warning("Discriminator model not available for summary.")
+            self.logger.warning("Discriminator model not available for summary.")
 
-        logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs with batch size {self.params['gan_batch_size']}...")
-        logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
-        logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
-        logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
-        logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
+        self.logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs with batch size {self.params['gan_batch_size']}...")
+        self.logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
+        self.logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
+        self.logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
+        self.logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
 
 
         for epoch in range(self.params["gan_epochs"]):
