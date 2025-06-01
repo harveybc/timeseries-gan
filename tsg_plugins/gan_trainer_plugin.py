@@ -14,7 +14,7 @@ import time
 import json # Added for saving metrics
 import matplotlib.pyplot as plt # Added for plotting
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple, Union # MODIFIED
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 # Assuming your generator plugin (like VAEGeneratorPlugin) and a new discriminator model definition exist
 # from .generator_plugin import VAEGeneratorPlugin # Or your specific generator plugin
@@ -453,6 +453,7 @@ class GANTrainerPlugin:
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
+        self.ti_names_for_discriminator = []
         self.config = deepcopy(config)
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
@@ -635,23 +636,41 @@ class GANTrainerPlugin:
         
         self.logger.info(f"Final 'base_feature_names_ordered': {self.base_feature_names_ordered} (Count: {self.num_base_features})")
 
-        self.tas_strategy_for_discriminator_tis = self.params.get("tas_strategy_for_discriminator_tis", [])
+        self.tas_strategy_for_discriminator_tis = self.params.get('tas_strategy_for_discriminator_tis', [])
+        if isinstance(self.tas_strategy_for_discriminator_tis, str):
+            try:
+                self.tas_strategy_for_discriminator_tis = json.loads(self.tas_strategy_for_discriminator_tis)
+            except json.JSONDecodeError:
+                self.logger.error(f"Failed to parse 'tas_strategy_for_discriminator_tis' string as JSON: {self.tas_strategy_for_discriminator_tis}. Using empty list.")
+                self.tas_strategy_for_discriminator_tis = []
         self.logger.info(f"Technical analysis strategy for discriminator TIs: {self.tas_strategy_for_discriminator_tis}")
-
-        # ADDED: Initialize ti_names_for_discriminator
-        self.ti_names_for_discriminator: List[str] = []
-        if self.tas_strategy_for_discriminator_tis:
+        
+        # Initialize discriminator_feature_names with base features. TIs will be added later.
+        self.discriminator_feature_names = list(self.base_feature_names_ordered)
+        
+        # num_features_for_discriminator: This will be finalized after a test TI calculation if not explicitly set.
+        # For now, we use the configured value or estimate it.
+        configured_num_features_disc = self.params.get('num_features_for_discriminator')
+        if configured_num_features_disc:
+            self.num_features_for_discriminator = configured_num_features_disc
+            self.logger.info(f"Using configured 'num_features_for_discriminator': {self.num_features_for_discriminator}. "
+                             "Ensure TI strategy and base features combine to this number.")
+        else:
+            # Estimate based on base features + TIs from strategy (rough estimate for now)
+            estimated_ti_features = 0
             for ti_spec in self.tas_strategy_for_discriminator_tis:
-                if isinstance(ti_spec, dict) and 'name' in ti_spec:
-                    self.ti_names_for_discriminator.append(ti_spec['name'])
-                elif isinstance(ti_spec, str):
-                    # Extracts base name, e.g., 'SMA' from 'SMA_10' or 'RSI' from 'RSI'
-                    parsed_name = ti_spec.split('_')[0]
-                    self.ti_names_for_discriminator.append(parsed_name)
-                else:
-                    self.logger.warning(f"Unparseable TI specification in tas_strategy_for_discriminator_tis: {ti_spec}")
-        self.logger.info(f"Initialized ti_names_for_discriminator: {self.ti_names_for_discriminator}")
-        # END ADDED
+                if isinstance(ti_spec, dict) and 'kind' in ti_spec:
+                    ti_name_base = ti_spec['kind'].lower()
+                    if ti_name_base == "macd": estimated_ti_features += 3
+                    elif ti_name_base in ["rsi", "ema", "sma", "roc", "mom", "stochrsi_k", "stochrsi_d"]: estimated_ti_features += 1 
+                    elif ti_name_base in ["stoch_k", "stoch_d"]: estimated_ti_features += 1 # typically separate
+                    elif ti_name_base == "adx": estimated_ti_features += 3 # ADX, DMP, DMN
+                    elif ti_name_base == "bbands": estimated_ti_features += 3 # Lower, Mid, Upper
+                    else: estimated_ti_features += 1 # Default assumption for unknown TIs
+            
+            self.num_features_for_discriminator = self.num_base_features + estimated_ti_features
+            self.logger.info(f"Estimated 'num_features_for_discriminator' based on {self.num_base_features} base features and TI strategy: {self.num_features_for_discriminator} (this may be refined after first TI calculation).")
+
 
         # --- Generator Input Parameters (used by GAN construction for its inputs) ---
         # These define the shapes of the inputs that the GAN model will pass to the generator internally.
@@ -991,7 +1010,7 @@ class GANTrainerPlugin:
             processed_gen_output_for_discriminator = layers.Reshape((1, current_gen_output_features))(generated_output_tensor)
         else:
             self.logger.error(f"GAN Build: Generator output has unexpected shape {generated_output_tensor.shape}. Expected 2D or 3D.")
-            raise ValueError("Generator output has unexpected shape {generated_output_tensor.shape}")
+            raise ValueError(f"Generator output has unexpected shape {generated_output_tensor.shape}")
 
         # --- Feature Slicing (if generator produces more features than discriminator base expects) ---
         # This is important if the generator produces, say, 6 features, but the discriminator's base features are only the first 4 (e.g., OHLC).
@@ -1072,7 +1091,7 @@ class GANTrainerPlugin:
             ta_layer = TensorFlowTALayer(
                 base_feature_names=self.base_feature_names_ordered, # Should match the first N features of generator output
                 ti_names_to_calculate=self.ti_names_for_discriminator,
-                               num_base_features=self.num_base_features, # Number of features input to TA layer
+                num_base_features=self.num_base_features, # Number of features input to TA layer
                 num_total_features=self.num_features_for_discriminator, # Expected output features (base + TIs)
                 seq_len=self.seq_len # Sequence length
             )
@@ -1412,7 +1431,7 @@ class GANTrainerPlugin:
                         raise ValueError("Feeder output for GAN training is not a dictionary.")
 
                     # Prepare the list of input arrays for generator.predict() in the correct order.
-                    # self.generator_actual_input_names_ordered contains the Keras names of the generator's inputs.
+                    # self.generator_actual_input_names_ordered contains the Keras names.
                     # We need to find which feeder key corresponds to which Keras input name.
                     # The hints (e.g., self.gan_latent_input_keras_name_hint) store the Keras name for a given role (latent, conditional).
                     # The feeder keys (e.g., self.feeder_key_name_latent) are used to get data from feeder_output_dict.
@@ -1422,7 +1441,7 @@ class GANTrainerPlugin:
                          self.logger.info("Generator has no explicit Keras inputs. Calling generator.predict([])")
                          # generator_inputs_for_predict remains empty list
                     elif not self.generator_actual_input_names_ordered:
-                        self.logger.error("Generator has Keras inputs, but 'generator_actual_input_names_ordered' is empty. Cannot prepare generator inputs.")
+                        self.logger.error("Generator has Keras inputs, but self.generator_actual_input_names_ordered is empty. Cannot prepare generator inputs.")
                         raise ValueError("generator_actual_input_names_ordered is empty.")
                     else:
                         # Map feeder output to ordered generator inputs
@@ -1489,7 +1508,7 @@ class GANTrainerPlugin:
                     # 2. Feature Slicing (to self.num_base_features)
                     # This is done *before* external TI calculation or TensorFlowTALayer.
                     if current_fake_features > self.num_base_features:
-                        self.logger.debug(f"Slicing generated features from {current_fake_features} to {self.num_base_features}.")
+                        self.logger.debug(f"Slicing generated features from {current_fake_features} to {self.num_base_features} (first {self.num_base_features} features).")
                         processed_fake_data = processed_fake_data[:, :, :self.num_base_features]
                         current_fake_features = self.num_base_features
                     elif current_fake_features < self.num_base_features:
@@ -1560,6 +1579,82 @@ class GANTrainerPlugin:
                              raise ValueError("Feature count mismatch for fake data (TIs by layer/none).")
                         fake_batch_for_d = processed_fake_data
                         self.logger.debug(f"Fake batch for D (base features, TIs by layer or none) shape: {fake_batch_for_d.shape}")
+
+                    # Labels for fake data: all 0s
+                    fake_labels = np.zeros((batch_size, 1))
+                    d_loss_fake = self.discriminator.train_on_batch(fake_batch_for_d, fake_labels)
+                    self.logger.debug(f"Discriminator loss on fake batch: {d_loss_fake}")
+
+                except Exception as e_fake_gen:
+                    self.logger.error(f"Error during fake data generation or processing for discriminator: {e_fake_gen}", exc_info=True)
+                    d_loss_fake = [np.nan, np.nan] # Indicate failure
+
+            # Total discriminator loss
+            d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+            self.logger.debug(f"Total discriminator loss for epoch {epoch+1}: {d_loss}")
+
+            # -----------------
+            #  Train Generator (via GAN model)
+            # -----------------
+            self.discriminator.trainable = False # Freeze D when training G (via GAN model)
+
+            # Generate inputs for the GAN model (which are the inputs for the generator part of GAN)
+            # This is the same set of inputs we prepared for generator.predict() earlier.
+            # However, gan_model.train_on_batch expects a list of numpy arrays if GAN has multiple inputs.
+            # Or a single numpy array if GAN has a single input.
+            # The `generator_inputs_for_predict` list is already in the correct format.
+            
+            # We need to re-generate feeder_output_dict and generator_inputs_for_predict
+            # because the previous ones were consumed by D training.
+            # Or, if they are deterministic for a given batch_size, we could reuse, but safer to regen.
+            g_loss = [np.nan, np.nan] # Default if feeder fails
+            if self.feeder_plugin:
+                try:
+                    feeder_output_dict_for_gan = self.feeder_plugin.get_batch(batch_size)
+                    if not isinstance(feeder_output_dict_for_gan, dict):
+                        raise ValueError("Feeder output for GAN training is not a dictionary.")
+
+                    gan_model_inputs_ordered = []
+                    if not self.gan_model.inputs: # GAN model itself has no inputs (should not happen if G has inputs)
+                        self.logger.error("GAN model has no Keras inputs defined. Cannot train generator.")
+                        # This implies self.gan_keras_inputs_for_model_definition was empty in _build_gan
+                    elif not self.generator_actual_input_names_ordered and self.generator.inputs: # G has inputs, but mapping list is empty
+                        self.logger.error("Generator has inputs, but 'generator_actual_input_names_ordered' is empty. Cannot prepare GAN inputs for G training.")
+                        raise ValueError("generator_actual_input_names_ordered is empty for G training via GAN.")
+                    else:
+                        # The inputs to gan_model are those defined in _build_gan based on generator's inputs.
+                        # Their names are like "gan_input_for_gen_latent_z", etc.
+                        # We need to map feeder data to these GAN model inputs.
+                        # The order of self.gan_model.inputs should match the order of self.generator_actual_input_names_ordered
+                        # because that's how _build_gan created them.
+
+                        for i, gan_model_input_layer in enumerate(self.gan_model.inputs):
+                            # The corresponding original generator Keras input name:
+                            original_gen_keras_input_name = self.generator_actual_input_names_ordered[i]
+                            found_input_for_gan_model = False
+                            
+                            if original_gen_keras_input_name == self.gan_latent_input_keras_name_hint and self.feeder_key_name_latent in feeder_output_dict_for_gan:
+                                gan_model_inputs_ordered.append(feeder_output_dict_for_gan[self.feeder_key_name_latent])
+                                found_input_for_gan_model = True
+                            elif original_gen_keras_input_name == self.gan_conditional_input_keras_name_hint and self.feeder_key_name_conditional in feeder_output_dict_for_gan:
+                                gan_model_inputs_ordered.append(feeder_output_dict_for_gan[self.feeder_key_name_conditional])
+                                found_input_for_gan_model = True
+                            elif original_gen_keras_input_name == self.gan_context_input_keras_name_hint and self.feeder_key_name_context in feeder_output_dict_for_gan:
+                                gan_model_inputs_ordered.append(feeder_output_dict_for_gan[self.feeder_key_name_context])
+                                found_input_for_gan_model = True
+                            # TODO: Add self.gan_feeder_input_keras_name_hints logic here too
+
+                            if not found_input_for_gan_model:
+                                # Fallback: if a generator input Keras name directly matches a feeder output key
+                                if original_gen_keras_input_name in feeder_output_dict_for_gan: # Direct match fallback
+                                    gan_model_inputs_ordered.append(feeder_output_dict_for_gan[original_gen_keras_input_name])
+                                    found_input_for_gan_model = True
+                                else:
+                                    self.logger.error(f"Could not find data in Feeder output for GAN model input corresponding to generator input '{original_gen_keras_input_name}'. Feeder keys: {list(feeder_output_dict_for_gan.keys())}")
+                                    raise ValueError(f"Missing data for GAN model input related to '{original_gen_keras_input_name}'.")
+                        
+                        self.logger.debug(f"Prepared {len(gan_model_inputs_ordered)} inputs for gan_model.train_on_batch().")
+
 
                     # Labels for generator training: we want discriminator to output 1 (real) for fake images
                     valid_labels_for_g = np.ones((batch_size, 1))
