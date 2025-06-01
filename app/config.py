@@ -201,5 +201,6 @@ DEFAULT_VALUES = {
     "gan_model_dir": "models/gan_trained", # Directory to save trained GAN models
     "discriminator_lstm_units": 64, # LSTM units in the discriminator
     "discriminator_dense_units": 128, # Dense units in the discriminator
-    "gan_loss_plot_file": "models/gan_trained/gan_loss_plot.png" # Default path for saving loss plot
+    "gan_loss_plot_file": "models/gan_trained/gan_loss_plot.png", # Default path for saving loss plot
+    "evaluation_stage": "baseline", # "baseline" or "gan_improved" - for non-GAN training mode evaluations
 }

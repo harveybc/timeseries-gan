@@ -18,6 +18,7 @@ import numpy as np # Ensure numpy is imported
 import traceback # ADD THIS IMPORT
 from datetime import datetime, timedelta # ADD THIS IMPORT
 import tensorflow as tf # Ensure tensorflow is imported, typically as tf, if you're calling tf.keras.models.load_model
+from typing import Optional, List, Dict, Any, Union # ADDING Optional, List, Dict, Any FOR TYPE HINTING
 
 # --- MONKEY PATCH for numpy.NaN ---
 # Applied because pandas_ta 0.3.14b0 (or a dependency) seems to use
@@ -550,16 +551,21 @@ def main():
     # and includes the datetime column as the first element.
     
     TARGET_CSV_COLUMNS = []
-    if generator_plugin and generator_plugin.params.get("full_feature_names_ordered"):
+    # In GAN training mode, the GANTrainerPlugin uses feature_names_for_discriminator_ordered.
+    # In VAE generation mode, the GeneratorPlugin uses full_feature_names_ordered.
+    # For evaluation, we should use the most comprehensive list that reflects the data being evaluated.
+    if is_gan_training_mode and trainer_plugin and trainer_plugin.params.get("feature_names_for_discriminator_ordered"):
+        TARGET_CSV_COLUMNS = trainer_plugin.params.get("feature_names_for_discriminator_ordered")
+        # Ensure datetime_col_name is present, add if not (though TIs usually don't include it)
+        if current_config.get("datetime_col_name") not in TARGET_CSV_COLUMNS:
+            TARGET_CSV_COLUMNS = [current_config.get("datetime_col_name")] + TARGET_CSV_COLUMNS
+        print(f"DEBUG main.py: Dynamically set TARGET_CSV_COLUMNS from trainer_plugin.params['feature_names_for_discriminator_ordered'] (Count: {len(TARGET_CSV_COLUMNS)}) for GAN mode context.")
+    elif not is_gan_training_mode and generator_plugin and generator_plugin.params.get("full_feature_names_ordered"):
         TARGET_CSV_COLUMNS = generator_plugin.params.get("full_feature_names_ordered")
-        # Ensure datetime_col_name is first if it's not already, or handle as per your data structure.
-        # For now, assume full_feature_names_ordered is already correctly ordered for output.
-        print(f"DEBUG main.py: Dynamically set TARGET_CSV_COLUMNS from generator_plugin.params['full_feature_names_ordered'] (Count: {len(TARGET_CSV_COLUMNS)})")
+        print(f"DEBUG main.py: Dynamically set TARGET_CSV_COLUMNS from generator_plugin.params['full_feature_names_ordered'] (Count: {len(TARGET_CSV_COLUMNS)}) for VAE mode context.")
     else:
-        print("ERROR main.py: Could not dynamically set TARGET_CSV_COLUMNS. generator_plugin or 'full_feature_names_ordered' not available. Falling back to an empty list or a hardcoded default if necessary.")
-        # Fallback to a minimal default or raise error if this is critical
+        print("ERROR main.py: Could not dynamically set TARGET_CSV_COLUMNS. Relevant plugin or feature list not available. Falling back to an empty list or a hardcoded default if necessary.")
         TARGET_CSV_COLUMNS = [current_config.get("datetime_col_name", "DATE_TIME")] # Minimal fallback
-
 
     # --- DECISIÓN DE EJECUCIÓN ---
     # -------------------------------------------------------------------------
@@ -602,8 +608,63 @@ def main():
     # If not in GAN training or hyperparameter optimization mode, proceed to VAE-based generation/prepending.
     print("▶ Starting data generation and prepending process (VAE-based)...")
 
+    # Determine evaluation stage for non-GAN training mode
+    evaluation_stage = current_config.get("evaluation_stage", "baseline") # "baseline" or "gan_improved"
+    print(f"INFO main.py: Evaluation stage set to: {evaluation_stage}")
+
+    # Modify output file paths based on evaluation stage for non-GAN training mode
+    original_output_file = current_config.get("output_file")
+    original_metrics_file = current_config.get("metrics_file")
+
+    if not is_gan_training_mode: # Only modify paths if not in GAN training
+        if evaluation_stage == "baseline":
+            current_config["output_file"] = original_output_file.replace(".csv", "_baseline.csv") if original_output_file else "synthetic_data_baseline.csv"
+            current_config["metrics_file"] = original_metrics_file.replace(".json", "_baseline.json") if original_metrics_file else "metrics_baseline.json"
+            # Ensure the generator model is the original VAE decoder for baseline
+            # This should be the default "generator_sequential_model_file" from config.
+            print(f"INFO main.py: Baseline evaluation. Output: {current_config['output_file']}, Metrics: {current_config['metrics_file']}")
+            print(f"INFO main.py: Using generator model for baseline: {current_config.get('generator_sequential_model_file')}")
+
+        elif evaluation_stage == "gan_improved":
+            current_config["output_file"] = original_output_file.replace(".csv", "_gan_improved.csv") if original_output_file else "synthetic_data_gan_improved.csv"
+            current_config["metrics_file"] = original_metrics_file.replace(".json", "_gan_improved.json") if original_metrics_file else "metrics_gan_improved.json"
+            # For GAN-improved, ensure "generator_sequential_model_file" points to the GAN-trained generator.
+            # This might need to be set via CLI or by assuming a default path from GANTrainerPlugin's output.
+            # For now, we assume it's correctly set in the config if this stage is chosen.
+            # The GANTrainerPlugin saves its generator as 'generator_model_final.keras' in its gan_model_dir.
+            # We could construct this path:
+            gan_trained_generator_path = os.path.join(
+                current_config.get("gan_model_dir", "models/gan_trained"),
+                "generator_model_final.keras" # This is how GANTrainerPlugin saves it
+            )
+            if os.path.exists(gan_trained_generator_path):
+                current_config["generator_sequential_model_file"] = gan_trained_generator_path
+                print(f"INFO main.py: GAN-improved evaluation. Output: {current_config['output_file']}, Metrics: {current_config['metrics_file']}")
+                print(f"INFO main.py: Using GAN-trained generator model for evaluation: {current_config['generator_sequential_model_file']}")
+                # Reload the generator plugin with the new model path if it has changed
+                if generator_plugin and generator_plugin.params.get("generator_sequential_model_file") != gan_trained_generator_path:
+                    print(f"INFO main.py: Reloading GeneratorPlugin with GAN-trained model: {gan_trained_generator_path}")
+                    try:
+                        generator_class, _ = load_plugin('generator.plugins', current_config.get('generator', 'default_generator'))
+                        generator_plugin = generator_class(current_config) # Re-initialize with updated config
+                        generator_plugin.set_params(**current_config) # Ensure params are set
+                        if not generator_plugin.model:
+                             print(f"CRITICAL main.py: Failed to reload GAN-trained generator model into GeneratorPlugin.")
+                             sys.exit(1)
+                    except Exception as e_reload:
+                        print(f"CRITICAL main.py: Error reloading GeneratorPlugin for GAN-improved stage: {e_reload}")
+                        sys.exit(1)
+
+            else:
+                print(f"WARNING main.py: GAN-trained generator model not found at default path {gan_trained_generator_path} for 'gan_improved' stage. Using original VAE model: {current_config.get('generator_sequential_model_file')}")
+        
+        # Update plugin instances with potentially changed file paths
+        if generator_plugin: generator_plugin.set_params(**current_config)
+        if evaluator_plugin: evaluator_plugin.set_params(**current_config)
+
+
     try:
-        # --- Verify and Load Generator (VAE Decoder) ---
+        # --- Verify and Load Generator (VAE Decoder or GAN-trained Generator) ---
         # This is implicitly handled by GeneratorPlugin's initialization.
         # We add an explicit check here for clarity and robustness.
         generator_model_path_for_loading = current_config.get("generator_sequential_model_file")
@@ -870,6 +931,8 @@ def main():
         elif output_df_synthetic_aligned.empty:
             df_combined_prepended = df_real_raw_segment_for_output
         elif df_real_raw_segment_for_output.empty:
+            # If only synthetic data is present, ensure its columns match TARGET_CSV_COLUMNS
+            # output_df_synthetic_aligned is already aligned
             df_combined_prepended = output_df_synthetic_aligned
         else:
             # Ensure both dataframes have the DATE_TIME column correctly formatted before concat if necessary
@@ -881,7 +944,17 @@ def main():
                 ignore_index=True
             )
         
-        final_output_path = current_config.get("output_file")
+        # Ensure final combined DataFrame has columns in TARGET_CSV_COLUMNS order
+        # and includes DATE_TIME if it was part of TARGET_CSV_COLUMNS
+        final_df_columns = [col for col in TARGET_CSV_COLUMNS if col in df_combined_prepended.columns]
+        missing_cols = [col for col in TARGET_CSV_COLUMNS if col not in df_combined_prepended.columns]
+        if missing_cols:
+            print(f"WARN main.py: Final combined DataFrame is missing expected columns: {missing_cols}. They will not be in the output CSV.")
+        
+        df_combined_prepended = df_combined_prepended[final_df_columns]
+
+
+        final_output_path = current_config.get("output_file") # This path is now stage-dependent
         os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
         df_combined_prepended.to_csv(final_output_path, index=False, na_rep='NaN')
         print(f"✔︎ Combined data (synthetic prepended to real) saved to {final_output_path} (Shape: {df_combined_prepended.shape})")
@@ -893,31 +966,54 @@ def main():
 
     # --- ADD EVALUATION STEP HERE ---
     if evaluator_plugin and not output_df_synthetic_aligned.empty:
-        print("INFO main.py: Evaluating generated synthetic data...")
+        print(f"INFO main.py: Evaluating generated synthetic data for stage: {evaluation_stage}...")
         try:
-            # Assuming TARGET_CSV_COLUMNS contains the correct feature names for output_df_synthetic_aligned
-            # The evaluator might need real data for comparison.
-            # df_real_raw_segment_for_output contains a segment of real data.
-            # You might need to pass a more comprehensive real dataset if your evaluator expects it
-            # or configure the evaluator to load its own reference real data.
+            # The synthetic data for evaluation is `output_df_synthetic_aligned`
+            # It should have features corresponding to `generator_full_feature_names_ordered` (for VAE)
+            # or `feature_names_for_discriminator_ordered` (if GAN output was directly evaluated, though less common here)
+            
+            # For evaluation, we typically compare against a real dataset.
+            # The `x_train_file` is a good candidate for the full real dataset.
+            real_data_for_eval_path = current_config.get("x_train_file")
+            df_real_for_eval = pd.read_csv(real_data_for_eval_path)
+            
+            # The features in synthetic_data should match what the evaluator expects.
+            # If TIs were calculated on the fly by GANTrainer, the synthetic data might not have them
+            # if it came directly from the VAE generator.
+            # For simplicity, let's assume `output_df_synthetic_aligned` has the columns defined by
+            # `generator_plugin.params.get("full_feature_names_ordered")` when in VAE mode.
+            
+            eval_feature_names = [
+                col for col in generator_plugin.params.get("full_feature_names_ordered", [])
+                if col != datetime_col_name
+            ]
+            if not eval_feature_names: # Fallback if the above is empty
+                 eval_feature_names = [col for col in TARGET_CSV_COLUMNS if col != datetime_col_name]
 
-            # Convert synthetic data to NumPy if evaluator expects it
-            synthetic_data_np_for_eval = output_df_synthetic_aligned[TARGET_CSV_COLUMNS].drop(columns=[datetime_col_name], errors='ignore').values.astype(np.float32)
-            feature_names_for_eval = [col for col in TARGET_CSV_COLUMNS if col != datetime_col_name]
+
+            synthetic_data_for_eval_df = output_df_synthetic_aligned[eval_feature_names].copy()
+            
+            # Ensure real data for eval has the same features
+            real_data_for_eval_df = df_real_for_eval[eval_feature_names].copy()
+
+            # Convert to NumPy arrays
+            synthetic_data_np_for_eval = synthetic_data_for_eval_df.fillna(0).values.astype(np.float32) # fillna(0) as a basic strategy
+            real_data_np_for_eval = real_data_for_eval_df.fillna(0).values.astype(np.float32)
 
 
-            # Example call, adjust based on your EvaluatorPlugin's `evaluate` signature
-            # It might need real data, specific feature names, etc.
+            print(f"DEBUG main.py: Shapes for evaluation - Synthetic: {synthetic_data_np_for_eval.shape}, Real: {real_data_np_for_eval.shape}")
+            print(f"DEBUG main.py: Feature names for evaluation: {eval_feature_names[:5]}...")
+
+
             evaluation_metrics = evaluator_plugin.evaluate(
                 synthetic_data=synthetic_data_np_for_eval,
-                # real_data_processed=real_data_np_for_eval, # You'd need to prepare/load appropriate real data
-                feature_names=feature_names_for_eval,
-                config=current_config # Pass the current config
+                real_data_processed=real_data_np_for_eval, 
+                feature_names=eval_feature_names,
+                config=current_config 
             )
-            print(f"INFO main.py: Evaluation metrics: {evaluation_metrics}")
+            print(f"INFO main.py: Evaluation metrics for stage \'{evaluation_stage}\': {evaluation_metrics}")
             
-            # Save evaluation metrics
-            metrics_output_file = current_config.get("metrics_file", "evaluation_metrics.json")
+            metrics_output_file = current_config.get("metrics_file") # This path is now stage-dependent
             os.makedirs(os.path.dirname(metrics_output_file), exist_ok=True)
             with open(metrics_output_file, 'w') as f:
                 json.dump(evaluation_metrics, f, indent=4)
