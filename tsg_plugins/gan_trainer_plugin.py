@@ -307,82 +307,125 @@ class GANTrainerPlugin:
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
-        self.logger = logger  # Assign module-level logger to instance
-        self.config = deepcopy(config) # Store initial config for reference
+        self.logger = logger # Ensure logger is accessible, e.g., global or from a utility
+        self.config = config
+        self.params = self.plugin_params.copy()
+        self.params.update(self.config) # Initial population of self.params
 
-        # 1. Initialize plugin instances
         self.generator_plugin_instance = generator_plugin_instance
         self.feeder_plugin_instance = feeder_plugin_instance
         self.preprocessor_plugin_instance = preprocessor_plugin_instance
 
-        if not self.generator_plugin_instance:
-            raise ValueError("Generator plugin instance is required for GANTrainerPlugin.")
-        if not self.feeder_plugin_instance:
-            raise ValueError("Feeder plugin instance is required for GANTrainerPlugin.")
-            
-        # 2. Initialize the generator model (and freeze it) - BEFORE set_params
-        self.generator: Optional[Model] = self.generator_plugin_instance.get_model()
-        if self.generator is None:
-            raise ValueError("Could not retrieve model from generator_plugin_instance.")
-        self.generator.trainable = False # Freeze the generator
-        logger.info("Generator model obtained and frozen.")
+        # Initialize self.generator and related attributes
+        if self.generator_plugin_instance and hasattr(self.generator_plugin_instance, 'sequential_model'):
+            self.generator: Optional[Model] = self.generator_plugin_instance.sequential_model
+            if self.generator:
+                self.generator_actual_input_names_ordered = [inp.name.split(':')[0] for inp in self.generator.inputs]
+                if self.generator.output_shape and len(self.generator.output_shape) > 1 and isinstance(self.generator.output_shape[-1], int):
+                    self.actual_generator_output_dim = self.generator.output_shape[-1]
+                else:
+                    self.logger.warning(f"Could not reliably determine actual_generator_output_dim from generator output shape: {self.generator.output_shape}. Defaulting to 0.")
+                    self.actual_generator_output_dim = 0
+                
+                configured_num_base_features = len(self.params.get("base_feature_names_ordered", []))
+                if self.actual_generator_output_dim != 0 and configured_num_base_features > 0 and self.actual_generator_output_dim != configured_num_base_features:
+                    self.logger.warning(
+                        f"GANTrainerPlugin (__init__): MISMATCH! Actual generator output feature dimension ({self.actual_generator_output_dim}) "
+                        f"differs from configured num_base_features ({configured_num_base_features}). "
+                        "_build_gan will attempt to slice."
+                    )
+            else:
+                self.logger.error("Generator model (sequential_model) is None in generator_plugin_instance.")
+                self.generator = None
+                self.generator_actual_input_names_ordered = []
+                self.actual_generator_output_dim = 0
+        else:
+            self.logger.error("GeneratorPlugin instance not provided or does not have 'sequential_model'.")
+            self.generator = None
+            self.generator_actual_input_names_ordered = []
+            self.actual_generator_output_dim = 0
 
-        # 3. Initialize self.params with defaults, then update with config using set_params
-        self.params = self.plugin_params.copy() 
-        self.set_params(**self.config) # This call populates self.params and other attributes like actual_generator_output_dim
+        # Initialize core parameters from config needed for model building
+        self._initialize_core_parameters_from_config()
 
-        # 4. Assign key parameters from self.params to self for convenience after set_params
-        self.seq_len = self.params["seq_len"] 
-        # self.latent_dim = self.params["latent_dim"] # self.gen_input_latent_dim is set in set_params and used
+        # Initialize dimensions for GAN model inputs (latent is from core_params, conditional/context here)
+        self.conditional_dim_for_generator = 0
+        if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'get_conditional_feature_dim'):
+            self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_feature_dim()
+            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from feeder: {self.conditional_dim_for_generator}")
+        elif self.params: # Fallback to params if feeder doesn't provide it directly
+            date_cond_feats = self.params.get('feeder_date_features_for_conditioning', [])
+            fund_cond_feats = self.params.get('feeder_fundamental_features_for_conditioning', [])
+            # This logic assumes simple concatenation. Adjust if FeederPlugin structures conditions differently.
+            self.conditional_dim_for_generator = len(date_cond_feats) + len(fund_cond_feats) 
+            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from params: {self.conditional_dim_for_generator} (date_feats: {len(date_cond_feats)}, fund_feats: {len(fund_cond_feats)})")
+        else:
+            self.logger.warning("GANTrainerPlugin (__init__): Could not determine conditional_dim_for_generator.")
 
-        # 5. Feature configuration (now uses self.params which is finalized by set_params)
-        self.base_feature_names = self.params.get("base_feature_names_ordered", [])
-        self.discriminator_feature_names = self.params.get("feature_names_for_discriminator_ordered", [])
 
-        if not self.base_feature_names:
-            raise ValueError("Config 'base_feature_names_ordered' is required (via params).")
-        if not self.discriminator_feature_names:
-            raise ValueError("Config 'feature_names_for_discriminator_ordered' is required (via params).")
-
-        self.num_base_features = len(self.base_feature_names)
-        self.num_features_for_discriminator = len(self.discriminator_feature_names)
+        self.context_dim_for_generator = self.params.get('context_vector_dim', 64) # from config
+        self.logger.info(f"GANTrainerPlugin (__init__): context_dim_for_generator set to {self.context_dim_for_generator}")
         
-        # Generator output verification (actual_generator_output_dim is set in set_params)
-        # Note: self.actual_generator_output_dim is set in set_params
-        if hasattr(self, 'actual_generator_output_dim') and self.actual_generator_output_dim != self.num_base_features:
-            logger.warning(
-                f"Generator's actual output dimension ({getattr(self, 'actual_generator_output_dim', 'N/A')}) "
-                f"differs from num_base_features ({self.num_base_features}) derived from "
-                f"'base_feature_names_ordered'. Ensure generator produces {self.num_base_features} base features for TI calculation."
-            )
-        
-        if not all(self.discriminator_feature_names[i] == self.base_feature_names[i] for i in range(self.num_base_features)):
-            raise ValueError("'base_feature_names_ordered' must be the prefix of 'feature_names_for_discriminator_ordered'.")
-        
-        self.ti_names_to_calculate = self.discriminator_feature_names[self.num_base_features:]
-        logger.info(f"Base features to be generated: {self.base_feature_names}")
-        logger.info(f"TIs to be calculated on generated base features: {self.ti_names_to_calculate}")
-        logger.info(f"Total features for discriminator: {self.num_features_for_discriminator} ({self.discriminator_feature_names})")
+        # Initialize optimizers
+        self.g_optimizer = Adam(learning_rate=self.params.get("generator_lr", 1e-4), beta_1=self.params.get("generator_beta1", 0.5))
+        self.d_optimizer = Adam(learning_rate=self.params.get("discriminator_lr", 1e-4), beta_1=self.params.get("discriminator_beta1", 0.5))
+        self.logger.info("Optimizers initialized.")
 
-        # 6. Other necessary attributes
-        self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_dim()
-        self.context_dim_for_generator = self.feeder_plugin_instance.get_context_vector_dim()
-
-        # 7. Initialize optimizers (after self.params has all LR info from set_params)
-        self.g_optimizer = Adam(learning_rate=self.params["generator_lr"], beta_1=self.params["generator_beta1"])
-        self.d_optimizer = Adam(learning_rate=self.params["discriminator_lr"], beta_1=self.params["discriminator_beta1"])
-        
-        # 8. Build models (Discriminator and GAN)
-        # These depend on parameters now correctly set (e.g. self.seq_len, self.num_features_for_discriminator)
-        # and optimizers (self.g_optimizer for GAN compilation)
+        # Build models
         self.discriminator: Optional[Model] = self._build_discriminator()
-        self.gan: Optional[Model] = self._build_gan()
+        if self.discriminator:
+            self.discriminator.compile(loss='binary_crossentropy', optimizer=self.d_optimizer, metrics=['accuracy'])
+            self.logger.info("Discriminator compiled.")
+        else:
+            self.logger.error("Discriminator model building failed in __init__.")
 
-        # 9. For manual callbacks
+        self.gan: Optional[Model] = self._build_gan() # _build_gan also compiles the GAN model with self.g_optimizer
+        if not self.gan:
+             self.logger.error("GAN model building failed in __init__.")
+
+        # For manual callbacks
         self.best_lr_metric = float('inf')
         self.lr_patience_counter = 0
         self.best_es_metric = float('inf')
         self.es_patience_counter = 0
+        self.logger.info("GANTrainerPlugin initialized.")
+
+    def _initialize_core_parameters_from_config(self):
+        """Helper to initialize parameters needed before model building, typically also managed by set_params."""
+        self.gen_input_seq_len = self.params.get("seq_len", 18)
+        self.gen_input_latent_dim = self.params.get("latent_dim", 32) # Used for GAN latent input
+        
+        self.base_feature_names = self.params.get("base_feature_names_ordered", [])
+        self.num_base_features = len(self.base_feature_names)
+        
+        # Derive ti_names_to_calculate from discriminator features and base features
+        all_discriminator_features = self.params.get("feature_names_for_discriminator_ordered", [])
+        if all_discriminator_features and self.base_feature_names:
+            # This assumes base_feature_names are a subset and appear first in all_discriminator_features
+            self.ti_names_to_calculate = [f for f in all_discriminator_features if f not in self.base_feature_names]
+        else:
+            self.ti_names_to_calculate = []
+            self.logger.warning("_initialize_core_parameters_from_config: Could not derive ti_names_to_calculate due to missing feature lists in params.")
+
+
+        self.num_tis = len(self.ti_names_to_calculate)
+        
+        self.num_features_for_discriminator = self.num_base_features + self.num_tis
+        self.seq_len = self.params.get("seq_len", 18) # Used for discriminator input and TI layer
+
+        self.generator_output_actual_seq_len = self.params.get("gan_generator_output_actual_seq_len", self.seq_len)
+
+        self.logger.info(
+            f"GANTrainerPlugin (_initialize_core_parameters): "
+            f"gen_input_seq_len={self.gen_input_seq_len}, gen_input_latent_dim={self.gen_input_latent_dim}, "
+            f"num_base_features={self.num_base_features} (from {len(self.base_feature_names)} names), "
+            f"num_tis={self.num_tis} (from {len(self.ti_names_to_calculate)} names), "
+            f"num_features_for_discriminator={self.num_features_for_discriminator}, "
+            f"seq_len (for D and TI)={self.seq_len}, "
+            f"generator_output_actual_seq_len={self.generator_output_actual_seq_len}"
+        )
+        if self.num_base_features == 0:
+            self.logger.warning("_initialize_core_parameters_from_config: num_base_features is 0. This might be problematic for the TI layer and GAN structure.")
 
     def set_params(self, **params: Any) -> None:
         logger.info(f"GANTrainerPlugin updating parameters: {list(params.keys())}")
