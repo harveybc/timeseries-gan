@@ -39,7 +39,7 @@ DEFAULT_VALUES = {
     # --- Parameters for FeederPlugin ---
     "feeder_sampling_method": "standard_normal", 
     "feeder_encoder_sampling_technique": "direct", 
-    "encoder_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_encoder_model.keras", 
+    "encoder_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras", 
     "feeder_feature_columns_for_encoder": [], 
     "feeder_real_data_file_has_header": True,
     "feeder_datetime_col_in_real_data": "DATE_TIME",
@@ -54,10 +54,10 @@ DEFAULT_VALUES = {
     "feeder_copula_kde_bw_method": None,
 
     # --- Parameters for GeneratorPlugin ---
-    "generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
-    "discriminator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_discriminator_model.keras",
-    "save_generator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_cnn_small_decoder_model.keras",
-    "save_discriminator_sequential_model_file": "examples/results/phase_4_2/phase_4_2_discriminator_model.keras",
+    "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
+    "discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
+    "save_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
+    "save_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
     
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
@@ -82,7 +82,7 @@ DEFAULT_VALUES = {
         "day_of_month", "hour_of_day", "day_of_week" 
     ], 
     "generator_decoder_output_feature_names": [
-        # Based on cvae_target_feature_names from phase_4_2_cnn_small_debug_out.json
+        # Based on cvae_target_feature_names from phase_4_3_cnn_small_debug_out.json
         "OPEN", "LOW", "HIGH", # "vix_close", "S&P500_Close" are removed from this list
         "BC-BO", "BH-BL", 
         # "S&P500_Close", # REMOVED
@@ -180,11 +180,11 @@ DEFAULT_VALUES = {
     "random_seed": 42,
     "num_synthetic_samples_to_generate": 0, 
     "start_datetime": None, 
-    "output_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_12600_prepended_o.csv",
-    #"synthetic_data_output_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_25200_prepended.csv",
-    "metrics_file": "examples/results/phase_4_2/normalized_d4_25200_synthetic_12600_metrics.json",
-    "save_config": "examples/results/phase_4_2/config_out_12600.json",
-    "save_log": "examples/results/phase_4_2/debug_out_12600.json",
+    "output_file": "examples/results/phase_4_3/normalized_d4_35200_synthetic_12600_prepended_o.csv",
+    #"synthetic_data_output_file": "examples/results/phase_4_3/normalized_d4_35200_synthetic_25200_prepended.csv",
+    "metrics_file": "examples/results/phase_4_3/normalized_d4_35200_synthetic_12600_metrics.json",
+    "save_config": "examples/results/phase_4_3/config_out_12600.json",
+    "save_log": "examples/results/phase_4_3/debug_out_12600.json",
     "quiet_mode": False,
     "datetime_col_name": "DATE_TIME",
     "target_column_order": [],
