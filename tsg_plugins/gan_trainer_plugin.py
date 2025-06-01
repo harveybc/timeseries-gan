@@ -1088,108 +1088,276 @@ class GANTrainerPlugin:
 
         self.logger.info("GAN training completed.")
 
-    def _calculate_technical_indicators(self, data_batch: np.ndarray, data_type_for_logging: str = "real") -> np.ndarray:
+    def _calculate_technical_indicators(self, base_features_batch_param: np.ndarray, data_type_for_logging: str = "real") -> np.ndarray:
         """
         Calculate technical indicators for a batch of data using the configured TA strategy.
         Args:
-            data_batch: Input data batch for which to calculate TIs. Shape: (batch_size, seq_len, num_features)
-            data_type_for_logging: String to indicate data type (real/generated) for logging purposes.
+            base_features_batch_param: Input data batch. Shape: (batch_size, seq_len, num_base_features)
+            data_type_for_logging: String to indicate data type (real/generated) for logging.
         Returns:
-            data_with_tis: Output data with calculated technical indicators. Shape: (batch_size, seq_len, num_features + num_tis)
+            Output data with TIs. Shape: (batch_size, seq_len, num_base_features + num_tis)
         """
-        if self.tas_strategy_for_discriminator_tis is None:
-            self.logger.warning(f"_calculate_technical_indicators: TA strategy is not initialized. Returning input data as-is for {data_type_for_logging} data.")
-            return data_batch # Return as-is if no strategy
+        if not hasattr(self, 'logger') or self.logger is None:
+            import logging # Import here to avoid top-level if not always needed
+            # Create a logger instance if it doesn't exist, specific to this module or class
+            # Using __name__ will typically give 'tsg_plugins.gan_trainer_plugin'
+            # or similar, which is good practice.
+            logger_name = self.__class__.__name__ if hasattr(self, '__class__') else 'GANTrainerPlugin_fallback'
+            self.logger = logging.getLogger(logger_name)
+            # Configure the logger if it's newly created and has no handlers 
+            # (to ensure messages are visible if no root logger config exists)
+            if not self.logger.hasHandlers():
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+                self.logger.setLevel(logging.INFO) # Or another appropriate default level
+            self.logger.warning(
+                f"GANTrainerPlugin.logger was not properly initialized before calling _calculate_technical_indicators. "
+                f"A fallback logger '{logger_name}' has been set up."
+            )
 
-        # Convert to DataFrame for pandas_ta
-        data_df = pd.DataFrame(data_batch.reshape(-1, data_batch.shape[-1])) # Reshape to 2D for DataFrame
+        self.logger.info(
+            f"_calculate_technical_indicators called for {data_type_for_logging} data. "
+            f"Input shape: {base_features_batch_param.shape if base_features_batch_param is not None else 'None'}"
+        )
 
-        # Calculate TIs using the strategy
-        try:
-            ti_results_df = self.tas_strategy_for_discriminator_tis.backtest(data_df)
-            self.logger.info(f"Calculated TIs for {data_type_for_logging} data: {ti_results_df.columns.tolist()}")
-        except Exception as e:
-            self.logger.error(f"Error calculating TIs for {data_type_for_logging} data: {e}")
-            ti_results_df = pd.DataFrame() # Empty DataFrame on error
+        if base_features_batch_param is None or base_features_batch_param.size == 0:
+            self.logger.error(f"Input data for TI calculation ({data_type_for_logging}) is None or empty. Returning None or empty array.")
+            return base_features_batch_param
 
-        # Convert results back to array
-        num_samples = data_batch.shape[0]
-        num_timesteps = data_batch.shape[1]
-        num_features = data_batch.shape[2]
-        num_tis = ti_results_df.shape[1] if not ti_results_df.empty else 0
+        if base_features_batch_param.ndim == 2:
+            self.logger.warning(
+                f"Input data for TI calculation ({data_type_for_logging}) is 2D {base_features_batch_param.shape}. "
+                f"Expected 3D (batch, seq, features). Attempting to reshape."
+            )
+            # Try to infer batch_size=1 if shape matches (seq_len, num_base_features)
+            if hasattr(self, 'seq_len') and hasattr(self, 'num_base_features') and \
+               base_features_batch_param.shape[0] == self.seq_len and \
+               base_features_batch_param.shape[1] == self.num_base_features:
+                base_features_batch_param = np.expand_dims(base_features_batch_param, axis=0)
+                self.logger.info(f"Reshaped 2D input to {base_features_batch_param.shape} assuming batch_size=1.")
+            else:
+                self.logger.error(
+                    f"Cannot reliably reshape 2D input {base_features_batch_param.shape} to 3D for TI calculation. "
+                    f"Required attributes (seq_len, num_base_features) might be missing or don't match. "
+                    f"Returning base features as is."
+                )
+                return base_features_batch_param
+        elif base_features_batch_param.ndim != 3:
+            self.logger.error(
+                f"Input data for TI calculation ({data_type_for_logging}) has unexpected dimension {base_features_batch_param.ndim}. "
+                f"Expected 3D. Returning base features as is."
+            )
+            return base_features_batch_param
 
-        # Reshape results to 3D: (num_samples, num_timesteps, num_features + num_tis)
-        if not ti_results_df.empty:
-            ti_results_array = ti_results_df.to_numpy().reshape(num_samples, num_timesteps, num_tis)
-            data_with_tis = np.concatenate([data_batch, ti_results_array], axis=-1)
+        if not hasattr(self, 'ti_names_to_calculate') or not self.ti_names_to_calculate or \
+           not hasattr(self, 'tas_strategy_for_discriminator_tis') or self.tas_strategy_for_discriminator_tis is None:
+            self.logger.info(
+                f"No TIs to calculate or TA strategy not defined for {data_type_for_logging} data. "
+                f"Returning base features as is. Shape: {base_features_batch_param.shape}"
+            )
+            return base_features_batch_param
+
+        current_batch_size, current_seq_len, current_num_base_features = base_features_batch_param.shape
+
+        if current_num_base_features == 0:
+            self.logger.warning(
+                f"Input for TI calculation ({data_type_for_logging}) has 0 base features (shape: {base_features_batch_param.shape}). "
+                f"Cannot calculate TIs. Returning base features as is."
+            )
+            return base_features_batch_param
+            
+        reshaped_for_ta = base_features_batch_param.reshape(-1, current_num_base_features)
+        
+        col_names_ok = False
+        if hasattr(self, 'base_feature_names_ordered') and self.base_feature_names_ordered:
+            if len(self.base_feature_names_ordered) >= current_num_base_features:
+                col_names = self.base_feature_names_ordered[:current_num_base_features]
+                col_names_ok = True
+            else:
+                self.logger.error(
+                    f"Mismatch for {data_type_for_logging}: self.base_feature_names_ordered has {len(self.base_feature_names_ordered)} names, "
+                    f"but data has {current_num_base_features} base features. "
+                    f"Proceeding with default column names, but TIs might fail."
+                )
+        
+        if not col_names_ok:
+            self.logger.warning(
+                f"self.base_feature_names_ordered is not set, empty, or insufficient for {current_num_base_features} features "
+                f"for {data_type_for_logging} data. Using default column names (e.g., 'col_0', 'col_1', ...). "
+                f"pandas-ta might infer 'close' from the last column, or TIs requiring specific names may fail."
+            )
+            col_names = [f'col_{i}' for i in range(current_num_base_features)]
+
+        data_df = pd.DataFrame(reshaped_for_ta, columns=col_names)
+
+        if not data_df.empty:
+            if 'close' not in data_df.columns:
+                if 'Close' in data_df.columns: # Handle case variations
+                    data_df.rename(columns={'Close': 'close'}, inplace=True)
+                    self.logger.info(f"Renamed 'Close' to 'close' for {data_type_for_logging} data TI calculation.")
+                elif data_df.shape[1] > 0: # If 'close' is still not there, use the last column.
+                    last_col_name = data_df.columns[-1]
+                    self.logger.info(
+                        f"Column 'close' not found in base features for {data_type_for_logging}. "
+                        f"Assigning last column ('{last_col_name}') as 'close' for TI calculation."
+                    )
+                    data_df['close'] = data_df.iloc[:, -1]
+                else: # Should not happen if current_num_base_features > 0
+                    self.logger.warning(f"Cannot assign 'close' column for {data_type_for_logging} as DataFrame has no columns after setup.")
         else:
-            data_with_tis = data_batch # Fallback to input data if TI calculation fails
+            self.logger.warning(f"DataFrame for TI calculation ({data_type_for_logging}) is empty before applying strategy. No TIs will be calculated.")
 
-        return data_with_tis
 
-    def save_models(self, epoch: int):
-        """
-        Save the generator, discriminator, and GAN models at the specified epoch.
-        Args:
-            epoch: The current epoch number (0-indexed).
-        """
-        # Save generator
-        if self.generator:
-            gen_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_generator_epoch_template"].format(epoch=epoch+1))
-            self.generator.save(gen_save_path)
-            self.logger.info(f"Saved generator model to {gen_save_path}")
-        
-        # Save discriminator
-        if self.discriminator:
-            disc_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_discriminator_epoch_template"].format(epoch=epoch+1))
-            self.discriminator.save(disc_save_path)
-            self.logger.info(f"Saved discriminator model to {disc_save_path}")
-        
-        # Save GAN
-        if self.gan:
-            gan_save_path = os.path.join(self.params["results_base_dir"], self.params["save_model_dir"], self.params["save_gan_epoch_template"].format(epoch=epoch+1))
-            self.gan.save(gan_save_path)
-            self.logger.info(f"Saved GAN model to {gan_save_path}")
-
-    def plot_losses(self, epoch: int):
-        """
-        Plot and save the generator and discriminator loss curves.
-        Args:
-            epoch: The current epoch number (0-indexed).
-        """
-        # Prepare loss data
-        d_loss = ... # Extract discriminator loss from training history
-        g_loss = ... # Extract generator loss from training history
-
-        # Plotting
-        plt.figure(figsize=(10, 5))
-        plt.plot(d_loss, label='Discriminator Loss')
-        plt.plot(g_loss, label='Generator Loss')
-        plt.title(f'GAN Losses Epoch {epoch+1}')
-        plt.xlabel('Batch')
-        plt.ylabel('Loss')
-        plt.legend()
-        
-        # Save plot
-        plot_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
-        os.makedirs(plot_dir, exist_ok=True)
-        loss_plot_path = os.path.join(plot_dir, self.params["loss_plot_epoch_template"].format(epoch=epoch+1))
-        plt.savefig(loss_plot_path, dpi=self.params["loss_plot_dpi"])
-        plt.close()
-        self.logger.info(f"Saved loss plot to {loss_plot_path}")
-
-    def export_training_metrics(self):
-        """
-        Export the detailed training metrics to a JSON file.
-        """
-        metrics_dir = os.path.join(self.params["results_base_dir"], self.params["save_metrics_dir"])
-        os.makedirs(metrics_dir, exist_ok=True)
-        metrics_path = os.path.join(metrics_dir, self.params["training_metrics_filename"])
-
-        # Convert full_metrics_history to JSON-serializable format if needed
+        ti_results_df = pd.DataFrame() 
         try:
-            with open(metrics_path, 'w') as json_file:
-                json.dump(self.full_metrics_history, json_file, indent=4)
-            self.logger.info(f"Saved training metrics to {metrics_path}")
+            if not data_df.empty and self.tas_strategy_for_discriminator_tis and self.tas_strategy_for_discriminator_tis.ta:
+                self.logger.info(f"Applying TA strategy to {data_type_for_logging} data (shape {data_df.shape}) with columns: {data_df.columns.tolist()}")
+                ti_results_df = data_df.ta.strategy(self.tas_strategy_for_discriminator_tis, append=False) 
+                
+                if ti_results_df is None:
+                    self.logger.error(f"pandas_ta.strategy returned None for {data_type_for_logging} data. This is unexpected.")
+                    ti_results_df = pd.DataFrame()
+                elif not ti_results_df.empty:
+                    original_ti_cols = ti_results_df.columns.tolist()
+                    nan_count_before_fill = ti_results_df.isnull().sum().sum()
+                    ti_results_df.fillna(0, inplace=True) # Fill NaNs, common for ML inputs
+                    nan_count_after_fill = ti_results_df.isnull().sum().sum()
+                    self.logger.info(
+                        f"Calculated TIs for {data_type_for_logging} data using df.ta.strategy(). "
+                        f"Original TI columns: {original_ti_cols}. TI results shape: {ti_results_df.shape}. "
+                        f"NaNs before fill: {nan_count_before_fill}, after fill (with 0): {nan_count_after_fill}."
+                    )
+                else: # ti_results_df is an empty DataFrame
+                    self.logger.info(f"df.ta.strategy() produced an empty DataFrame for TIs for {data_type_for_logging} data.")
+            else:
+                if data_df.empty:
+                     self.logger.info(f"Skipping TA strategy for {data_type_for_logging} because input DataFrame is empty.")
+                else:
+                     self.logger.info(f"TA strategy (self.tas_strategy_for_discriminator_tis) or its .ta list is empty for {data_type_for_logging}. No TIs calculated.")
         except Exception as e:
-            self.logger.error(f"Error saving training metrics to JSON: {e}")
+            self.logger.error(f"Error calculating TIs for {data_type_for_logging} data using df.ta.strategy(): {e}", exc_info=True)
+            ti_results_df = pd.DataFrame() # Ensure it's an empty DataFrame on error
+
+        # Ensure self.num_tis is available and is an int
+        expected_num_ti_features = getattr(self, 'num_tis', 0)
+        if not isinstance(expected_num_ti_features, int):
+            self.logger.warning(f"self.num_tis is not an int ({expected_num_ti_features}). Defaulting to 0 for expected TI features.")
+            expected_num_ti_features = 0
+
+        if ti_results_df.empty:
+            self.logger.warning(
+                f"TI calculation resulted in an empty DataFrame for {data_type_for_logging} data. "
+                f"Expected num_tis from config: {expected_num_ti_features}."
+            )
+            if expected_num_ti_features > 0:
+                self.logger.warning(
+                    f"Appending {expected_num_ti_features} zero columns for TIs as calculation failed or yielded no results for {data_type_for_logging}."
+                )
+                zeros_for_tis = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
+                features_with_tis_batch = np.concatenate([base_features_batch_param, zeros_for_tis], axis=-1)
+                self.logger.info(f"Shape after appending zero TIs for {data_type_for_logging}: {features_with_tis_batch.shape}")
+                return features_with_tis_batch
+            else: # No TIs were expected (expected_num_ti_features == 0)
+                self.logger.info(f"No TIs were expected (self.num_tis = {expected_num_ti_features}), returning base features for {data_type_for_logging}. Shape: {base_features_batch_param.shape}")
+                return base_features_batch_param
+
+        num_tis_calculated = ti_results_df.shape[1]
+        try:
+            # Ensure the number of rows in ti_results_df matches reshaped_for_ta (batch_size * seq_len)
+            if ti_results_df.shape[0] != reshaped_for_ta.shape[0]:
+                self.logger.error(
+                    f"TI results for {data_type_for_logging} have {ti_results_df.shape[0]} rows, but expected {reshaped_for_ta.shape[0]} rows. "
+                    f"This indicates a severe issue in TI calculation (e.g., pandas-ta dropped/added rows). "
+                    f"Attempting to align by reindexing and filling, but this is risky."
+                )
+                # Attempt to reindex to the original DataFrame's index and fill with 0
+                # This assumes data_df.index is representative of (batch_size * seq_len)
+                ti_results_df = ti_results_df.reindex(data_df.index).fillna(0)
+                self.logger.info(f"After reindexing and filling, TI results shape for {data_type_for_logging}: {ti_results_df.shape}")
+                if ti_results_df.shape[0] != reshaped_for_ta.shape[0]: # Check again
+                    raise ValueError(f"Reindexing failed to align row counts for TIs for {data_type_for_logging}.")
+
+
+            ti_features_array_batch = ti_results_df.to_numpy().reshape(current_batch_size, current_seq_len, num_tis_calculated)
+        except ValueError as reshape_error:
+            self.logger.error(
+                f"Error reshaping TI results for {data_type_for_logging} from {ti_results_df.shape} to "
+                f"({current_batch_size}, {current_seq_len}, {num_tis_calculated}): {reshape_error}. "
+                f"Original base_features_batch_param shape: {base_features_batch_param.shape}. "
+                f"Data_df shape: {data_df.shape}. Reshaped_for_ta shape: {reshaped_for_ta.shape}. "
+                "This might happen if TI calculation altered the number of rows unexpectedly or other dimension mismatch."
+            )
+            # Fallback: if reshaping fails, behave as if TIs were empty
+            if expected_num_ti_features > 0:
+                self.logger.warning(f"Appending {expected_num_ti_features} zero columns for TIs due to reshape error for {data_type_for_logging}.")
+                zeros_for_tis = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
+                features_with_tis_batch = np.concatenate([base_features_batch_param, zeros_for_tis], axis=-1)
+                return features_with_tis_batch
+            else:
+                return base_features_batch_param
+
+        self.logger.info(
+            f"Successfully calculated and reshaped TIs for {data_type_for_logging} data. "
+            f"TI array shape: {ti_features_array_batch.shape} (num_tis_calculated={num_tis_calculated}). "
+            f"Expected num_tis based on config: {expected_num_ti_features}."
+        )
+
+        features_with_tis_batch = np.concatenate([base_features_batch_param, ti_features_array_batch], axis=-1)
+        
+        final_num_features = features_with_tis_batch.shape[-1]
+        # self.num_base_features should be current_num_base_features
+        # self.num_features_for_discriminator = self.num_base_features + self.num_tis
+        expected_total_features_for_discriminator = current_num_base_features + expected_num_ti_features
+
+        if final_num_features != expected_total_features_for_discriminator:
+            self.logger.warning(
+                f"TI Calculation ({data_type_for_logging}): Final feature count ({final_num_features}) "
+                f"does not match expected count for discriminator ({expected_total_features_for_discriminator}). "
+                f"Breakdown: Input base features = {current_num_base_features}, "
+                f"Calculated TI features = {num_tis_calculated}, "
+                f"Expected TI features (self.num_tis) = {expected_num_ti_features}. "
+                f"This mismatch (if num_tis_calculated != expected_num_ti_features) can cause downstream errors if the "
+                f"discriminator is strictly expecting {expected_total_features_for_discriminator} features."
+            )
+            # If the number of *actually calculated* TIs (num_tis_calculated) is what matters for the true data shape,
+            # but the discriminator was built using `expected_num_ti_features` (from self.num_tis),
+            # then a mismatch here will cause the ValueError.
+            # The logic above (padding with zeros if ti_results_df is empty or reshape fails, up to expected_num_ti_features)
+            # aims to make final_num_features == expected_total_features_for_discriminator.
+            # So this warning should ideally only trigger if num_tis_calculated > 0 AND num_tis_calculated != expected_num_ti_features,
+            # AND the padding logic didn't make them align (e.g. if padding only happens on full failure).
+
+            # Let's re-evaluate: if num_tis_calculated != expected_num_ti_features, and expected_num_ti_features > 0
+            # we should ensure the output has expected_num_ti_features columns, possibly by padding/truncating ti_features_array_batch.
+            # Current code concatenates base + actual_calculated_TIs.
+            # If actual_calculated_TIs has N_calc columns, and expected is N_exp,
+            # and N_calc != N_exp, then final shape is base + N_calc.
+            # Discriminator expects base + N_exp.
+            # The padding logic for "empty ti_results_df" or "reshape_error" handles the case where N_calc is effectively 0.
+            # What if N_calc > 0 but N_calc != N_exp?
+            # Example: self.num_tis = 20. Strategy actually produces 18 TIs.
+            # Then final_num_features = base + 18. Discriminator expects base + 20. Error.
+            # Or strategy produces 22 TIs. final_num_features = base + 22. Discriminator expects base + 20. Error.
+
+            # Forcing alignment if num_tis_calculated is different from expected_num_ti_features:
+            if num_tis_calculated != expected_num_ti_features and expected_num_ti_features > 0 :
+                self.logger.warning(f"Number of calculated TIs ({num_tis_calculated}) differs from expected ({expected_num_ti_features}) for {data_type_for_logging}. "
+                                    f"Adjusting TI features to match expected {expected_num_ti_features} columns by padding with zeros or truncating.")
+                
+                aligned_ti_features = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
+                
+                if num_tis_calculated > 0: # Only copy if there's something to copy
+                    # Truncate if more TIs calculated than expected, or copy all if fewer.
+                    copy_cols = min(num_tis_calculated, expected_num_ti_features)
+                    aligned_ti_features[:, :, :copy_cols] = ti_features_array_batch[:, :, :copy_cols]
+                
+                # Re-concatenate with aligned TIs
+                features_with_tis_batch = np.concatenate([base_features_batch_param, aligned_ti_features], axis=-1)
+                final_num_features = features_with_tis_batch.shape[-1] # Update final_num_features
+                self.logger.info(f"After aligning TI columns for {data_type_for_logging}, final shape: {features_with_tis_batch.shape}. "
+                                 f"Now has {final_num_features} total features.")
+
+        self.logger.info(f"Concatenated {data_type_for_logging} base features with TIs. Final shape: {features_with_tis_batch.shape}")
+        return features_with_tis_batch
