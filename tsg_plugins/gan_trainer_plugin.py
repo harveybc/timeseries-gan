@@ -472,7 +472,12 @@ class GANTrainerPlugin:
         self.generator_output_actual_seq_len: int = self.params.get("gan_generator_output_actual_seq_len", 1)
         self.actual_generator_output_dim: int = 0
         self.generator: Optional[Model] = None # Initialize generator attribute
+        self.discriminator: Optional[Model] = None # Explicitly initialize discriminator
+        self.gan_model: Optional[Model] = None # Explicitly initialize GAN model
         self.generator_actual_input_names_ordered: List[str] = [] # Initialize attribute
+        self.gan_latent_input_keras_name_hint: Optional[str] = None
+        self.gan_conditional_input_keras_name_hint: Optional[str] = None
+        self.gan_context_input_keras_name_hint: Optional[str] = None
 
         self.generator_plugin_instance = generator_plugin_instance
         self.feeder_plugin_instance = feeder_plugin_instance
@@ -571,57 +576,28 @@ class GANTrainerPlugin:
             self.actual_generator_output_dim = 0
             self.generator_actual_input_names_ordered = [] # Ensure it's empty if no generator
         
-        # _initialize_core_parameters_from_config() is called within set_params in my typical structure,
-        # or should be called after set_params if it relies on fully merged params.
-        # Given self.set_params(**self.config) was called, core params should be initialized.
-        # If not, it needs to be called here:
-        # self._initialize_core_parameters_from_config() # Ensure this is called after params are set.
+        # Initialize core parameters from the initial config
+        self._initialize_core_parameters_from_config() # This sets up seq_len, features etc.
 
-        # Initialize dimensions for GAN model inputs (latent is from core_params, conditional/context here)
-        self.conditional_dim_for_generator = 0
-        if self.feeder_plugin_instance and hasattr(self.feeder_plugin_instance, 'get_conditional_dim'):
-            self.conditional_dim_for_generator = self.feeder_plugin_instance.get_conditional_dim()
-            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from feeder: {self.conditional_dim_for_generator}")
-        # ... (rest of conditional_dim_for_generator logic from existing code) ...
-        elif self.params: 
-            date_cond_feats = self.params.get('feeder_date_features_for_conditioning', [])
-            fund_cond_feats = self.params.get('feeder_fundamental_features_for_conditioning', [])
-            self.conditional_dim_for_generator = (len(date_cond_feats) * 2) + len(fund_cond_feats) 
-            self.logger.info(f"GANTrainerPlugin (__init__): conditional_dim_for_generator from params (fallback): {self.conditional_dim_for_generator}")
-        else:
-            self.logger.warning("GANTrainerPlugin (__init__): Could not determine conditional_dim_for_generator.")
+        # Build models if the generator is available
+        # if self.generator:
+        #     self._build_discriminator()
+        #     self._build_gan()
+        # else:
+        #     self.logger.warning("Generator model is not available. Discriminator and GAN models will not be built at initialization.")
+        # Defer model building to set_params or a dedicated build method after all params are finalized.
+        self.logger.info("Deferring Discriminator and GAN model building until parameters are fully set.")
 
-
-        self.context_dim_for_generator = self.params.get('context_vector_dim', 64)
-        self.logger.info(f"GANTrainerPlugin (__init__): context_dim_for_generator set to {self.context_dim_for_generator}")
-        
-        self.g_optimizer = Adam(learning_rate=self.params.get("generator_lr", 1e-4), beta_1=self.params.get("generator_beta1", 0.5))
-        self.d_optimizer = Adam(learning_rate=self.params.get("discriminator_lr", 1e-4), beta_1=self.params.get("discriminator_beta1", 0.5))
-        self.logger.info("Optimizers initialized.")
-
-        self.discriminator: Optional[Model] = self._build_discriminator()
-        if self.discriminator:
-            self.discriminator.compile(loss='binary_crossentropy', optimizer=self.d_optimizer, metrics=['accuracy'])
-            self.logger.info("Discriminator compiled.")
-        else:
-            self.logger.error("Discriminator model building failed in __init__.")
-
-        self.gan: Optional[Model] = self._build_gan()
-        if self.gan: # Check if GAN model was built successfully
-             self.logger.info("GAN model built successfully.")
-             self.gan.summary(print_fn=self.logger.info) # Print GAN summary
-        else:
-             self.logger.error("GAN model building failed in __init__.")
-
-        self.best_lr_metric = float('inf')
-        self.lr_patience_counter = 0
-        self.best_es_metric = float('inf')
-        self.es_patience_counter = 0
-        
-        # For storing all metrics for JSON export
-        self.full_metrics_history: List[Dict[str, Any]] = []
-        
-        self.logger.info("GANTrainerPlugin initialized with new path configurations.")
+    def _get_config_param(self, key: str, default: Any = None) -> Any:
+        """
+        Helper method to get a parameter from the config with a default value.
+        Args:
+            key: Parameter key as string.
+            default: Default value to return if the key is not found.
+        Returns:
+            Value of the parameter from the config, or the default value.
+        """
+        return self.config.get(key, default)
 
     def _initialize_core_parameters_from_config(self):
         """Initializes core GAN, Generator, and Discriminator parameters from the config.
@@ -674,7 +650,6 @@ class GANTrainerPlugin:
                                                     self.params.get('feature_dim')
             
             if not self.generator_output_actual_features and hasattr(self, 'config') and isinstance(self.config, dict):
-                # self.config here refers to the main_config passed to GANTrainerPlugin's __init__
                 generator_params_key = next((key for key in self.config if key.endswith('generator_params')), None)
                 if generator_params_key:
                     generator_params = self.config.get(generator_params_key, {})
@@ -832,54 +807,30 @@ class GANTrainerPlugin:
                 input_shape_from_keras = keras_input_tensor.shape # e.g. TensorShape([None, 100]) or TensorShape([None, 10, 1])
                 self.logger.info(f"Processing generator input {i}: Keras name '{input_name_from_keras}', Keras shape {input_shape_from_keras}")
 
-                # Try to match based on configured feeder key names to the generator's inputs by their Keras names
-                # This assumes Keras input layers were named according to these feeder keys or a convention.
-                # Example Keras input layer names: "input_latent_vector", "input_conditional_data", "input_context_vector"
-                # Or, if not named, rely on the order and config params for dimensions.
-
-                # Check for Latent Vector
-                # The feeder_key_name_latent (e.g., "latent_vector") is what the FeederPlugin provides.
-                # The Keras input layer might be named "input_latent_vector", "latent_input", or just self.feeder_key_name_latent.
-                if self.feeder_key_name_latent and (self.feeder_key_name_latent in input_name_from_keras.lower() or f"input_{self.feeder_key_name_latent}" in input_name_from_keras.lower()):
-                    self.logger.info(f"  Input '{input_name_from_keras}' matched as LATENT based on feeder key '{self.feeder_key_name_latent}'.")
-                    if len(input_shape_from_keras) == 2: # (batch, features)
-                        self.gen_input_latent_dim = input_shape_from_keras[1]
-                        self.gen_input_seq_len = None # Latent vector is not sequential
-                        self.logger.info(f"    Set for GAN (from Gen): gen_input_latent_dim = {self.gen_input_latent_dim}, gen_input_seq_len = None (2D)")
-                    elif len(input_shape_from_keras) == 3: # (batch, seq_len, features)
-                        self.gen_input_seq_len = input_shape_from_keras[1]
-                        self.gen_input_latent_dim = input_shape_from_keras[2]
-                        self.logger.info(f"    Set for GAN (from Gen): gen_input_latent_dim = {self.gen_input_latent_dim}, gen_input_seq_len = {self.gen_input_seq_len} (3D)")
-                    else:
-                        self.logger.warning(f"  Latent input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras}. Using config value for latent_dim.")
+                # Try to match with hint names to assign a role and log more descriptively
+                if self.gan_latent_input_keras_name_hint == input_name_from_keras:
+                    input_role = "latent"
                     found_latent = True
-                
-                # Check for Conditional Data
-                elif self.feeder_key_name_conditional and (self.feeder_key_name_conditional in input_name_from_keras.lower() or f"input_{self.feeder_key_name_conditional}" in input_name_from_keras.lower()):
-                    self.logger.info(f"  Input '{input_name_from_keras}' matched as CONDITIONAL based on feeder key '{self.feeder_key_name_conditional}'.")
-                    if len(input_shape_from_keras) == 2 and input_shape_from_keras[1] is not None:
-                        self.conditional_dim_for_generator = input_shape_from_keras[1]
-                        self.logger.info(f"    Set for GAN (from Gen): conditional_dim_for_generator = {self.conditional_dim_for_generator} (2D)")
-                    # Add handling for 3D conditional data if necessary, e.g. if it has a sequence length
-                    # elif len(input_shape_from_keras) == 3 and input_shape_from_keras[1] is not None and input_shape_from_keras[2] is not None:
-                    #     self.conditional_seq_len_for_generator = input_shape_from_keras[1]
-                    #     self.conditional_dim_for_generator = input_shape_from_keras[2]
-                    #     self.logger.info(f"    Set for GAN (from Gen): conditional_dim_for_generator = {self.conditional_dim_for_generator}, conditional_seq_len = {self.conditional_seq_len_for_generator} (3D)")
-                    else:
-                        self.logger.warning(f"  Conditional input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras} or undefined feature dim. Using config/default for conditional_dim.")
+                elif self.gan_conditional_input_keras_name_hint == input_name_from_keras:
+                    input_role = "conditional"
                     found_conditional = True
-
-                # Check for Context Vector
-                elif self.feeder_key_name_context and (self.feeder_key_name_context in input_name_from_keras.lower() or f"input_{self.feeder_key_name_context}" in input_name_from_keras.lower()):
-                    self.logger.info(f"  Input '{input_name_from_keras}' matched as CONTEXT based on feeder key '{self.feeder_key_name_context}'.")
-                    if len(input_shape_from_keras) == 2 and input_shape_from_keras[1] is not None:
-                        self.context_dim_for_generator = input_shape_from_keras[1]
-                        self.logger.info(f"    Set for GAN (from Gen): context_dim_for_generator = {self.context_dim_for_generator} (2D)")
-                    # Add handling for 3D context data if necessary
-                    else:
-                        self.logger.warning(f"  Context input '{input_name_from_keras}' has unexpected shape {input_shape_from_keras} or undefined feature dim. Using config/default for context_dim.")
+                elif self.gan_context_input_keras_name_hint == input_name_from_keras:
+                    input_role = "context"
                     found_context = True
-            
+                else:
+                    input_role = "unknown"
+
+                # Create the Keras Input layer for the GAN model
+                # Name it distinctively for the GAN graph, possibly incorporating role and original name
+                gan_input_layer_name = f"gan_input_{input_role}_{i}_{input_name_from_keras.replace(':', '_').replace('/', '_')}"
+                keras_input_layer_for_gan = layers.Input(shape=input_shape_from_keras[1:], name=gan_input_layer_name)
+                
+                self.logger.info(f"  Created GAN Input Layer: Name='{keras_input_layer_for_gan.name}', Shape=(None, {input_shape_from_keras[1:]}), Role='{input_role}', From Gen Input='{input_name_from_keras}'")
+
+                self.generator_actual_input_names_ordered.append(keras_input_layer_for_gan.name)
+                # Add to GAN inputs for model definition
+                gan_keras_inputs_for_model_definition.append(keras_input_layer_for_gan)
+
             # Fallback if roles couldn't be matched by name (e.g., generic Keras input names like "input_1")
             # This part is tricky and relies on assumptions about the order of inputs if names are not descriptive.
             # The current strategy is: if not found by name, stick to config values. 
@@ -983,6 +934,35 @@ class GANTrainerPlugin:
         else: self.d_optimizer = Adam(learning_rate=self.params.get("discriminator_lr", 1e-4), beta_1=self.params.get("discriminator_beta1", 0.5))
         
         self.logger.info("GANTrainerPlugin (set_params): Parameters updated. Models might need re-build if structural params changed.")
+
+        # Attempt to build/rebuild models if the generator is available
+        if self.generator:
+            self.logger.info("GANTrainerPlugin (set_params): Generator is available. Building/rebuilding Discriminator and GAN models.")
+            try:
+                # Ensure core parameters are up-to-date before building
+                # self._initialize_core_parameters_from_config() # Already called earlier in set_params
+
+                self.logger.info(f"GANTrainerPlugin (set_params): About to build Discriminator. Current relevant params: self.seq_len={self.seq_len}, self.num_features_for_discriminator={self.num_features_for_discriminator}")
+                self.discriminator = self._build_discriminator()
+                
+                if self.discriminator: # Check if discriminator was built successfully
+                    self.logger.info(f"GANTrainerPlugin (set_params): Discriminator built. About to build GAN. Current relevant params for GAN inputs: latent_dim={self.gen_input_latent_dim}, conditional_dim={self.conditional_dim_for_generator}, context_dim={self.context_dim_for_generator}")
+                    self.gan_model = self._build_gan() # _build_gan also checks for self.discriminator
+                    if self.gan_model:
+                        self.logger.info("GANTrainerPlugin (set_params): Discriminator and GAN models built/rebuilt successfully.")
+                    else:
+                        self.logger.error("GANTrainerPlugin (set_params): GAN model building failed after discriminator was built.")
+                else:
+                    self.logger.error("GANTrainerPlugin (set_params): Discriminator model building failed. GAN model will not be built.")
+            except Exception as e:
+                self.logger.error(f"GANTrainerPlugin (set_params): Error during model building: {e}", exc_info=True)
+        else:
+            self.logger.warning("GANTrainerPlugin (set_params): Generator is not available. Discriminator and GAN models cannot be built/rebuilt at this time.")
+            # Ensure models are None if generator is not available
+            self.discriminator = None
+            self.gan_model = None
+            self.logger.info("GANTrainerPlugin (set_params): Discriminator and GAN models set to None as generator is unavailable.")
+
         # Note: The old gan_model_dir is not used with the new path structure.
         # Directories are created on-demand by save_models, _plot_losses etc.
 
@@ -1019,765 +999,221 @@ class GANTrainerPlugin:
         return model
 
     def _build_gan(self) -> Model:
-        if not self.generator or not self.discriminator:
-            self.logger.error("Generator or Discriminator not initialized. Cannot build GAN.")
-            # Consider raising an error or returning None, consistent with __init__
-            return None # Or raise ValueError("Generator or Discriminator not initialized.")
+        if not self.generator:
+            self.logger.error("GAN Build: Generator model (self.generator) is not initialized. Cannot build GAN.")
+            raise ValueError("Generator model is not initialized.")
+        if not self.discriminator:
+            self.logger.error("GAN Build: Discriminator model (self.discriminator) is not initialized. Cannot build GAN.")
+            raise ValueError("Discriminator model is not initialized.")
             
-        self.logger.info("Building GAN model (Generator + Discriminator)...")
-        self.discriminator.trainable = False
+        self.logger.info("Building GAN model (Generator + Discriminator) with new input handling logic...")
+        self.discriminator.trainable = False # Freeze discriminator during GAN training phase
         
-        gan_latent_input_shape = (self.gen_input_seq_len, self.gen_input_latent_dim)
-        gan_latent_input = tf.keras.Input(shape=gan_latent_input_shape, name="gan_input_latent_vector")
-        gan_conditional_input = tf.keras.Input(shape=(self.conditional_dim_for_generator,), name="gan_input_conditional_data")
-        gan_context_input = tf.keras.Input(shape=(self.context_dim_for_generator,), name="gan_input_context_vector")
+        gan_keras_inputs_for_model_definition = []  # List of tf.keras.Input layers for the GAN model's definition
+        generator_call_inputs_ordered = [] # List of tensors (from gan_keras_inputs_for_model_definition) to be passed to self.generator()
 
-        # Order inputs for the VAE Decoder (Generator)
-        generator_input_names_from_model = [inp.name.split(':')[0] for inp in self.generator.inputs]
-        cfg_latent_name = self.params.get("generator_decoder_input_name_latent")
-        cfg_context_name = self.params.get("generator_decoder_input_name_context")
-        cfg_conditional_name = self.params.get("generator_decoder_input_name_conditions")
+        if not self.generator.inputs: # Generator Keras model has no .inputs (e.g., it samples noise internally)
+            self.logger.info("GAN Build: Generator model has no defined Keras inputs. GAN will call generator without explicit inputs.")
+            # gan_keras_inputs_for_model_definition and generator_call_inputs_ordered will remain empty.
+        else: # Generator has defined Keras inputs
+            if not self.generator_actual_input_names_ordered:
+                self.logger.error("GAN Build: Generator has Keras inputs, but self.generator_actual_input_names_ordered is empty. "
+                                  "This indicates a failure in _initialize_core_parameters_from_config. Critical error.")
+                raise ValueError("generator_actual_input_names_ordered is not populated despite generator having inputs.")
 
-        input_map = {
-            cfg_latent_name: gan_latent_input,
-            cfg_context_name: gan_context_input,
-            cfg_conditional_name: gan_conditional_input,
-        }
-        generator_feed_inputs_ordered = []
-        for model_input_name in generator_input_names_from_model:
-            found_match = any(model_input_name.startswith(cfg_name) for cfg_name in input_map if cfg_name)
-            if found_match:
-                 generator_feed_inputs_ordered.append(next(gan_layer for cfg_name, gan_layer in input_map.items() if cfg_name and model_input_name.startswith(cfg_name)))
-            else: self.logger.warning(f"GAN build: Gen input '{model_input_name}' not mapped.")
-        if len(generator_feed_inputs_ordered) != len(self.generator.inputs): self.logger.error("GAN build: Mismatch in ordered inputs for gen.")
+            self.logger.info(f"GAN Build: Preparing GAN inputs based on generator's {len(self.generator_actual_input_names_ordered)} actual Keras input layers: {self.generator_actual_input_names_ordered}")
+            
+            # Create GAN input layers based on the generator's *actual* Keras inputs, in their defined order.
+            for i, actual_gen_keras_input_name in enumerate(self.generator_actual_input_names_ordered):
+                # Find the corresponding Keras Tensor object from the generator's inputs
+                original_gen_input_tensor = next((inp for inp in self.generator.inputs if inp.name == actual_gen_keras_input_name), None)
 
-        generated_data_raw = self.generator(generator_feed_inputs_ordered)
+                if original_gen_input_tensor is None:
+                    self.logger.error(f"GAN Build: Could not find Keras input tensor named '{actual_gen_keras_input_name}' in self.generator.inputs, "
+                                      f"even though it was listed in self.generator_actual_input_names_ordered. Inconsistency detected.")
+                    raise ValueError(f"Inconsistent generator input specification for '{actual_gen_keras_input_name}'.")
+
+                original_shape_tuple = tuple(original_gen_input_tensor.shape[1:]) # Shape without batch dim (e.g., (latent_dim,) or (seq_len, features))
+                
+                # Determine a descriptive role for logging and naming, using the hints
+                input_role_for_naming = "unknown"
+                if self.gan_latent_input_keras_name_hint and self.gan_latent_input_keras_name_hint == actual_gen_keras_input_name:
+                    input_role_for_naming = "latent"
+                elif self.gan_conditional_input_keras_name_hint and self.gan_conditional_input_keras_name_hint == actual_gen_keras_input_name:
+                    input_role_for_naming = "conditional"
+                elif self.gan_context_input_keras_name_hint and self.gan_context_input_keras_name_hint == actual_gen_keras_input_name:
+                    input_role_for_naming = "context"
+                
+                # Sanitize original Keras name for use in GAN input layer name
+                sanitized_gen_input_name = actual_gen_keras_input_name.replace(':', '_').replace('/', '_')
+                
+                # Create the Keras Input layer for the GAN model
+                # This input layer will be part of `gan_model.inputs`
+                gan_input_layer = layers.Input(shape=original_shape_tuple, name=f"gan_input_{input_role_for_naming}_{i}_{sanitized_gen_input_name}")
+                
+                self.logger.info(f"GAN Build: Created GAN Input Layer: Name='{gan_input_layer.name}', Shape=(None, {original_shape_tuple}), Role='{input_role_for_naming}', From Gen Input='{actual_gen_keras_input_name}'")
+
+                gan_keras_inputs_for_model_definition.append(gan_input_layer)
+                generator_call_inputs_ordered.append(gan_input_layer) # This tensor will be passed to the generator
+
+        # Verify the number of inputs prepared matches what the generator expects
+        expected_num_gen_inputs = len(self.generator.inputs) if self.generator.inputs else 0
+        if len(generator_call_inputs_ordered) != expected_num_gen_inputs:
+            self.logger.error(
+                f"GAN Build: MISMATCH in number of inputs prepared for generator call ({len(generator_call_inputs_ordered)}) "
+                f"and number of inputs generator model expects ({expected_num_gen_inputs}). "
+                f"GAN Inputs prepared: {[inp.name for inp in generator_call_inputs_ordered]}. "
+                f"Generator Keras inputs: {[inp.name for inp in self.generator.inputs] if self.generator.inputs else 'None'}."
+            )
+            raise ValueError("Mismatch between prepared GAN inputs and generator's expected inputs.")
+
+        # Call the generator with the (ordered) list of input tensors
+        if not self.generator.inputs: # Generator expects no inputs
+            self.logger.info("GAN Build: Calling generator() with no arguments as it has no defined Keras inputs.")
+            generated_data_raw = self.generator()
+        else: # Generator expects inputs
+            self.logger.info(f"GAN Build: Calling generator with {len(generator_call_inputs_ordered)} input(s): {[inp.name for inp in generator_call_inputs_ordered]}.")
+            generated_data_raw = self.generator(generator_call_inputs_ordered) # Pass the list of tensors
         
-        if self.generator_output_actual_seq_len > 0:
-            target_reshape_dim = self.actual_generator_output_dim if self.actual_generator_output_dim > 0 else -1
-            generated_data_raw = tf.keras.layers.Reshape((self.generator_output_actual_seq_len, target_reshape_dim), name="reshape_generator_output")(generated_data_raw)
+        self.logger.info(f"GAN Build: Generator output tensor (raw) received. Shape: {generated_data_raw.shape}, Dtype: {generated_data_raw.dtype}")
 
-        base_features_from_generator = generated_data_raw
-        if self.actual_generator_output_dim != self.num_base_features and self.num_base_features > 0 : # Ensure num_base_features is positive
-            base_features_from_generator = tf.keras.layers.Lambda(lambda x: x[:, :, :self.num_base_features], name="slice_gen_output")(generated_data_raw)
-        
-        if self.generator_output_actual_seq_len != self.seq_len:
-            if self.generator_output_actual_seq_len == 1 and self.seq_len > 1:
-                squeezed_features = tf.keras.layers.Lambda(lambda x: tf.squeeze(x, axis=1), name="squeeze_time_dim")(base_features_from_generator)
-                base_features_from_generator = tf.keras.layers.RepeatVector(self.seq_len, name="repeat_vector_for_ti")(squeezed_features)
-            else: raise ValueError("GAN build: Mismatch in generator output seq_len vs TI/D seq_len.")
+        # --- Slicing and Reshaping Generator Output ---
+        generated_base_features_tensor = generated_data_raw
+        static_gen_output_shape = generated_data_raw.shape 
+        rank = len(static_gen_output_shape)
 
-        ti_calculator_layer = TensorFlowTALayer(
-            base_feature_names=self.base_feature_names_ordered, 
-            ti_names_to_calculate=self.ti_names_to_calculate,
-            num_base_features=self.num_base_features,
-            num_total_features=self.num_features_for_discriminator,
-            seq_len=self.seq_len, name="symbolic_ti_calculator_in_gan" # Unique name
-        )
-        data_with_tis_for_discriminator = ti_calculator_layer(base_features_from_generator)
-        gan_output = self.discriminator(data_with_tis_for_discriminator) 
-        actual_gan_model_inputs = [gan_latent_input, gan_conditional_input, gan_context_input]
-        gan = tf.keras.Model(inputs=actual_gan_model_inputs, outputs=gan_output, name="gan_combined")
+        if rank == 3: # (batch, seq, features)
+            actual_gen_seq_len_from_shape = static_gen_output_shape[1]
+            actual_gen_features_from_shape = static_gen_output_shape[2]
+            
+            self.logger.info(f"GAN Build (3D Gen Output): Static shape: {static_gen_output_shape}. Target base features: {self.num_base_features}, Target seq_len for D: {self.seq_len}")
+
+            if actual_gen_features_from_shape is not None and self.num_base_features is not None and actual_gen_features_from_shape > self.num_base_features:
+                self.logger.info(f"GAN Build (3D output): Slicing generator output features from {actual_gen_features_from_shape} down to {self.num_base_features}.")
+                generated_base_features_tensor = generated_base_features_tensor[:, :, :self.num_base_features]
+            elif actual_gen_features_from_shape is not None and self.num_base_features is not None and actual_gen_features_from_shape < self.num_base_features:
+                self.logger.error(f"GAN Build (3D output): Generator output features ({actual_gen_features_from_shape}) is LESS than num_base_features ({self.num_base_features}). Critical config error.")
+                raise ValueError("Generator outputs fewer features than configured num_base_features.")
+
+            if actual_gen_seq_len_from_shape is not None and self.seq_len is not None and actual_gen_seq_len_from_shape != self.seq_len:
+                self.logger.warning(f"GAN Build (3D output): Generator output sequence length ({actual_gen_seq_len_from_shape}) "
+                                    f"differs from target discriminator sequence length ({self.seq_len}). "
+                                    "This might indicate an issue if not handled. Discriminator expects self.seq_len.")
+        elif rank == 2: # (batch, features)
+            actual_gen_features_from_shape = static_gen_output_shape[1]
+            self.logger.info(f"GAN Build (2D Gen Output): Static shape: {static_gen_output_shape}. Target base features: {self.num_base_features}, Target seq_len for D: {self.seq_len}")
+
+            if actual_gen_features_from_shape is not None and self.num_base_features is not None and actual_gen_features_from_shape > self.num_base_features:
+                self.logger.info(f"GAN Build (2D output): Slicing generator output features from {actual_gen_features_from_shape} down to {self.num_base_features}.")
+                generated_base_features_tensor = generated_base_features_tensor[:, :self.num_base_features]
+            elif actual_gen_features_from_shape is not None and self.num_base_features is not None and actual_gen_features_from_shape < self.num_base_features:
+                self.logger.error(f"GAN Build (2D output): Generator output features ({actual_gen_features_from_shape}) is LESS than num_base_features ({self.num_base_features}). Critical error.")
+                raise ValueError("Generator outputs fewer features than configured num_base_features for 2D output.")
+
+            if self.seq_len is not None: 
+                if self.seq_len == 1: # Discriminator expects a sequence of length 1
+                    self.logger.info(f"GAN Build (2D output): Generator output was 2D. Expanding dims to make it 3D (batch, 1, features) as D expects seq_len=1. Shape before: {generated_base_features_tensor.shape}")
+                    generated_base_features_tensor = tf.expand_dims(generated_base_features_tensor, axis=1)
+                    self.logger.info(f"GAN Build: Shape after expand_dims: {generated_base_features_tensor.shape}")
+                else: # Discriminator expects seq_len > 1, but generator output is 2D
+                     self.logger.error(f"GAN Build: Generator output is 2D, but discriminator expects seq_len {self.seq_len}. Cannot reconcile. Critical error.")
+                     raise ValueError(f"Generator output 2D, but discriminator expects sequence length {self.seq_len}.")
+            else: # self.seq_len is None (highly unlikely for D)
+                 self.logger.warning("GAN Build: Generator output is 2D, and target seq_len for D is None. This is highly unusual for sequence discriminators.")
         
-        gan.compile(loss='binary_crossentropy', optimizer=self.g_optimizer) # g_optimizer from self
-        self.logger.info("GAN model built and compiled.")
+        else: # Unexpected rank
+            self.logger.error(f"GAN Build: Generator output has unexpected rank {rank} (shape {static_gen_output_shape}). Expected 2D or 3D. Cannot proceed.")
+            raise ValueError(f"Generator output has unexpected rank {rank}, shape {static_gen_output_shape}.")
         
-        gan.summary(print_fn=self.logger.info) # Use self.logger
+        self.logger.info(f"GAN Build: Processed generator output for base features (generated_base_features_tensor) shape: {generated_base_features_tensor.shape}")
+        
+        data_for_discriminator_input = generated_base_features_tensor
+
+        # --- Apply Technical Indicators using TensorFlowTALayer if configured ---
+        if self.params.get("use_tensorflow_ta_layer", False) and self.ti_names_to_calculate:
+            self.logger.info(f"GAN Build: Using TensorFlowTALayer to calculate TIs for generated data. Num TIs: {len(self.ti_names_to_calculate)}")
+            self.logger.info(f"  TensorFlowTALayer input (generated_base_features_tensor) shape: {data_for_discriminator_input.shape}") # Log shape before TA layer
+            self.logger.info(f"  TensorFlowTALayer params: base_feature_names={self.base_feature_names_ordered}, ti_names={self.ti_names_to_calculate}, "
+                             f"num_base_features={self.num_base_features}, num_total_features={self.num_features_for_discriminator}, seq_len={self.seq_len}")
+            
+            input_to_ta_layer_shape = data_for_discriminator_input.shape # Check shape of tensor being passed
+            if len(input_to_ta_layer_shape) != 3:
+                self.logger.error(f"GAN Build: Input to TensorFlowTALayer is not 3D (shape: {input_to_ta_layer_shape}). This is required.")
+                raise ValueError(f"TensorFlowTALayer requires 3D input, got {input_to_ta_layer_shape}.")
+            if input_to_ta_layer_shape[1] is not None and self.seq_len is not None and input_to_ta_layer_shape[1] != self.seq_len:
+                self.logger.error(f"GAN Build: Seq length of input to TensorFlowTALayer ({input_to_ta_layer_shape[1]}) "
+                                  f"does not match configured seq_len for layer ({self.seq_len}).")
+                raise ValueError(f"Sequence length mismatch for TensorFlowTALayer: input has {input_to_ta_layer_shape[1]}, layer expects {self.seq_len}.")
+            if input_to_ta_layer_shape[2] is not None and self.num_base_features is not None and input_to_ta_layer_shape[2] != self.num_base_features:
+                self.logger.error(f"GAN Build: Feature count of input to TensorFlowTALayer ({input_to_ta_layer_shape[2]}) "
+                                  f"does not match configured num_base_features for layer ({self.num_base_features}).")
+                raise ValueError(f"Feature count mismatch for TensorFlowTALayer: input has {input_to_ta_layer_shape[2]}, layer expects {self.num_base_features}.")
+
+            tf_ta_layer_instance_for_gan = TensorFlowTALayer(
+                base_feature_names=self.base_feature_names_ordered,
+                ti_names_to_calculate=self.ti_names_to_calculate,
+                num_base_features=self.num_base_features, 
+                num_total_features=self.num_features_for_discriminator, # D expects this total
+                seq_len=self.seq_len, 
+                name="tf_ta_layer_in_gan" 
+            )
+            data_for_discriminator_input = tf_ta_layer_instance_for_gan(data_for_discriminator_input)
+            self.logger.info(f"GAN Build: Output of TensorFlowTALayer (data_for_discriminator_input) shape: {data_for_discriminator_input.shape}")
+        else: # Not using TF TA Layer, or no TIs to calculate
+            self.logger.info(f"GAN Build: Not using TensorFlowTALayer, or no TIs to calculate. Passing processed generator output directly to discriminator.")
+            if self.num_base_features is not None and self.num_features_for_discriminator is not None and self.num_features_for_discriminator != self.num_base_features:
+                 self.logger.error(f"GAN Build: TIs are skipped, but num_features_for_discriminator ({self.num_features_for_discriminator}) "
+                                   f"differs from num_base_features ({self.num_base_features}). "
+                                   f"Discriminator expects {self.num_features_for_discriminator} features, but will receive {self.num_base_features}. Shape mismatch imminent.")
+                 raise ValueError("Discriminator feature count mismatch: TIs expected by D but not added in GAN path, and num_features_for_discriminator != num_base_features.")
+
+        final_disc_input_shape = data_for_discriminator_input.shape
+        self.logger.info(f"GAN Build: Data shape entering discriminator: {final_disc_input_shape}. Discriminator built for: (None, {self.seq_len}, {self.num_features_for_discriminator})")
+
+        if len(final_disc_input_shape) != 3:
+            self.logger.error(f"GAN Build: CRITICAL SHAPE MISMATCH. Data for discriminator is not 3D. Shape: {final_disc_input_shape}.")
+            raise ValueError(f"Data for discriminator must be 3D, got shape {final_disc_input_shape}")
+        
+        if final_disc_input_shape[1] is not None and self.seq_len is not None and final_disc_input_shape[1] != self.seq_len:
+            self.logger.error(
+                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Sequence Length). "
+                f"Data seq_len: {final_disc_input_shape[1]}, Discriminator expects: {self.seq_len}."
+            )
+            raise ValueError(f"Sequence length mismatch for data entering discriminator in GAN graph: data has {final_disc_input_shape[1]}, D expects {self.seq_len}.")
+        
+        if final_disc_input_shape[2] is not None and self.num_features_for_discriminator is not None and final_disc_input_shape[2] != self.num_features_for_discriminator:
+            self.logger.error(
+                f"GAN Build: CRITICAL SHAPE MISMATCH for Discriminator Input (Number of Features). "
+                f"Data features: {final_disc_input_shape[2]}, Discriminator expects: {self.num_features_for_discriminator}."
+            )
+            raise ValueError(f"Feature count mismatch for data entering discriminator in GAN graph: data has {final_disc_input_shape[2]}, D expects {self.num_features_for_discriminator}.")
+
+        discriminator_output_on_gan = self.discriminator(data_for_discriminator_input)
+        self.logger.info(f"GAN Build: Discriminator output tensor (on GAN): {discriminator_output_on_gan}")
+
+        # --- Create GAN Model ---
+        # gan_keras_inputs_for_model_definition should be an empty list if generator takes no Keras inputs.
+        if not gan_keras_inputs_for_model_definition and (self.generator.inputs and len(self.generator.inputs) > 0) : # Should have been caught by earlier check on expected_num_gen_inputs
+            self.logger.error("GAN Build: gan_keras_inputs_for_model_definition is empty, but generator has Keras inputs. Cannot define GAN model inputs.")
+            raise ValueError("GAN model input list is empty despite generator needing inputs.")
+
+        gan_model = Model(inputs=gan_keras_inputs_for_model_definition, outputs=discriminator_output_on_gan, name="GAN_Model_Refactored")
+        self.logger.info("GAN model (refactored) created successfully.")
+        gan_model.summary(print_fn=self.logger.info)
+
+        # Plot GAN model
         try:
             plot_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
             os.makedirs(plot_dir, exist_ok=True)
-            plot_file_name = self.params.get("gan_model_plot_file", "gan_architecture.png")
+            plot_file_name = self.params.get("gan_model_plot_file", "gan_architecture.png") 
             plot_path = os.path.join(plot_dir, plot_file_name)
             dpi = self.params.get("model_plot_dpi", 300)
-            plot_model(gan, to_file=plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
-            self.logger.info(f"GAN architecture plot saved to {plot_path}")
-
-            # Plot generator component as used in GAN (if different from standalone plot, or for context)
-            if self.generator:
-                 gen_plot_filename = self.params.get("generator_model_plot_file", "generator_architecture.png").replace(".png", "_component_in_gan.png")
-                 gen_plot_path = os.path.join(plot_dir, gen_plot_filename)
-                 plot_model(self.generator, to_file=gen_plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
-                 self.logger.info(f"GAN's generator component plot saved to {gen_plot_path}")
-
+            plot_model(gan_model, to_file=plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
+            self.logger.info(f"GAN architecture plot (refactored) saved to {plot_path}")
         except Exception as e:
-            self.logger.warning(f"Could not plot GAN model or its generator component: {e}. Ensure pydot and graphviz are installed.")
-        return gan
+            self.logger.warning(f"Could not plot GAN model (refactored): {e}. Ensure pydot and graphviz are installed if not already.")
 
-    def train(self, x_train_file: str, y_train_file: str = None, x_test_file: str = None, y_test_file: str = None):
-        self.logger.info(f"GANTrainerPlugin (train): Starting GAN training with x_train_file: {x_train_file}")
-        # Load data using pandas for CSV
-        try:
-            data_df = pd.read_csv(x_train_file)
-            self.logger.info(f"GANTrainerPlugin (train): Successfully loaded CSV data from {x_train_file}. Shape: {data_df.shape}")
-        except Exception as e:
-            self.logger.error(f"GANTrainerPlugin (train): Error loading CSV file {x_train_file}. Error: {e}")
-            raise
+        return gan_model
 
-        # Drop DATE_TIME column if it exists
-        if 'DATE_TIME' in data_df.columns:
-            data_df = data_df.drop(columns=['DATE_TIME'])
-            self.logger.info(f"GANTrainerPlugin (train): Dropped 'DATE_TIME' column. New shape: {data_df.shape}")
-        
-        # Convert to numpy array
-        x_train_data_full = data_df.to_numpy()
-        self.logger.info(f"GANTrainerPlugin (train): Converted data to NumPy array. Shape: {x_train_data_full.shape}")
-
-        # Create sequences
-        seq_len_param = self.params.get('seq_len', 18)
-        if x_train_data_full.shape[0] < seq_len_param:
-            self.logger.error(f"GANTrainerPlugin (train): Data length ({x_train_data_full.shape[0]}) is less than seq_len ({seq_len_param}). Cannot create sequences.")
-            raise ValueError(f"Data length ({x_train_data_full.shape[0]}) is less than seq_len ({seq_len_param}).")
-
-        num_samples = x_train_data_full.shape[0] - seq_len_param + 1
-        num_features = x_train_data_full.shape[1]
-        
-        x_train_sequences = np.array([x_train_data_full[i:i+seq_len_param] for i in range(num_samples)])
-        
-        if x_train_sequences.ndim == 2: # Should be 3D, but if num_features is 1 and seq_len is also 1, it might become 2D.
-            # This case might indicate an issue or a very specific scenario.
-            # For now, let's ensure it's 3D if num_samples > 0
-            if num_samples > 0 :
-                 x_train_sequences = x_train_sequences.reshape(num_samples, seq_len_param, num_features if num_features > 0 else 1)
-            else: # if num_samples is 0, it means not enough data to form even one sequence
-                self.logger.error(f"GANTrainerPlugin (train): Not enough data to form any sequences. num_samples: {num_samples}, seq_len: {seq_len_param}, data_shape: {x_train_data_full.shape}")
-                # Decide how to handle this: raise error, return, or proceed with empty data if the rest of the code can handle it.
-                # For now, let's make it an empty array with the correct number of dimensions if possible, or raise error.
-                if num_features > 0:
-                    x_train_sequences = np.empty((0, seq_len_param, num_features))
-                else: # This case (0 features) is highly problematic
-                    self.logger.error(f"GANTrainerPlugin (train): Data has 0 features after processing. Original shape: {data_df.shape}, after numpy conversion: {x_train_data_full.shape}")
-                    raise ValueError("Data has 0 features after processing.")
-
-
-        self.logger.info(f"GANTrainerPlugin (train): Created sequences. Shape: {x_train_sequences.shape}")
-        
-        # x_train_data = np.load(x_train_file, allow_pickle=True) # Old way, for .npy files
-        x_train_data = x_train_sequences # Use the processed sequences
-
-        if x_train_data.ndim == 2:
-            x_train_data = np.expand_dims(x_train_data, axis=1) # Add sequence length dimension
-            self.logger.info(f"GANTrainerPlugin (train): Expanded dims for 2D data. New shape: {x_train_data.shape}")
-
-        # Adversarial ground truths
-        # valid = np.ones((x_train_data.shape[0], 1)) # OLD: Based on full dataset size
-        # fake = np.zeros((x_train_data.shape[0], 1))  # OLD: Based on full dataset size
-        current_batch_size = self.params.get("gan_batch_size", 32) # Get batch size from params
-        valid_labels = np.ones((current_batch_size, 1)) # Renamed from 'valid'
-        fake_labels = np.zeros((current_batch_size, 1))  # Renamed from 'fake'
-
-        # History lists for plotting (already present)
-        d_losses_history = []
-        g_losses_history = []
-        # d_accs_history = [] # Already present, will be used for d_acc_avg
-
-        # For self.full_metrics_history (more detailed)
-        # self.full_metrics_history = [] # Already initialized in __init__
-
-        current_lr_g = float(tf.keras.backend.get_value(self.g_optimizer.learning_rate))
-        current_lr_d = float(tf.keras.backend.get_value(self.d_optimizer.learning_rate))
-
-        self.logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs, batch size {current_batch_size}...")
-        self.logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
-        self.logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
-        self.logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
-        self.logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
-
-
-        for epoch in range(self.params["gan_epochs"]):
-            start_time_epoch = time.time()
-            
-            # ---------------------
-            #  Train Discriminator
-            # ---------------------
-            
-            # Get a random batch of real samples
-            idx = np.random.randint(0, x_train_data.shape[0], current_batch_size)
-            # real_data_batch_raw = x_train_data[idx] # OLD LINE
-            real_data_batch_raw_full_features = x_train_data[idx] # (batch_size, seq_len, features_from_preprocessor)
-
-            # Slice to get only base features for TI calculation
-            # Ensure self.num_base_features is valid before slicing
-            if hasattr(self, 'num_base_features') and self.num_base_features > 0 and \
-               real_data_batch_raw_full_features.shape[-1] > self.num_base_features:
-                real_data_batch_base_features = real_data_batch_raw_full_features[:, :, :self.num_base_features]
-                if hasattr(self, 'logger') and self.logger:
-                    self.logger.info(
-                        f"GANTrainerPlugin (train): Sliced real_data_batch_raw_full_features from {real_data_batch_raw_full_features.shape[-1]} "
-                        f"to {self.num_base_features} features for TI calculation (real data)."
-                    )
-            else:
-                real_data_batch_base_features = real_data_batch_raw_full_features
-            
-            # Calculate TIs for the real data batch to match discriminator's expected input
-            # real_data_batch_base_features should have shape (batch_size, seq_len, self.num_base_features)
-            # The _calculate_technical_indicators method will verify this.
-            # real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_raw) # OLD LINE
-            real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_base_features)
-
-            # Generate a batch of new series using the FeederPlugin and Generator
-            feeder_output_d = self.feeder_plugin_instance.generate(n_ticks_to_generate=current_batch_size) # Renamed from feeder_output
-            
-            # Prepare inputs for the generator model (used for predicting base features)
-            inputs_for_generator_predict = [] # RENAMED from generator_inputs_for_prediction_and_gan_step
-            if self.generator and hasattr(self, 'generator_actual_input_names_ordered') and self.generator_actual_input_names_ordered:
-                for i, name in enumerate(self.generator_actual_input_names_ordered):
-                    if name not in feeder_output_d:
-                        self.logger.error(
-                            f"GAN training: Critical error - Expected input '{name}' for generator (index {i}) "
-                            f"not found in FeederPlugin output. Available keys: {list(feeder_output_d.keys())}. "
-                            f"Generator input names expected: {self.generator_actual_input_names_ordered}"
-                        )
-                        raise KeyError(f"Generator input '{name}' missing from feeder output. Check feeder plugin and generator_actual_input_names_ordered.")
-                    
-                    data_from_feeder = feeder_output_d[name]
-                    
-                    if not isinstance(data_from_feeder, np.ndarray):
-                        self.logger.warning(f"Data for input '{name}' from feeder is not a numpy array (type: {type(data_from_feeder)}). Attempting to convert.")
-                        try:
-                            data_from_feeder = np.array(data_from_feeder)
-                        except Exception as e_conv:
-                            self.logger.error(f"Failed to convert input '{name}' to numpy array: {e_conv}")
-                            raise TypeError(f"Input '{name}' from feeder could not be converted to a numpy array.")
-
-                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Feeder data shape: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}")
-
-                    expected_keras_tensor = self.generator.inputs[i] 
-                    expected_shape = expected_keras_tensor.shape
-                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}', Keras Input: '{expected_keras_tensor.name}'): Model expects input shape: {expected_shape}")
-
-                    # Basic Slicing/Shaping for Generator Inputs
-                    if data_from_feeder is not None and hasattr(data_from_feeder, 'shape'):
-                        # Case 1: Generator expects 2D (batch, features), Feeder provides 2D (batch, features_feeder)
-                        if len(expected_shape) == 2 and expected_shape[1] is not None and data_from_feeder.ndim == 2:
-                            if data_from_feeder.shape[1] > expected_shape[1]:
-                                self.logger.info(f"  Slicing 2D input '{name}' from {data_from_feeder.shape[1]} to {expected_shape[1]} features to match model input '{expected_keras_tensor.name}'.")
-                                data_from_feeder = data_from_feeder[:, :expected_shape[1]]
-                            elif data_from_feeder.shape[1] < expected_shape[1]:
-                                self.logger.warning(f"  Feeder 2D features ({data_from_feeder.shape[1]}) for '{name}' < expected by model input '{expected_keras_tensor.name}' ({expected_shape[1]}). Potential downstream error.")
-                        
-                        # Case 2: Generator expects 3D (batch, seq, features), Feeder provides 3D (batch, seq, features_feeder)
-                        elif len(expected_shape) == 3 and expected_shape[2] is not None and data_from_feeder.ndim == 3:
-                            # Slice features if feeder has more
-                            if data_from_feeder.shape[2] > expected_shape[2]:
-                                self.logger.info(f"  Slicing 3D input '{name}' features from {data_from_feeder.shape[2]} to {expected_shape[2]} to match model input '{expected_keras_tensor.name}'.")
-                                data_from_feeder = data_from_feeder[:, :, :expected_shape[2]]
-                            elif data_from_feeder.shape[2] < expected_shape[2]:
-                                self.logger.warning(f"  Feeder 3D features ({data_from_feeder.shape[2]}) for '{name}' < expected by model input '{expected_keras_tensor.name}' ({expected_shape[2]}). Potential downstream error.")
-                            
-                            # Check sequence length mismatch (optional: add slicing if feeder is longer, or padding if shorter)
-                            if expected_shape[1] is not None and data_from_feeder.shape[1] != expected_shape[1]:
-                                self.logger.warning(f"  Feeder 3D seq_len ({data_from_feeder.shape[1]}) for '{name}' != expected by model input '{expected_keras_tensor.name}' ({expected_shape[1]}). Model will receive {data_from_feeder.shape[1]} sequence length.")
-                        
-                        # Case 3: Dimensionality mismatch (e.g. feeder 2D, model expects 3D or vice-versa)
-                        elif data_from_feeder.ndim != len(expected_shape):
-                            self.logger.warning(f"  Dimensionality mismatch for input '{name}': Feeder is {data_from_feeder.ndim}D (shape {data_from_feeder.shape}), model input '{expected_keras_tensor.name}' expects {len(expected_shape)}D (shape {expected_shape}). No auto-slicing/reshaping applied for this mismatch. This will likely cause an error.")
-                        else:
-                            self.logger.info(f"  No specific slicing applied for input '{name}' with feeder shape {data_from_feeder.shape} and expected model shape {expected_shape} for input '{expected_keras_tensor.name}'.")
-                    
-                    inputs_for_generator_predict.append(data_from_feeder)
-                    self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Appended data. Final shape for predict: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}. List size: {len(inputs_for_generator_predict)}")
-
-            elif not self.generator:
-                 self.logger.error("GAN training: Generator model is None. Cannot make predictions or train GAN.")
-                 raise ValueError("Generator model is None, cannot proceed.")
-            else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
-                 self.logger.error(
-                     "GAN training: self.generator_actual_input_names_ordered is missing or empty, cannot determine Generator inputs. "
-                     f"Generator defined inputs: {[inp.name for inp in self.generator.inputs] if self.generator and self.generator.inputs else 'N/A'}."
-                 )
-                 raise AttributeError("self.generator_actual_input_names_ordered is not properly set for Generator input preparation.")
-
-            generated_base_features_raw = self.generator.predict(inputs_for_generator_predict, verbose=0)
-            self.logger.info(f"GANTrainerPlugin (train): Raw generator output shape after predict(): {generated_base_features_raw.shape if generated_base_features_raw is not None else 'None'}") # DIAGNOSTIC LOG
-            
-            if generated_base_features_raw is not None and generated_base_features_raw.ndim == 3:
-                actual_gen_seq_len = generated_base_features_raw.shape[1]
-                min_required_seq_len_for_ti = self.params.get('ti_calculation_min_lookback', 15) 
-                if actual_gen_seq_len < min_required_seq_len_for_ti:
-                    self.logger.warning(
-                        f"Generated data has sequence length {actual_gen_seq_len}, which is less than the typical minimum "
-                        f"({min_required_seq_len_for_ti}) required for some technical indicators (e.g., MACD, longer EMAs). "
-                        f"This may lead to errors or NaN/zero TIs for generated data. "
-                        f"Consider: \n1. Verifying the generator model's architecture to ensure it produces longer sequences. "
-                        f"\n2. Checking if 'gan_generator_output_actual_seq_len' parameter (currently {self.generator_output_actual_seq_len if hasattr(self, 'generator_output_actual_seq_len') else 'N/A'}) "
-                        f"is influencing the effective output sequence length processed by the GAN."
-                        f"\n3. Adjusting TI parameters in 'tas_strategy_for_discriminator_tis' to require shorter lookbacks if appropriate."
-                    )
-
-            # Ensure generated_base_features_raw is 3D before TI calculation
-            if generated_base_features_raw.ndim == 2:
-                target_reshape_dim_d = self.actual_generator_output_dim if self.actual_generator_output_dim > 0 else -1
-                generated_base_features_raw = generated_base_features_raw.reshape((current_batch_size, self.generator_output_actual_seq_len, target_reshape_dim_d))
-            
-            if generated_base_features_raw.shape[-1] != self.num_base_features and self.num_base_features > 0:
-                generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
-
-            generated_features_with_tis = self._calculate_technical_indicators(
-                generated_base_features_raw, 
-                data_type_for_logging="generated"
-            )
-
-            if self.discriminator: self.discriminator.trainable = True
-
-            d_loss_real_metrics = self.discriminator.train_on_batch(real_data_for_discriminator, valid_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
-            d_loss_fake_metrics = self.discriminator.train_on_batch(generated_features_with_tis, fake_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
-            
-            d_loss = 0.5 * (d_loss_real_metrics['loss'] + d_loss_fake_metrics['loss'])
-
-            # ---------------------
-            #  Train Generator
-            # ---------------------
-
-            # Freeze discriminator when training generator
-            if self.discriminator: self.discriminator.trainable = False
-
-            # Prepare inputs specifically for the GAN model's train_on_batch call
-            inputs_for_gan_train_on_batch = []
-            
-            feeder_key_for_latent = self.params.get("generator_decoder_input_name_latent")
-            feeder_key_for_conditional = self.params.get("generator_decoder_input_name_conditions")
-            feeder_key_for_context = self.params.get("generator_decoder_input_name_context")
-
-            # Order of GAN inputs is defined in _build_gan: latent, conditional, context.
-            # self.gan.inputs[0] -> latent
-            # self.gan.inputs[1] -> conditional
-            # self.gan.inputs[2] -> context
-            # This list maps the GAN input index to its corresponding feeder key and role name.
-            # It assumes self.gan always has 3 inputs in this order.
-            # If _build_gan changes to have optional/different inputs, this mapping needs to be more dynamic.
-            gan_input_definitions_ordered = []
-            if len(self.gan.inputs) > 0: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_latent, "role": "Latent Vector", "gan_input_idx": 0})
-            if len(self.gan.inputs) > 1: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_conditional, "role": "Conditional Data", "gan_input_idx": 1})
-            if len(self.gan.inputs) > 2: gan_input_definitions_ordered.append({"feeder_key": feeder_key_for_context, "role": "Context Vector", "gan_input_idx": 2})
-
-            if len(self.gan.inputs) != len(gan_input_definitions_ordered):
-                self.logger.error(
-                    f"GAN Input Preparation: Mismatch between number of GAN model inputs ({len(self.gan.inputs)}) "
-                    f"and the number of GAN input definitions prepared ({len(gan_input_definitions_ordered)}). "
-                    f"GAN Input Names from model: {[inp.name for inp in self.gan.inputs]}. "
-                    f"This indicates a potential inconsistency with how _build_gan structures GAN inputs."
-                )
-                # This is a critical state, as we cannot reliably map feeder data to GAN inputs.
-                raise ValueError("GAN input structure mismatch. Cannot prepare inputs for GAN training.")
-
-            for i in range(len(self.gan.inputs)):
-                current_input_def = gan_input_definitions_ordered[i]
-                feeder_key_name = current_input_def["feeder_key"]
-                gan_input_keras_tensor = self.gan.inputs[i] # KerasTensor for the i-th input of GAN model
-
-                if not feeder_key_name:
-                    self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Feeder key name for GAN input role '{current_input_def['role']}' (GAN input index {i}, Keras name '{gan_input_keras_tensor.name}') is not configured (None/empty in params). This input is required by the GAN model.")
-                    raise ValueError(f"Feeder key for GAN input role '{current_input_def['role']}' is not configured. Check 'generator_decoder_input_name_...' params. GAN expects this input.")
-
-                if feeder_key_name not in feeder_output_d:
-                    self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Feeder key '{feeder_key_name}' for GAN input '{gan_input_keras_tensor.name}' (role: {current_input_def['role']}) not found in feeder_output_d. Available keys: {list(feeder_output_d.keys())}")
-                    raise KeyError(f"Missing '{feeder_key_name}' in feeder output for GAN input '{gan_input_keras_tensor.name}'.")
-                
-                data_for_gan_input = feeder_output_d[feeder_key_name]
-                
-                if not isinstance(data_for_gan_input, np.ndarray):
-                    self.logger.warning(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, Feeder Key: '{feeder_key_name}'): Data is not a numpy array (type: {type(data_for_gan_input)}). Attempting to convert.")
-                    try:
-                        data_for_gan_input = np.array(data_for_gan_input)
-                    except Exception as e_conv:
-                        self.logger.error(f"GAN Input Prep for GAN.train_on_batch: Failed to convert input for role '{current_input_def['role']}' (feeder key '{feeder_key_name}') to numpy array: {e_conv}")
-                        raise TypeError(f"Input for GAN role '{current_input_def['role']}' from feeder could not be converted to a numpy array.")
-
-                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}', Feeder Key: '{feeder_key_name}'): Original feeder data shape: {data_for_gan_input.shape if hasattr(data_for_gan_input, 'shape') else 'N/A'}")
-
-                expected_gan_input_shape = gan_input_keras_tensor.shape 
-                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): GAN model expects input shape: {expected_gan_input_shape}")
-
-                # Slicing logic for this specific GAN input
-                if len(expected_gan_input_shape) == 2 and expected_gan_input_shape[1] is not None: # e.g. conditional_data (None, 10)
-                    expected_features = expected_gan_input_shape[1]
-                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Detected 2D GAN input. Expected features: {expected_features}")
-                    
-                    actual_feeder_features = data_for_gan_input.shape[1] if data_for_gan_input.ndim == 2 else -1
-                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Actual features from feeder: {actual_feeder_features} (ndim: {data_for_gan_input.ndim})")
-
-                    if data_for_gan_input.ndim == 2 and actual_feeder_features != expected_features:
-                        self.logger.warning(
-                            f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch between feeder output features ({actual_feeder_features}) "
-                            f"and GAN's expected features ({expected_features}). Slicing feeder output to the first {expected_features} features."
-                        )
-                        data_for_gan_input = data_for_gan_input[:, :expected_features]
-                        self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced. New data shape for GAN: {data_for_gan_input.shape}")
-                    elif data_for_gan_input.ndim == 2 and actual_feeder_features == expected_features:
-                        self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Feeder features ({actual_feeder_features}) MATCH GAN expected features ({expected_features}). No slicing needed.")
-                    elif data_for_gan_input.ndim != 2:
-                        self.logger.error(
-                            f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Expected 2D array from feeder but got {data_for_gan_input.ndim}D. "
-                            f"Feeder shape: {data_for_gan_input.shape}, GAN expects: {expected_gan_input_shape}. This is a critical mismatch."
-                        )
-                        raise ValueError(f"Shape mismatch for GAN input '{gan_input_keras_tensor.name}'. Expected 2D, got {data_for_gan_input.ndim}D.")
-                
-                elif len(expected_gan_input_shape) == 3 and expected_gan_input_shape[1] is not None and expected_gan_input_shape[2] is not None: # e.g. latent_vector (None, seq, dim)
-                    expected_seq_len = expected_gan_input_shape[1]
-                    expected_features = expected_gan_input_shape[2]
-                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Detected 3D GAN input. Expected seq_len: {expected_seq_len}, Expected features: {expected_features}")
-
-                    actual_feeder_seq_len = data_for_gan_input.shape[1] if data_for_gan_input.ndim == 3 else -1
-                    actual_feeder_features = data_for_gan_input.shape[2] if data_for_gan_input.ndim == 3 else -1
-                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Actual feeder seq_len: {actual_feeder_seq_len}, Actual feeder features: {actual_feeder_features} (ndim: {data_for_gan_input.ndim})")
-
-                    if data_for_gan_input.ndim == 3:
-                        # Slicing for sequence length
-                        if actual_feeder_seq_len != expected_seq_len:
-                            self.logger.warning(
-                                f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch in sequence length. Feeder: {actual_feeder_seq_len}, GAN Expected: {expected_seq_len}. Slicing data to {expected_seq_len}."
-                            )
-                            data_for_gan_input = data_for_gan_input[:, :expected_seq_len, :]
-                            self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced seq_len. New data shape for GAN: {data_for_gan_input.shape}")
-                            actual_feeder_seq_len = data_for_gan_input.shape[1] # Update after slicing for feature check
-
-                        # Slicing for features
-                        if actual_feeder_features != expected_features: # Check features after potential seq_len slice
-                             # If actual_feeder_features was based on original data, re-evaluate if seq_len slice happened
-                            current_features_dim = data_for_gan_input.shape[2]
-                            if current_features_dim != expected_features:
-                                self.logger.warning(
-                                    f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Mismatch in features for sequence. Feeder (possibly after seq_len slice): {current_features_dim}, GAN Expected: {expected_features}. Slicing features."
-                                )
-                                data_for_gan_input = data_for_gan_input[:, :, :expected_features]
-                                self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}): Sliced features. New data shape for GAN: {data_for_gan_input.shape}")
-
-                    elif data_for_gan_input.ndim != 3:
-                        self.logger.error(
-                           f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): Expected 3D array from feeder but got {data_for_gan_input.ndim}D. "
-                           f"Feeder shape: {data_for_gan_input.shape}, GAN expects: {expected_gan_input_shape}. This is a critical mismatch."
-                        )
-                        raise ValueError(f"Shape mismatch for GAN input '{gan_input_keras_tensor.name}'. Expected 3D, got {data_for_gan_input.ndim}D.")
-                else:
-                    self.logger.info(f"GAN Input Prep for GAN.train_on_batch (Role: {current_input_def['role']}, GAN Input Idx: {i}, Name: '{gan_input_keras_tensor.name}'): GAN input shape {expected_gan_input_shape} is not 2D or 3D with known feature/seq_len dims, or has dynamic components (None) that are not features/seq_len. Using data as-is from feeder. Current shape: {data_for_gan_input.shape}")
-
-                inputs_for_gan_train_on_batch.append(data_for_gan_input)
-            
-            if not inputs_for_gan_train_on_batch and self.gan.inputs:
-                self.logger.error(
-                    "GAN training: The list of inputs for the GAN model (inputs_for_gan_train_on_batch) is empty, "
-                    "but GAN model expects inputs. This should not happen if GAN has inputs."
-                )
-                raise ValueError("GAN model inputs list is empty before train_on_batch, but GAN model has inputs.")
-            elif len(inputs_for_gan_train_on_batch) != len(self.gan.inputs):
-                 self.logger.error(
-                    f"GAN training: Mismatch in number of prepared inputs ({len(inputs_for_gan_train_on_batch)}) vs "
-                    f"GAN model expected inputs ({len(self.gan.inputs)}). This is a critical error."
-                )
-                 raise ValueError("Mismatch in number of prepared inputs for GAN train_on_batch.")
-
-
-            g_loss_metrics = self.gan.train_on_batch(inputs_for_gan_train_on_batch, valid_labels, return_dict=True)
-
-            # Log progress
-            elapsed_time = time.time() - start_time_epoch
-            if epoch % 100 == 0 or epoch == self.params["gan_epochs"] - 1:
-                self.logger.info(
-                    f"Epoch {epoch}/{self.params['gan_epochs']} - "
-                    f"D loss: {d_loss:.4f}, G loss: {g_loss_metrics['loss']:.4f} - "
-                    f"Elapsed time: {elapsed_time:.2f}s"
-                )
-            
-            # Learning rate reduction and early stopping checks (already present)
-            # ... existing logic for learning rate reduction and early stopping ...
-
-            # Save models and plots at specified intervals
-            if (epoch + 1) % self.params["gan_save_interval"] == 0 or epoch == self.params["gan_epochs"] - 1:
-                self.save_models(epoch)
-                self.plot_losses(epoch)
-
-        # Final model save and metrics export
-        self.save_models(self.params["gan_epochs"] - 1)
-        self.export_training_metrics()
-
-        self.logger.info("GAN training completed.")
-
-    def _calculate_technical_indicators(self, base_features_batch_param: np.ndarray, data_type_for_logging: str = "real") -> np.ndarray:
-        """
-        Calculate technical indicators for a batch of data using the configured TA strategy.
-        Args:
-            base_features_batch_param: Input data batch. Shape: (batch_size, seq_len, num_base_features)
-            data_type_for_logging: String to indicate data type (real/generated) for logging.
-        Returns:
-            Output data with TIs. Shape: (batch_size, seq_len, num_base_features + num_tis)
-        """
-        if not hasattr(self, 'logger') or self.logger is None:
-            import logging # Import here to avoid top-level if not always needed
-            # Create a logger instance if it doesn't exist, specific to this module or class
-            # Using __name__ will typically give 'tsg_plugins.gan_trainer_plugin'
-            # or similar, which is good practice.
-            logger_name = self.__class__.__name__ if hasattr(self, '__class__') else 'GANTrainerPlugin_fallback'
-            self.logger = logging.getLogger(logger_name)
-            # Configure the logger if it's newly created and has no handlers 
-            # (to ensure messages are visible if no root logger config exists)
-            if not self.logger.hasHandlers():
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
-                self.logger.setLevel(logging.INFO) # Or another appropriate default level
-            self.logger.warning(
-                f"GANTrainerPlugin.logger was not properly initialized before calling _calculate_technical_indicators. "
-                f"A fallback logger '{logger_name}' has been set up."
-            )
-
-        self.logger.info(
-            f"_calculate_technical_indicators called for {data_type_for_logging} data. "
-            f"Input shape: {base_features_batch_param.shape if base_features_batch_param is not None else 'None'}"
-        )
-
-        if base_features_batch_param is None or base_features_batch_param.size == 0:
-            self.logger.error(f"Input data for TI calculation ({data_type_for_logging}) is None or empty. Returning None or empty array.")
-            return base_features_batch_param
-
-        if base_features_batch_param.ndim == 2:
-            self.logger.warning(
-                f"Input data for TI calculation ({data_type_for_logging}) is 2D {base_features_batch_param.shape}. "
-                f"Expected 3D (batch, seq, features). Attempting to reshape."
-            )
-            # Try to infer batch_size=1 if shape matches (seq_len, num_base_features)
-            if hasattr(self, 'seq_len') and hasattr(self, 'num_base_features') and \
-               base_features_batch_param.shape[0] == self.seq_len and \
-               base_features_batch_param.shape[1] == self.num_base_features:
-                base_features_batch_param = np.expand_dims(base_features_batch_param, axis=0)
-                self.logger.info(f"Reshaped 2D input to {base_features_batch_param.shape} assuming batch_size=1.")
-            else:
-                self.logger.error(
-                    f"Cannot reliably reshape 2D input {base_features_batch_param.shape} to 3D for TI calculation. "
-                    f"Required attributes (seq_len, num_base_features) might be missing or don't match. "
-                    f"Returning base features as is."
-                )
-                return base_features_batch_param
-        elif base_features_batch_param.ndim != 3:
-            self.logger.error(
-                f"Input data for TI calculation ({data_type_for_logging}) has unexpected dimension {base_features_batch_param.ndim}. "
-                f"Expected 3D. Returning base features as is."
-            )
-            return base_features_batch_param
-
-        if not hasattr(self, 'ti_names_to_calculate') or not self.ti_names_to_calculate or \
-           not hasattr(self, 'tas_strategy_for_discriminator_tis') or self.tas_strategy_for_discriminator_tis is None:
-            self.logger.info(
-                f"No TIs to calculate or TA strategy not defined for {data_type_for_logging} data. "
-                f"Returning base features as is. Shape: {base_features_batch_param.shape}"
-            )
-            return base_features_batch_param
-
-        current_batch_size, current_seq_len, current_num_base_features = base_features_batch_param.shape
-
-        if current_num_base_features == 0:
-            self.logger.warning(
-                f"Input for TI calculation ({data_type_for_logging}) has 0 base features (shape: {base_features_batch_param.shape}). "
-                f"Cannot calculate TIs. Returning base features as is."
-            )
-            return base_features_batch_param
-            
-        reshaped_for_ta = base_features_batch_param.reshape(-1, current_num_base_features)
-        
-        col_names_ok = False
-        if hasattr(self, 'base_feature_names_ordered') and self.base_feature_names_ordered:
-            if len(self.base_feature_names_ordered) >= current_num_base_features:
-                col_names = self.base_feature_names_ordered[:current_num_base_features]
-                col_names_ok = True
-            else:
-                self.logger.error(
-                    f"Mismatch for {data_type_for_logging}: self.base_feature_names_ordered has {len(self.base_feature_names_ordered)} names, "
-                    f"but data has {current_num_base_features} base features. "
-                    f"Proceeding with default column names, but TIs might fail."
-                )
-        
-        if not col_names_ok:
-            self.logger.warning(
-                f"self.base_feature_names_ordered is not set, empty, or insufficient for {current_num_base_features} features "
-                f"for {data_type_for_logging} data. Using default column names (e.g., 'col_0', 'col_1', ...). "
-                f"pandas-ta might infer 'close' from the last column, or TIs requiring specific names may fail."
-            )
-            col_names = [f'col_{i}' for i in range(current_num_base_features)]
-
-        data_df = pd.DataFrame(reshaped_for_ta, columns=col_names)
-
-        if not data_df.empty:
-            if 'close' not in data_df.columns:
-                if 'Close' in data_df.columns: # Handle case variations
-                    data_df.rename(columns={'Close': 'close'}, inplace=True)
-                    self.logger.info(f"Renamed 'Close' to 'close' for {data_type_for_logging} data TI calculation.")
-                elif data_df.shape[1] > 0: # If 'close' is still not there, use the last column.
-                    last_col_name = data_df.columns[-1]
-                    self.logger.info(
-                        f"Column 'close' not found in base features for {data_type_for_logging}. "
-                        f"Assigning last column ('{last_col_name}') as 'close' for TI calculation."
-                    )
-                    data_df['close'] = data_df.iloc[:, -1]
-                else: # Should not happen if current_num_base_features > 0
-                    self.logger.warning(f"Cannot assign 'close' column for {data_type_for_logging} as DataFrame has no columns after setup.")
-        else:
-            self.logger.warning(f"DataFrame for TI calculation ({data_type_for_logging}) is empty before applying strategy. No TIs will be calculated.")
-
-
-        ti_results_df = pd.DataFrame() 
-        try:
-            if not data_df.empty and self.tas_strategy_for_discriminator_tis and self.tas_strategy_for_discriminator_tis.ta:
-                self.logger.info(f"Applying TA strategy to {data_type_for_logging} data (shape {data_df.shape}) with columns: {data_df.columns.tolist()}")
-                ti_results_df = data_df.ta.strategy(self.tas_strategy_for_discriminator_tis, append=False) 
-                
-                if ti_results_df is None:
-                    self.logger.error(f"pandas_ta.strategy returned None for {data_type_for_logging} data. This is unexpected.")
-                    ti_results_df = pd.DataFrame()
-                elif not ti_results_df.empty:
-                    original_ti_cols = ti_results_df.columns.tolist()
-                    nan_count_before_fill = ti_results_df.isnull().sum().sum()
-                    ti_results_df.fillna(0, inplace=True) # Fill NaNs, common for ML inputs
-                    nan_count_after_fill = ti_results_df.isnull().sum().sum()
-                    self.logger.info(
-                        f"Calculated TIs for {data_type_for_logging} data using df.ta.strategy(). "
-                        f"Original TI columns: {original_ti_cols}. TI results shape: {ti_results_df.shape}. "
-                        f"NaNs before fill: {nan_count_before_fill}, after fill (with 0): {nan_count_after_fill}."
-                    )
-                else: # ti_results_df is an empty DataFrame
-                    self.logger.info(f"df.ta.strategy() produced an empty DataFrame for TIs for {data_type_for_logging} data.")
-            else:
-                if data_df.empty:
-                     self.logger.info(f"Skipping TA strategy for {data_type_for_logging} because input DataFrame is empty.")
-                else:
-                     self.logger.info(f"TA strategy (self.tas_strategy_for_discriminator_tis) or its .ta list is empty for {data_type_for_logging}. No TIs calculated.")
-        except Exception as e:
-            self.logger.error(f"Error calculating TIs for {data_type_for_logging} data using df.ta.strategy(): {e}", exc_info=True)
-            # Try to get current_seq_len if it's defined in this scope, otherwise provide a placeholder.
-            seq_len_info = 'unknown'
-            if 'current_seq_len' in locals() and current_seq_len is not None:
-                seq_len_info = current_seq_len
-            elif hasattr(self, 'seq_len') and self.seq_len is not None:
-                seq_len_info = self.seq_len
-                
-            self.logger.warning(
-                f"This error within pandas-ta often occurs if 'seq_len' (currently ~{seq_len_info}) "
-                f"is too short for the parameters of the Technical Indicators in your strategy "
-                f"(e.g., MACD, EMAs require a minimum number of data points). "
-                f"Please review your TA strategy (defined in '{self.params.get('tas_strategy_json_path', 'config')}') "
-                f"and ensure TI parameters are compatible with the sequence length. "
-                f"Falling back to using zero TIs for {data_type_for_logging} data."
-            )
-            ti_results_df = pd.DataFrame() # Ensure it's an empty DataFrame on error
-
-        # Ensure self.num_tis is available and is an int
-        expected_num_ti_features = getattr(self, 'num_tis', 0)
-        if not isinstance(expected_num_ti_features, int):
-            self.logger.warning(f"self.num_tis is not an int ({expected_num_ti_features}). Defaulting to 0 for expected TI features.")
-            expected_num_ti_features = 0
-
-        if ti_results_df.empty:
-            self.logger.warning(
-                f"TI calculation resulted in an empty DataFrame for {data_type_for_logging} data. "
-                f"Expected num_tis from config: {expected_num_ti_features}."
-            )
-            if expected_num_ti_features > 0:
-                self.logger.warning(
-                    f"Appending {expected_num_ti_features} zero columns for TIs as calculation failed or yielded no results for {data_type_for_logging}."
-                )
-                zeros_for_tis = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
-                features_with_tis_batch = np.concatenate([base_features_batch_param, zeros_for_tis], axis=-1)
-                self.logger.info(f"Shape after appending zero TIs for {data_type_for_logging}: {features_with_tis_batch.shape}")
-                return features_with_tis_batch
-            else: # No TIs were expected (expected_num_ti_features == 0)
-                self.logger.info(f"No TIs were expected (self.num_tis = {expected_num_ti_features}), returning base features for {data_type_for_logging}. Shape: {base_features_batch_param.shape}")
-                return base_features_batch_param
-
-        num_tis_calculated = ti_results_df.shape[1]
-        try:
-            # Ensure the number of rows in ti_results_df matches reshaped_for_ta (batch_size * seq_len)
-            if ti_results_df.shape[0] != reshaped_for_ta.shape[0]:
-                self.logger.error(
-                    f"TI results for {data_type_for_logging} have {ti_results_df.shape[0]} rows, but expected {reshaped_for_ta.shape[0]} rows. "
-                    f"This indicates a severe issue in TI calculation (e.g., pandas-ta dropped/added rows). "
-                    f"Attempting to align by reindexing and filling, but this is risky."
-                )
-                # Attempt to reindex to the original DataFrame's index and fill with 0
-                # This assumes data_df.index is representative of (batch_size * seq_len)
-                ti_results_df = ti_results_df.reindex(data_df.index).fillna(0)
-                self.logger.info(f"After reindexing and filling, TI results shape for {data_type_for_logging}: {ti_results_df.shape}")
-                if ti_results_df.shape[0] != reshaped_for_ta.shape[0]: # Check again
-                    raise ValueError(f"Reindexing failed to align row counts for TIs for {data_type_for_logging}.")
-
-
-            ti_features_array_batch = ti_results_df.to_numpy().reshape(current_batch_size, current_seq_len, num_tis_calculated)
-        except ValueError as reshape_error:
-            self.logger.error(
-                f"Error reshaping TI results for {data_type_for_logging} from {ti_results_df.shape} to "
-                f"({current_batch_size}, {current_seq_len}, {num_tis_calculated}): {reshape_error}. "
-                f"Original base_features_batch_param shape: {base_features_batch_param.shape}. "
-                f"Data_df shape: {data_df.shape}. Reshaped_for_ta shape: {reshaped_for_ta.shape}. "
-                "This might happen if TI calculation altered the number of rows unexpectedly or other dimension mismatch."
-            )
-            # Fallback: if reshaping fails, behave as if TIs were empty
-            if expected_num_ti_features > 0:
-                self.logger.warning(f"Appending {expected_num_ti_features} zero columns for TIs due to reshape error for {data_type_for_logging}.")
-                zeros_for_tis = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
-                features_with_tis_batch = np.concatenate([base_features_batch_param, zeros_for_tis], axis=-1)
-                return features_with_tis_batch
-            else:
-                return base_features_batch_param
-
-        self.logger.info(
-            f"Successfully calculated and reshaped TIs for {data_type_for_logging} data. "
-            f"TI array shape: {ti_features_array_batch.shape} (num_tis_calculated={num_tis_calculated}). "
-            f"Expected num_tis based on config: {expected_num_ti_features}."
-        )
-
-        features_with_tis_batch = np.concatenate([base_features_batch_param, ti_features_array_batch], axis=-1)
-        
-        final_num_features = features_with_tis_batch.shape[-1]
-        # self.num_base_features should be current_num_base_features
-        # self.num_features_for_discriminator = self.num_base_features + self.num_tis
-        expected_total_features_for_discriminator = current_num_base_features + expected_num_ti_features
-
-        if final_num_features != expected_total_features_for_discriminator:
-            self.logger.warning(
-                f"TI Calculation ({data_type_for_logging}): Final feature count ({final_num_features}) "
-                f"does not match expected count for discriminator ({expected_total_features_for_discriminator}). "
-                f"Breakdown: Input base features = {current_num_base_features}, "
-                f"Calculated TI features = {num_tis_calculated}, "
-                f"Expected TI features (self.num_tis) = {expected_num_ti_features}. "
-                f"This mismatch (if num_tis_calculated != expected_num_ti_features) can cause downstream errors if the "
-                f"discriminator is strictly expecting {expected_total_features_for_discriminator} features."
-            )
-            # If the number of *actually calculated* TIs (num_tis_calculated) is what matters for the true data shape,
-            # but the discriminator was built using `expected_num_ti_features` (from self.num_tis),
-            # then a mismatch here will cause the ValueError.
-            # The logic above (padding with zeros if ti_results_df is empty or reshape_error) handles the case where N_calc is effectively 0.
-            # What about if N_calc > 0 but N_calc != N_exp?
-            # Example: self.num_tis = 20. Strategy actually produces 18 TIs.
-            # Then final_num_features = base + 18. Discriminator expects base + 20. Error.
-            # Or strategy produces 22 TIs. final_num_features = base + 22. Discriminator expects base + 20. Error.
-
-            # Let's re-evaluate: if num_tis_calculated != expected_num_ti_features, and expected_num_ti_features > 0
-            # we should ensure the output has expected_num_ti_features columns, possibly by padding/truncating ti_features_array_batch.
-            # Current code concatenates base + actual_calculated_TIs.
-            # If actual_calculated_TIs has N_calc columns, and expected is N_exp,
-            # and N_calc != N_exp, then final shape is base + N_calc.
-            # Discriminator expects base + N_exp.
-            # The padding logic for "empty ti_results_df" or "reshape_error" handles the case where N_calc is effectively 0.
-            # What about if N_calc > 0 and N_calc != N_exp?
-            # If we truncate to expected_num_ti_features, we might lose information.
-            # If we pad, we add zeros which might be interpreted as valid features.
-            # Let's add logic to align these in a way that makes sense.
-
-            # Forcing alignment if num_tis_calculated is different from expected_num_ti_features:
-            if num_tis_calculated != expected_num_ti_features and expected_num_ti_features > 0 :
-                self.logger.warning(f"Number of calculated TIs ({num_tis_calculated}) differs from expected ({expected_num_ti_features}) for {data_type_for_logging}. "
-                                    f"Adjusting TI features to match expected {expected_num_ti_features} columns by padding with zeros or truncating.")
-                
-                aligned_ti_features = np.zeros((current_batch_size, current_seq_len, expected_num_ti_features))
-                
-                if num_tis_calculated > 0: # Only copy if there's something to copy
-                    # Truncate if more TIs calculated than expected, or copy all if fewer.
-                    copy_cols = min(num_tis_calculated, expected_num_ti_features)
-                    aligned_ti_features[:, :, :copy_cols] = ti_features_array_batch[:, :, :copy_cols]
-                
-                # Re-concatenate with aligned TIs
-                features_with_tis_batch = np.concatenate([base_features_batch_param, aligned_ti_features], axis=-1)
-                final_num_features = features_with_tis_batch.shape[-1] # Update final_num_features
-                self.logger.info(f"After aligning TI columns for {data_type_for_logging}, final shape: {features_with_tis_batch.shape}. "
-                                 f"Now has {final_num_features} total features.")
-
-        self.logger.info(f"Concatenated {data_type_for_logging} base features with TIs. Final shape: {features_with_tis_batch.shape}")
-        return features_with_tis_batch
+    def _calculate_technical_indicators(self, df: pd.DataFrame,
+```
