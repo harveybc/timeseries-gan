@@ -1115,7 +1115,7 @@ class GANTrainerPlugin:
                     self.logger.info(f"Generator Input Prep (Loop {i}, Name: '{name}'): Feeder data shape: {data_from_feeder.shape if hasattr(data_from_feeder, 'shape') else 'N/A'}")
 
                     expected_input_config = self.generator.inputs[i] # This is a KerasTensor
-                    expected_input_shape_from_generator = expected_input_config.shape # e.g., TensorShape([None,  10]) or TensorShape([None, 18, 1])
+            elif not self.generator:
                  self.logger.error("GAN training: Generator model is None. Cannot make predictions or train GAN.")
                  raise ValueError("Generator model is None, cannot proceed.")
             else: # self.generator exists but generator_actual_input_names_ordered is not set or empty
