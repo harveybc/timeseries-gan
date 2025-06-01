@@ -928,54 +928,61 @@ class GANTrainerPlugin:
         
         x_train_sequences = np.array([x_train_data_full[i:i+seq_len_param] for i in range(num_samples)])
         
-        if x_train_sequences.ndim == 2: # Should be 3D, but if num_features is 1 and seq_len is also 1, it might become 2D.
-            # This case might indicate an issue or a very specific scenario.
-            # For now, let's ensure it's 3D if num_samples > 0
+        if x_train_sequences.ndim == 2: 
             if num_samples > 0 :
                  x_train_sequences = x_train_sequences.reshape(num_samples, seq_len_param, num_features if num_features > 0 else 1)
-            else: # if num_samples is 0, it means not enough data to form even one sequence
-                self.logger.error(f"GANTrainerPlugin (train): Not enough data to form any sequences. num_samples: {num_samples}, seq_len: {seq_len_param}, data_shape: {x_train_data_full.shape}")
-                # Decide how to handle this: raise error, return, or proceed with empty data if the rest of the code can handle it.
-                # For now, let's make it an empty array with the correct number of dimensions if possible, or raise error.
+            else: 
                 if num_features > 0:
                     x_train_sequences = np.empty((0, seq_len_param, num_features))
-                else: # This case (0 features) is highly problematic
+                else: 
                     self.logger.error(f"GANTrainerPlugin (train): Data has 0 features after processing. Original shape: {data_df.shape}, after numpy conversion: {x_train_data_full.shape}")
                     raise ValueError("Data has 0 features after processing.")
 
 
         self.logger.info(f"GANTrainerPlugin (train): Created sequences. Shape: {x_train_sequences.shape}")
         
-        # x_train_data = np.load(x_train_file, allow_pickle=True) # Old way, for .npy files
-        x_train_data = x_train_sequences # Use the processed sequences
+        x_train_data = x_train_sequences 
 
         if x_train_data.ndim == 2:
-            x_train_data = np.expand_dims(x_train_data, axis=1) # Add sequence length dimension
+            x_train_data = np.expand_dims(x_train_data, axis=1) 
             self.logger.info(f"GANTrainerPlugin (train): Expanded dims for 2D data. New shape: {x_train_data.shape}")
 
-        # Adversarial ground truths
-        # valid = np.ones((x_train_data.shape[0], 1)) # OLD: Based on full dataset size
-        # fake = np.zeros((x_train_data.shape[0], 1))  # OLD: Based on full dataset size
-        current_batch_size = self.params.get("gan_batch_size", 32) # Get batch size from params
-        valid_labels = np.ones((current_batch_size, 1)) # Renamed from 'valid'
-        fake_labels = np.zeros((current_batch_size, 1))  # Renamed from 'fake'
+        current_batch_size = self.params.get("gan_batch_size", 32) 
+        valid_labels = np.ones((current_batch_size, 1)) 
+        fake_labels = np.zeros((current_batch_size, 1))  
 
-        # History lists for plotting (already present)
         d_losses_history = []
         g_losses_history = []
-        # d_accs_history = [] # Already present, will be used for d_acc_avg
-
-        # For self.full_metrics_history (more detailed)
-        # self.full_metrics_history = [] # Already initialized in __init__
 
         current_lr_g = float(tf.keras.backend.get_value(self.g_optimizer.learning_rate))
         current_lr_d = float(tf.keras.backend.get_value(self.d_optimizer.learning_rate))
+
+        # Print model summaries before training loop
+        self.logger.info("Printing Model Summaries before training:")
+        if self.generator:
+            self.logger.info("--- Generator Summary ---")
+            self.generator.summary(print_fn=self.logger.info)
+        else:
+            self.logger.warning("Generator model is None, cannot print summary.")
+        
+        if self.discriminator:
+            self.logger.info("--- Discriminator Summary ---")
+            self.discriminator.summary(print_fn=self.logger.info)
+        else:
+            self.logger.warning("Discriminator model is None, cannot print summary.")
+
+        if self.gan:
+            self.logger.info("--- GAN Combined Model Summary ---")
+            self.gan.summary(print_fn=self.logger.info)
+        else:
+            self.logger.warning("GAN combined model is None, cannot print summary.")
+        self.logger.info("--------------------------------------")
 
         self.logger.info(f"Starting GAN training for {self.params['gan_epochs']} epochs, batch size {current_batch_size}...")
         self.logger.info(f"Initial Generator LR: {current_lr_g:.1e}, Discriminator LR: {current_lr_d:.1e}")
         self.logger.info(f"Generator is FROZEN. Discriminator is TRAINABLE.")
         self.logger.info(f"Discriminator input shape: (batch_size, {self.seq_len}, {self.num_features_for_discriminator})")
-        self.logger.info(f"Generator output (base features) shape: (batch_size, {self.seq_len}, {self.num_base_features})")
+        self.logger.info(f"Generator output (base features) target shape for TI: (batch_size, {self.seq_len}, {self.num_base_features})")
 
 
         for epoch in range(self.params["gan_epochs"]):
@@ -996,17 +1003,14 @@ class GANTrainerPlugin:
                real_data_batch_raw_full_features.shape[-1] > self.num_base_features:
                 real_data_batch_base_features = real_data_batch_raw_full_features[:, :, :self.num_base_features]
                 if hasattr(self, 'logger') and self.logger:
-                    self.logger.info(
+                    self.logger.debug( # Changed to debug
                         f"GANTrainerPlugin (train): Sliced real_data_batch_raw_full_features from {real_data_batch_raw_full_features.shape[-1]} "
                         f"to {self.num_base_features} features for TI calculation (real data)."
                     )
             else:
                 real_data_batch_base_features = real_data_batch_raw_full_features
             
-            # Calculate TIs for the real data batch to match discriminator's expected input
-            # real_data_batch_base_features should have shape (batch_size, seq_len, self.num_base_features)
-            # The _calculate_technical_indicators method will verify this.
-            # real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_raw) # OLD LINE
+            self.logger.debug(f"Shape of real_data_batch_base_features before TI calc: {real_data_batch_base_features.shape}")
             real_data_for_discriminator = self._calculate_technical_indicators(real_data_batch_base_features)
 
             # Generate a batch of new series using the FeederPlugin and Generator
@@ -1018,19 +1022,86 @@ class GANTrainerPlugin:
             for input_name in self.generator_actual_input_names_ordered: # Assumes this is set
                 generator_inputs_d.append(feeder_output_d[input_name])
             
-            generated_base_features_raw = self.generator.predict(generator_inputs_d, verbose=0)
+            # --- Refactored logic for generated_base_features_raw ---
+            generated_output_from_model = self.generator.predict(generator_inputs_d, verbose=0)
 
-            # Ensure generated_base_features_raw is 3D before TI calculation
-            # This mirrors the Reshape layer in _build_gan for the standalone generator's output
-            if generated_base_features_raw.ndim == 2: # Simplified reshape logic
-                target_reshape_dim_d = self.actual_generator_output_dim if self.actual_generator_output_dim > 0 else -1
-                generated_base_features_raw = generated_base_features_raw.reshape((current_batch_size, self.generator_output_actual_seq_len, target_reshape_dim_d))
-            if generated_base_features_raw.shape[-1] != self.num_base_features and self.num_base_features > 0:
-                 generated_base_features_raw = generated_base_features_raw[:, :, :self.num_base_features]
+            # Step 1: Ensure generated_output_from_model is 3D: (batch, actual_gen_seq_len, actual_gen_features)
+            current_actual_gen_seq_len: int
+            if generated_output_from_model.ndim == 2:
+                current_actual_gen_seq_len = 1
+                current_actual_gen_features = generated_output_from_model.shape[1]
+                
+                # Consistency check with self.actual_generator_output_dim
+                if self.actual_generator_output_dim > 0 and current_actual_gen_features != self.actual_generator_output_dim:
+                    self.logger.warning(
+                        f"GANTrainerPlugin (train): Generator output feature count ({current_actual_gen_features}) "
+                        f"differs from expected self.actual_generator_output_dim ({self.actual_generator_output_dim}). "
+                        f"Using self.actual_generator_output_dim for reshaping."
+                    )
+                    current_actual_gen_features = self.actual_generator_output_dim
+                elif self.actual_generator_output_dim == 0 and current_actual_gen_features > 0:
+                     # If actual_generator_output_dim wasn't set, use the one from predict()
+                     self.logger.info(f"GANTrainerPlugin (train): self.actual_generator_output_dim was 0, using features from predict(): {current_actual_gen_features}")
+                elif current_actual_gen_features == 0: # Should not happen if generator works
+                    self.logger.error(f"GANTrainerPlugin (train): Generator predicted 0 features. Shape: {generated_output_from_model.shape}")
+                    # Fallback to self.actual_generator_output_dim if it's non-zero, else raise error or use a default like 1
+                    current_actual_gen_features = self.actual_generator_output_dim if self.actual_generator_output_dim > 0 else 1 
+                    if current_actual_gen_features == 1 and self.actual_generator_output_dim == 0:
+                         self.logger.warning("GANTrainerPlugin (train): Falling back to 1 feature for generator output due to 0 features predicted and 0 actual_generator_output_dim.")
 
-            generated_data_for_discriminator = self._calculate_technical_indicators(generated_base_features_raw)
+
+                generated_3d_features = generated_output_from_model.reshape((current_batch_size, current_actual_gen_seq_len, current_actual_gen_features))
+            elif generated_output_from_model.ndim == 3:
+                generated_3d_features = generated_output_from_model
+                current_actual_gen_seq_len = generated_output_from_model.shape[1]
+            else:
+                self.logger.error(f"GANTrainerPlugin (train): Generator output has unexpected ndim: {generated_output_from_model.ndim}. Shape: {generated_output_from_model.shape}")
+                raise ValueError(f"Generator output has unexpected ndim: {generated_output_from_model.ndim}")
+
+            # Step 2: Slice to self.num_base_features on the feature dimension
+            if self.num_base_features > 0 and generated_3d_features.shape[-1] != self.num_base_features :
+                self.logger.debug(f"Slicing generated features from {generated_3d_features.shape[-1]} to {self.num_base_features} base features.")
+                base_features_from_generator = generated_3d_features[:, :, :self.num_base_features]
+            else: # num_base_features is 0 (problematic) or matches, or not restrictive
+                base_features_from_generator = generated_3d_features
             
-            # Ensure discriminator is trainable for this step
+            self.logger.debug(f"Shape of base_features_from_generator after potential slice: {base_features_from_generator.shape}")
+
+
+            # Step 3: Adjust sequence length to self.seq_len (for TIs and Discriminator)
+            generated_base_features_raw_final: np.ndarray
+            if current_actual_gen_seq_len != self.seq_len:
+                if current_actual_gen_seq_len == 1 and self.seq_len > 0: # self.seq_len should be > 0
+                    if base_features_from_generator.shape[1] != 1: # Should be (B,1,F)
+                         self.logger.error(f"Mismatch: Expected base_features_from_generator to have seq_len 1 for repeat, but got {base_features_from_generator.shape[1]}")
+                         # Attempt to take the first step if it's longer than 1, though this indicates a logic flaw earlier
+                         squeezed_for_repeat = np.squeeze(base_features_from_generator[:,0:1,:], axis=1) if base_features_from_generator.shape[1] > 0 else np.squeeze(base_features_from_generator, axis=1)
+                    else:
+                        squeezed_for_repeat = np.squeeze(base_features_from_generator, axis=1)
+                    
+                    generated_base_features_raw_final = np.repeat(np.expand_dims(squeezed_for_repeat, axis=1), self.seq_len, axis=1)
+                    self.logger.debug(f"Repeated generated features from seq_len {current_actual_gen_seq_len} to {self.seq_len}. New shape: {generated_base_features_raw_final.shape}")
+                elif self.seq_len > 0 and current_actual_gen_seq_len > self.seq_len : # Generator produced more seq len than D needs
+                    generated_base_features_raw_final = base_features_from_generator[:, :self.seq_len, :] 
+                    self.logger.debug(f"Sliced generated features from seq_len {current_actual_gen_seq_len} to {self.seq_len}. New shape: {generated_base_features_raw_final.shape}")
+                elif self.seq_len == 0: # self.seq_len for discriminator is 0, highly problematic
+                    self.logger.error(f"self.seq_len is 0. Cannot prepare generated data for discriminator. current_actual_gen_seq_len: {current_actual_gen_seq_len}")
+                    # Fallback: use as is, but this will likely fail in TI or D
+                    generated_base_features_raw_final = base_features_from_generator
+                else: # Other mismatches e.g. current_actual_gen_seq_len is 0, or current_actual_gen_seq_len > 1 but not 1 and not > self.seq_len
+                    self.logger.error(
+                        f"Cannot reconcile generator output seq_len {current_actual_gen_seq_len} "
+                        f"with discriminator seq_len {self.seq_len}. Using generator output as is."
+                    )
+                    # Fallback, this might be incorrect for the TI layer / Discriminator
+                    generated_base_features_raw_final = base_features_from_generator
+            else: # seq_len matches
+                generated_base_features_raw_final = base_features_from_generator
+            # --- End of refactored logic ---
+
+            self.logger.debug(f"Shape of generated_base_features_raw_final before TI calc: {generated_base_features_raw_final.shape}")
+            generated_data_for_discriminator = self._calculate_technical_indicators(generated_base_features_raw_final)
+            
             if self.discriminator: self.discriminator.trainable = True
 
             d_loss_real_metrics = self.discriminator.train_on_batch(real_data_for_discriminator, valid_labels, return_dict=True) if self.discriminator else {'loss':0.0, 'accuracy':0.0}
@@ -1040,16 +1111,11 @@ class GANTrainerPlugin:
             d_acc_real = d_loss_real_metrics['accuracy']
             d_acc_fake = d_loss_fake_metrics['accuracy']
             d_acc_avg = 0.5 * (d_acc_real + d_acc_fake)
-
-            # ---------------------
-            #  Train Generator
-            # ---------------------
             
-            if self.discriminator: self.discriminator.trainable = False # Freeze D for GAN training step
+            if self.discriminator: self.discriminator.trainable = False 
 
             feeder_outputs_for_g = self.feeder_plugin_instance.generate(n_ticks_to_generate=current_batch_size)
-            gan_inputs_g = [] # Renamed
-            # Assuming gan_feed_keys are correctly derived from params for GAN model inputs
+            gan_inputs_g = [] 
             latent_input_name = self.params.get("generator_decoder_input_name_latent", "decoder_input_z_seq")
             conditional_input_name = self.params.get("generator_decoder_input_name_conditions", "decoder_input_conditions")
             context_input_name = self.params.get("generator_decoder_input_name_context", "decoder_input_h_context")
@@ -1062,11 +1128,9 @@ class GANTrainerPlugin:
 
             d_losses_history.append(d_loss)
             g_losses_history.append(g_loss)
-            # d_accs_history.append(d_acc_avg) # Already present
 
             epoch_duration = time.time() - start_time_epoch
 
-            # Store detailed metrics for JSON
             epoch_metrics = {
                 "epoch": epoch + 1,
                 "d_loss": d_loss,
@@ -1080,30 +1144,24 @@ class GANTrainerPlugin:
             }
             self.full_metrics_history.append(epoch_metrics)
 
-            # Updated print statement to match collected metrics
             log_msg = (
                 f"Epoch {epoch+1}/{self.params['gan_epochs']} [{epoch_duration:.2f}s] - "
                 f"D_loss: {d_loss:.4f} (Real Acc: {d_acc_real*100:.2f}%, Fake Acc: {d_acc_fake*100:.2f}%, Avg Acc: {d_acc_avg*100:.2f}%) - "
                 f"G_loss: {g_loss:.4f} - "
                 f"LR G: {epoch_metrics['lr_g']:.1e}, LR D: {epoch_metrics['lr_d']:.1e}"
             )
-            self.logger.info(log_msg) # Use self.logger.info for consistency
-            # print(log_msg) # Original print can be kept or removed if logger is preferred
-
-            # Manual Callbacks (ReduceLROnPlateau, EarlyStopping - existing logic preserved)
-            # ...
+            self.logger.info(log_msg) 
 
             if self.params["gan_save_interval"] > 0 and (epoch + 1) % self.params["gan_save_interval"] == 0:
                 self.save_models(epoch=epoch + 1)
-                if d_losses_history and g_losses_history: # Check if lists are not empty
+                if d_losses_history and g_losses_history: 
                      self._plot_losses(d_losses_history, g_losses_history, epoch=epoch + 1)
-                # self._save_training_metrics(epoch=epoch + 1) # Optional: save metrics periodically
 
         self.logger.info("GAN Training finished.")
-        self.save_models(epoch="final") # Save final models
+        self.save_models(epoch="final") 
         if d_losses_history and g_losses_history:
             self._plot_losses(d_losses_history, g_losses_history, epoch="final")
-        self._save_training_metrics(epoch="final") # Save all metrics at the end
+        self._save_training_metrics(epoch="final") 
 
         self.logger.info(f"Final models, plots, and metrics should be in {self.params['results_base_dir']}")
 
