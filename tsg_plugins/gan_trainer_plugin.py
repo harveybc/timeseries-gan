@@ -20,10 +20,258 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # Set default log level
+# logger.setLevel(logging.INFO) # Set default log level - Assuming this is set elsewhere or defaults appropriately
 # ADD INFO MESSAGE ABOUT GENERATOR WARNING
-logger.info("GANTrainerPlugin: The VAE generator is intended to be frozen during GAN training. A 'UserWarning: The model does not have any trainable weights.' may appear when generator.predict() is called; this is expected for the frozen generator and does not affect discriminator or GAN training.")
+# logger.info("GANTrainerPlugin: The VAE generator is intended to be frozen during GAN training. A \\'UserWarning: The model does not have any trainable weights.\\' may appear when generator.predict() is called; this is expected for the frozen generator and does not affect discriminator or GAN training.")
 
+
+# Custom Keras Layer for Technical Indicator Calculation using tf.numpy_function
+class TensorFlowTALayer(layers.Layer):
+    def __init__(self, base_feature_names: List[str], ti_names_to_calculate: List[str],
+                 num_base_features: int, num_total_features: int, seq_len: int, **kwargs):
+        super().__init__(**kwargs)
+        self.base_feature_names = base_feature_names
+        self.ti_names_to_calculate = ti_names_to_calculate
+        self.num_base_features = num_base_features
+        self.num_total_features = num_total_features # num_base_features + num_tis
+        self.seq_len = seq_len
+
+    @staticmethod
+    def _parse_ti_name(ti_full_name: str) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
+        """
+        Parses a technical indicator string like "FeatureName_INDICATOR_param1_param2".
+        Example: "BidClose_EMA_10" -> ("BidClose", "ema", {"length": 10})
+                 "RSI_14" (if 'close' is default) -> (None, "rsi", {"length": 14}) - needs adjustment if column is not part of name
+                 "ATR_14" (no specific column, uses HLC) -> (None, "atr", {"length": 14})
+        Returns: (column_name, indicator_method_name, params_dict)
+        """
+        parts = ti_full_name.split('_')
+        
+        # Heuristic: If the first part matches a base feature name, it's likely the target column.
+        # This is not a perfect heuristic and depends on naming conventions.
+        # A more robust system might require explicit TI definitions (base_col, type, params).
+        
+        # Try to identify if the TI implies a specific column from base_feature_names
+        # This part is tricky and relies on conventions.
+        # For "BidClose_EMA_10", parts = ["BidClose", "EMA", "10"]
+        # For "EMA_10" (expecting 'close'), parts = ["EMA", "10"]
+        # For "ATR_14" (uses H,L,C), parts = ["ATR", "14"]
+
+        # Let's assume a convention:
+        # 1. If TI name starts with a base_feature_name + '_', that's the column. E.g. "BidClose_EMA_10"
+        # 2. Else, the TI might be column-agnostic or use pandas_ta defaults (like 'close').
+        
+        column_name: Optional[str] = None
+        indicator_method_name: Optional[str] = None
+        params: Dict[str, Any] = {}
+
+        # Tentative parsing logic - this may need refinement based on actual ti_names_to_calculate format
+        potential_col_name = parts[0]
+        # A simple check: if potential_col_name is a known base feature, assume it is.
+        # This requires passing base_feature_names to the parser or having it accessible.
+        # For now, let's assume if parts[1] is a common indicator, parts[0] is the column.
+        
+        # Simplified parsing based on common patterns observed in _calculate_technical_indicators
+        # This needs to be robust for all TIs used.
+        
+        # Pattern 1: Col_Indicator_Param (e.g., BidClose_EMA_10)
+        if len(parts) >= 2 and parts[1].upper() in ["EMA", "SMA", "RSI", "BBANDS", "MACD", "ROC", "MOM", "STOCH", "STOCHRSI", "TSI", "UO", "WILLR", "ATR", "ADX", "CCI", "PSAR"]: # Common indicators
+            column_name = parts[0]
+            indicator_method_name = parts[1].lower()
+            param_parts = parts[2:]
+        # Pattern 2: Indicator_Param (e.g., RSI_14, assuming default column like 'close')
+        elif len(parts) >= 1 and parts[0].upper() in ["EMA", "SMA", "RSI", "BBANDS", "MACD", "ROC", "MOM", "STOCH", "STOCHRSI", "TSI", "UO", "WILLR", "ATR", "ADX", "CCI", "PSAR"]:
+            indicator_method_name = parts[0].lower()
+            param_parts = parts[1:]
+        else: # Cannot parse reliably
+            logger.warning(f"TensorFlowTALayer: Could not reliably parse TI name '{ti_full_name}'. Skipping this TI in symbolic graph.")
+            return None, None, {}
+
+        # Parameter parsing (simplified)
+        if indicator_method_name in ["ema", "sma", "rsi", "atr", "cci", "roc", "mom", "stoch", "stochrsi", "tsi", "uo", "willr", "psar"]: # Common length-based
+            if len(param_parts) > 0:
+                try: params['length'] = int(param_parts[0])
+                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse length from {param_parts[0]} for {ti_full_name}.")
+        elif indicator_method_name == "bbands":
+            if len(param_parts) > 0: # length
+                try: params['length'] = int(param_parts[0])
+                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse BBands length from {param_parts[0]} for {ti_full_name}.")
+            if len(param_parts) > 1: # std
+                try: params['std'] = float(param_parts[1]) # or int
+                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse BBands std from {param_parts[1]} for {ti_full_name}.")
+        elif indicator_method_name == "macd":
+            if len(param_parts) == 3: # fast, slow, signal
+                try:
+                    params['fast'] = int(param_parts[0])
+                    params['slow'] = int(param_parts[1])
+                    params['signal'] = int(param_parts[2])
+                except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse MACD params from {param_parts} for {ti_full_name}.")
+            elif len(param_parts) == 2: # fast, slow (signal default)
+                 try:
+                    params['fast'] = int(param_parts[0])
+                    params['slow'] = int(param_parts[1])
+                 except ValueError: logger.warning(f"TensorFlowTALayer: Could not parse MACD fast/slow params from {param_parts} for {ti_full_name}.")
+
+        # If column_name was parsed as part of the TI name (e.g. "BidClose" from "BidClose_EMA_10")
+        # and it's not a standard pandas_ta recognized column name for the indicator (like 'high', 'low', 'close', 'volume')
+        # then we need to pass it as the 'column' argument to the pandas_ta function.
+        if column_name and indicator_method_name not in ['atr', 'adx', 'psar']: # These TIs might use HLCV implicitly
+             # For TIs like EMA, RSI, etc., if a column was parsed, use it.
+            if 'column' not in params: # Avoid overwriting if already parsed differently
+                params['column'] = column_name
+        
+        # For TIs like ATR, ADX, PSAR, they expect 'high', 'low', 'close' columns.
+        # If base_feature_names provides these (e.g. "BidHigh", "BidLow", "BidClose"),
+        # we might need to rename them temporarily in the DataFrame for pandas_ta.
+        # This adds complexity. For now, assume pandas_ta handles it or TIs are chosen carefully.
+
+        return column_name, indicator_method_name, params
+
+    @staticmethod
+    def _calculate_tis_numpy_batch(inputs_numpy: np.ndarray, 
+                                   base_feature_names_py: List[str], 
+                                   ti_names_to_calculate_py: List[str], 
+                                   seq_len_py: int,
+                                   num_total_features_py: int):
+        # inputs_numpy shape: (batch_size, seq_len, num_base_features)
+        batch_size = inputs_numpy.shape[0]
+        all_samples_processed = []
+
+        for i in range(batch_size):
+            sample_base_features_np = inputs_numpy[i, :, :] # (seq_len, num_base_features)
+            df_for_tis = pd.DataFrame(sample_base_features_np, columns=base_feature_names_py)
+            
+            # Store original columns to select base features later
+            original_base_df = df_for_tis[base_feature_names_py].copy()
+
+            for ti_full_name in ti_names_to_calculate_py:
+                # Use the refined parser
+                # Note: _parse_ti_name is static, so it doesn't have access to self.base_feature_names
+                # This implies base_feature_names needs to be passed to it, or parsing logic simplified.
+                # For now, the parser makes some assumptions.
+                # A better parser might need access to the list of base_feature_names to confirm if parts[0] is a column.
+                
+                # Simplified parsing for now, assuming ti_full_name is like "BidClose_EMA_10" or "RSI_14"
+                # This parsing logic should ideally be robust and centralized if used elsewhere.
+                parsed_col, parsed_indicator, parsed_params = TensorFlowTALayer._parse_ti_name(ti_full_name)
+
+                if not parsed_indicator:
+                    logger.warning(f"TensorFlowTALayer: Skipping TI {ti_full_name} due to parsing failure in batch.")
+                    continue
+                
+                try:
+                    indicator_func = getattr(df_for_tis.ta, parsed_indicator)
+                    # Ensure 'column' param is correctly handled if parsed_col is set
+                    if parsed_col and 'column' not in parsed_params and parsed_indicator not in ['atr', 'adx', 'psar', 'obv', 'cmf', 'efi', 'cmo', 'mfi', 'chop', 'vortex', 'aroon', 'donchian', 'kc', 'ichimoku', 'thermo', 'squeeze', 'sqzpro', 'inertia', 'trendflex', 'ttm_trend', 'vhf', 'vwap', 'vwma']: # Indicators that might not take a single 'column' or use OHLCV
+                        # If parsed_col is a valid column in df_for_tis, use it.
+                        if parsed_col in df_for_tis.columns:
+                             parsed_params['column'] = parsed_col
+                        else:
+                            logger.warning(f"TensorFlowTALayer: Parsed column '{parsed_col}' for TI '{ti_full_name}' not in base features. Indicator may fail or use defaults.")
+                    
+                    # For TIs that need OHLCV, ensure columns are named appropriately or pandas_ta can find them.
+                    # E.g., if base features are "BHigh", "BLow", "BClose", "BOpen", "BVolume"
+                    # and pandas_ta expects "high", "low", "close", "open", "volume".
+                    # A temporary rename might be needed:
+                    # rename_map = {"BHigh": "high", "BLow": "low", ...}
+                    # df_for_tis.rename(columns=rename_map, inplace=True)
+                    # ... call indicator ...
+                    # df_for_tis.rename(columns={v: k for k, v in rename_map.items()}, inplace=True) # Rename back
+                    # This is complex. For now, assume names are compatible or TIs don't require strict OHLCV names.
+
+                    indicator_func(**parsed_params, append=True, col_names=(ti_full_name,))
+                except AttributeError:
+                    logger.error(f"TensorFlowTALayer: TI method '{parsed_indicator}' not found in pandas_ta for {ti_full_name}.")
+                except Exception as e:
+                    logger.error(f"TensorFlowTALayer: Error calculating TI {ti_full_name} with params {parsed_params} (parsed_col: {parsed_col}): {e}")
+
+            # Consolidate features: base features + calculated TIs
+            final_ordered_columns = base_feature_names_py + ti_names_to_calculate_py
+            
+            # Start with original base features
+            combined_df = original_base_df.copy()
+            
+            for ti_name in ti_names_to_calculate_py:
+                if ti_name in df_for_tis.columns:
+                    combined_df[ti_name] = df_for_tis[ti_name]
+                else:
+                    logger.warning(f"TensorFlowTALayer: TI column '{ti_name}' not found after calculation. Filling with zeros for this sample.")
+                    combined_df[ti_name] = np.zeros(seq_len_py) 
+            
+            # Ensure the final DataFrame has the exact columns in the expected order and count
+            # If a TI failed to compute, it's filled with zeros.
+            # We need to ensure combined_df has all columns from final_ordered_columns.
+            for col in final_ordered_columns:
+                if col not in combined_df.columns:
+                    logger.warning(f"TensorFlowTALayer: Column '{col}' was expected but not found. Adding as zeros.")
+                    combined_df[col] = np.zeros(seq_len_py)
+            
+            combined_df = combined_df[final_ordered_columns]
+            
+            # Verify shape before converting to values
+            if combined_df.shape[1] != num_total_features_py:
+                logger.error(f"TensorFlowTALayer: Shape mismatch in combined_df. Expected {num_total_features_py} features, got {combined_df.shape[1]}. Columns: {combined_df.columns}")
+                # Fallback: create a zero array of the correct shape to avoid downstream errors
+                # This indicates a serious issue in TI calculation or column management.
+                all_samples_processed.append(np.zeros((seq_len_py, num_total_features_py), dtype=np.float32))
+            else:
+                all_samples_processed.append(combined_df.values)
+
+        processed_batch_np = np.array(all_samples_processed, dtype=np.float32)
+        processed_batch_np = np.nan_to_num(processed_batch_np, nan=0.0) # Final NaN check
+        
+        # Final shape check
+        if processed_batch_np.shape != (batch_size, seq_len_py, num_total_features_py):
+            logger.error(f"TensorFlowTALayer: Output shape mismatch. Expected {(batch_size, seq_len_py, num_total_features_py)}, got {processed_batch_np.shape}. Forcing reshape if possible.")
+            # Attempt to reshape or pad if feature count is off, though this is risky
+            if processed_batch_np.shape[0] == batch_size and processed_batch_np.shape[1] == seq_len_py:
+                 # If only feature count is wrong, pad with zeros or truncate (last resort)
+                if processed_batch_np.shape[2] < num_total_features_py:
+                    padding = np.zeros((batch_size, seq_len_py, num_total_features_py - processed_batch_np.shape[2]), dtype=np.float32)
+                    processed_batch_np = np.concatenate([processed_batch_np, padding], axis=2)
+                elif processed_batch_np.shape[2] > num_total_features_py:
+                    processed_batch_np = processed_batch_np[:, :, :num_total_features_py]
+            else: # More severe shape mismatch, return zeros of expected shape
+                 processed_batch_np = np.zeros((batch_size, seq_len_py, num_total_features_py), dtype=np.float32)
+
+
+        return processed_batch_np
+
+    def call(self, inputs): # inputs is a KerasTensor (symbolic)
+        # inputs shape: (batch_size, self.seq_len, self.num_base_features)
+        
+        # tf.numpy_function expects Python native types for non-tensor arguments.
+        # self.base_feature_names, self.ti_names_to_calculate are already List[str]
+        # self.seq_len, self.num_total_features are Python int
+        
+        y = tf.numpy_function(
+            TensorFlowTALayer._calculate_tis_numpy_batch,
+            [
+                inputs, 
+                self.base_feature_names, 
+                self.ti_names_to_calculate,
+                self.seq_len,
+                self.num_total_features 
+            ],
+            tf.float32 # Output type
+        )
+        
+        # Set the shape of the output tensor because tf.numpy_function loses shape information.
+        # The batch size can be dynamic (None or tf.shape(inputs)[0]).
+        output_shape = [tf.shape(inputs)[0], self.seq_len, self.num_total_features]
+        y.set_shape(output_shape)
+        return y
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "base_feature_names": self.base_feature_names,
+            "ti_names_to_calculate": self.ti_names_to_calculate,
+            "num_base_features": self.num_base_features,
+            "num_total_features": self.num_total_features,
+            "seq_len": self.seq_len,
+        })
+        return config
 
 class GANTrainerPlugin:
     plugin_params: Dict[str, Any] = {
@@ -238,7 +486,6 @@ class GANTrainerPlugin:
         gan_context_input = tf.keras.Input(shape=(self.context_dim_for_generator,), name="gan_input_context_vector")
 
         # Order inputs for the VAE Decoder (Generator)
-        # (Assuming the input ordering logic from previous patch is still valid for VAE decoder)
         generator_input_names_from_model = [inp.name.split(':')[0] for inp in self.generator.inputs]
         cfg_latent_name = self.params.get("generator_decoder_input_name_latent")
         cfg_context_name = self.params.get("generator_decoder_input_name_context")
@@ -253,7 +500,7 @@ class GANTrainerPlugin:
         for model_input_name in generator_input_names_from_model:
             found_match = False
             for cfg_name, gan_layer in input_map.items():
-                if cfg_name and model_input_name.startswith(cfg_name): # Check startswith for names like "input_latent_vector_vae:0"
+                if cfg_name and model_input_name.startswith(cfg_name):
                     generator_feed_inputs_ordered.append(gan_layer)
                     found_match = True
                     break
@@ -262,30 +509,71 @@ class GANTrainerPlugin:
         
         if len(generator_feed_inputs_ordered) != len(self.generator.inputs):
              logger.error(f"GAN build: Mismatch in ordered inputs for generator. Expected {len(self.generator.inputs)}, got {len(generator_feed_inputs_ordered)}. This is critical.")
-             # Fallback or raise error. For now, proceed if possible, but this indicates a config issue.
-             # If empty, this will cause issues later.
 
-        generated_data_raw = self.generator(generator_feed_inputs_ordered) 
+        generated_data_raw = self.generator(generator_feed_inputs_ordered) # Shape: (batch, seq_len_gen_output, actual_generator_output_dim)
         
-        generated_data_for_disc = generated_data_raw
-        # self.actual_generator_output_dim should be num_base_features
-        # self.discriminator_target_n_features is also num_base_features (from generator_decoder_output_feature_names)
-        # So, this slicing should ideally not be needed if actual_generator_output_dim == discriminator_target_n_features
-        if hasattr(self, 'actual_generator_output_dim') and self.actual_generator_output_dim != self.discriminator_target_n_features:
-            logger.info(f"GAN build: Slicing generator output from {self.actual_generator_output_dim} to {self.discriminator_target_n_features} features for GAN internal path.")
-            if len(generated_data_raw.shape) == 3: # (batch, seq, features)
-                generated_data_for_disc = generated_data_raw[:, :, :self.discriminator_target_n_features]
-            elif len(generated_data_raw.shape) == 2: # (batch, features)
-                 generated_data_for_disc = generated_data_raw[:, :self.discriminator_target_n_features]
+        # Slice generator output if its feature dimension differs from num_base_features
+        # self.num_base_features is derived from 'base_feature_names_ordered' (e.g., 21)
+        # self.actual_generator_output_dim is from the loaded generator model (e.g., 23)
         
-        target_shape_for_discriminator = (self.discriminator_target_seq_len, self.discriminator_target_n_features)
-        generated_data_reshaped = tf.keras.layers.Reshape(target_shape_for_discriminator)(generated_data_for_disc)
+        # Determine the actual sequence length from the generator's output shape
+        # Assuming generator_output_shape is (batch, seq, features)
+        # If generator output is (batch, features), then seq_len_from_generator = 1 (or needs reshape)
+        # For VAE decoder, it should be (batch, self.seq_len, features)
         
-        gan_output = self.discriminator(generated_data_reshaped) # This is where shape mismatch will occur if D expects more features/diff seq_len
+        # Ensure generated_data_raw is 3D: (batch, seq_len, features)
+        # The generator (VAE decoder) should output sequences of length self.seq_len (18)
+        # If generated_data_raw.shape is (None, 23) and self.seq_len is 18, this is an issue.
+        # However, the VAE decoder typically outputs the same sequence length it was trained on.
+        # Let's assume generated_data_raw is (None, self.seq_len, self.actual_generator_output_dim)
+        
+        base_features_from_generator = generated_data_raw
+        if hasattr(self, 'actual_generator_output_dim') and self.actual_generator_output_dim != self.num_base_features:
+            logger.info(f"GAN build: Slicing generator output from {self.actual_generator_output_dim} to {self.num_base_features} features.")
+            # Assuming generated_data_raw is [batch, sequence, features]
+            if len(generated_data_raw.shape) == 3:
+                base_features_from_generator = generated_data_raw[:, :, :self.num_base_features]
+            elif len(generated_data_raw.shape) == 2: # Should not happen if generator outputs sequences
+                logger.warning("GAN build: Generator output is 2D. Slicing features and expecting TIs to be calculated on seq_len=1 or this needs reshape.")
+                base_features_from_generator = generated_data_raw[:, :self.num_base_features]
+                # If seq_len is > 1, this 2D output needs reshaping to (batch, 1, num_base_features)
+                # before TI calculation, or TI calculation needs to handle it.
+                # For now, assume TI layer expects (batch, seq_len, features).
+                # If generator output is (batch, features) and self.seq_len=1, then it's (batch, 1, features) after reshape.
+                # The TensorFlowTALayer expects self.seq_len.
+                # If generator output is (batch, features) and self.seq_len > 1, this is a problem.
+                # The VAE decoder should output (batch, self.seq_len, features)
+                # So base_features_from_generator should be (batch, self.seq_len, self.num_base_features)
+            else:
+                logger.error(f"GAN build: Unexpected generator output shape {generated_data_raw.shape}")
+        
+        # At this point, base_features_from_generator should have shape (None, self.seq_len, self.num_base_features)
+        # e.g., (None, 18, 21)
+
+        # REMOVE the old Reshape layer:
+        # target_shape_for_discriminator = (self.discriminator_target_seq_len, self.discriminator_target_n_features) # This was (1, 21)
+        # generated_data_reshaped = tf.keras.layers.Reshape(target_shape_for_discriminator)(generated_data_for_disc) # REMOVE
+
+        # Add Technical Indicators using the custom layer
+        # self.num_features_for_discriminator includes base features + TIs (e.g., 41)
+        # self.seq_len is the sequence length for discriminator input (e.g., 18)
+        ti_calculator_layer = TensorFlowTALayer(
+            base_feature_names=self.base_feature_names,
+            ti_names_to_calculate=self.ti_names_to_calculate,
+            num_base_features=self.num_base_features,
+            num_total_features=self.num_features_for_discriminator,
+            seq_len=self.seq_len, # Discriminator's expected sequence length
+            name="symbolic_ti_calculator"
+        )
+        
+        data_with_tis_for_discriminator = ti_calculator_layer(base_features_from_generator)
+        # Expected shape: (None, self.seq_len, self.num_features_for_discriminator) -> (None, 18, 41)
+        
+        gan_output = self.discriminator(data_with_tis_for_discriminator) 
         
         actual_gan_model_inputs = [gan_latent_input, gan_conditional_input, gan_context_input]
         gan = tf.keras.Model(inputs=actual_gan_model_inputs, outputs=gan_output, name="gan_combined")
-        gan.compile(loss='binary_crossentropy', optimizer=self.g_optimizer) # Use self.g_optimizer
+        gan.compile(loss='binary_crossentropy', optimizer=self.g_optimizer)
         logger.info("GAN model built and compiled.")
         gan.summary(print_fn=logger.info)
         try:
