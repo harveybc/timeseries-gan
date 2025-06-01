@@ -144,8 +144,8 @@ class GANTrainerPlugin:
         self.params.update(self.config)
 
 
-        self.gen_input_seq_len = self.params.get("seq_len", self.gen_input_seq_len)
-        self.gen_input_latent_dim = self.params.get("latent_dim", self.gen_input_latent_dim)
+        self.gen_input_seq_len = self.params["seq_len"]
+        self.gen_input_latent_dim = self.params["latent_dim"]
         
         self.discriminator_target_n_features = len(self.params.get("generator_decoder_output_feature_names", []))
         if self.discriminator_target_n_features == 0:
