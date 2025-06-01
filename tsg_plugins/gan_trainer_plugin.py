@@ -3,7 +3,7 @@
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, LSTM, GRU, Bidirectional, Concatenate, LayerNormalization, Dropout, LeakyReLU, Reshape, Flatten, Activation, Add, Multiply, Attention, Embedding, Conv1D, MaxPooling1D, GlobalAveragePooling1D, TimeDistributed
+from tensorflow.keras.layers import Input, Dense, LSTM, GRU, Bidirectional, Concatenate, LayerNormalization, Dropout, LeakyReLU, Reshape, Flatten, Activation, Add, Multiply, Attention, Embedding, Conv1D, MaxPooling1D, GlobalAveragePooling1D, TimeDistributed, BatchNormalization, SpatialDropout1D, RepeatVector
 from tensorflow.keras.optimizers import Adam, RMSprop, SGD
 from tensorflow.keras.metrics import Precision, Recall, AUC, MeanSquaredError, MeanAbsoluteError
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint, TensorBoard, CSVLogger
@@ -16,6 +16,8 @@ import pandas as pd
 import os
 import json
 import logging # Ensure logging is imported
+import time # Add time import
+import matplotlib.pyplot as plt # Add matplotlib import
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -724,7 +726,7 @@ class GANTrainerPlugin:
                 input_shape_from_keras = keras_input_tensor.shape # e.g. TensorShape([None, 100]) or TensorShape([None, 10, 1])
                 self.logger.info(f"Processing generator input {i}: Keras name '{input_name_from_keras}', Keras shape {input_shape_from_keras}")
 
-                # Try to match based on configured feeder key names to the generator's inputs by their Keras names
+                # Try to match based on configured feeder key names to the generator's input layers by their Keras names
                 # This assumes Keras input layers were named according to these feeder keys or a convention.
                 # Example Keras input layer names: "input_latent_vector", "input_conditional_data", "input_context_vector"
                 # Or, if not named, rely on the order and config params for dimensions.
@@ -914,22 +916,24 @@ class GANTrainerPlugin:
     def _build_discriminator(self) -> Model:
         self.logger.info(f"Building Discriminator with input shape: (None, {self.seq_len}, {self.num_features_for_discriminator})")
         
-        data_input = layers.Input(shape=(self.seq_len, self.num_features_for_discriminator), name="discriminator_input")
+        data_input = Input(shape=(self.seq_len, self.num_features_for_discriminator), name="discriminator_input") # Changed
         x = data_input
         conv_filters = self.params.get("discriminator_conv_filters", [64, 128])
         kernel_size = self.params.get("discriminator_conv_kernel_size", 3)
         for filters_count in conv_filters: # renamed filters to filters_count
-            x = layers.Conv1D(filters=filters_count, kernel_size=kernel_size, padding='causal', activation='relu')(x)
-            x = layers.BatchNormalization()(x)
-            x = layers.SpatialDropout1D(self.params.get("discriminator_dropout_rate", 0.3) / 2)(x)
+            x = Conv1D(filters=filters_count, kernel_size=kernel_size, padding='causal', activation='relu')(x) # Changed
+            x = BatchNormalization()(x) # Changed
+            x = SpatialDropout1D(self.params.get("discriminator_dropout_rate", 0.3) / 2)(x) # Changed
         lstm_units = self.params.get("discriminator_lstm_units", 64)
-        x = layers.Bidirectional(layers.LSTM(units=lstm_units, return_sequences=False))(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(self.params.get("discriminator_dropout_rate", 0.3))(x)
-        output = layers.Dense(1, activation='sigmoid', name="discriminator_output")(x)
-        model = Model(data_input, output, name="Discriminator")
+        x = Bidirectional(LSTM(units=lstm_units, return_sequences=False))(x) # Changed
+        x = BatchNormalization()(x) # Changed
+        x = Dropout(self.params.get("discriminator_dropout_rate", 0.3))(x) # Changed
+        output = Dense(1, activation='sigmoid', name="discriminator_output")(x) # Changed
         
-        model.summary(print_fn=self.logger.info) # Use self.logger
+        # Create the model instance
+        discriminator_model_obj = Model(data_input, output, name="Discriminator")
+        
+        discriminator_model_obj.summary(print_fn=self.logger.info) # Use self.logger
 
         try:
             plot_dir = os.path.join(self.params["results_base_dir"], self.params["save_plot_dir"])
@@ -937,7 +941,7 @@ class GANTrainerPlugin:
             plot_file_name = self.params.get("discriminator_model_plot_file", "discriminator_architecture.png")
             plot_path = os.path.join(plot_dir, plot_file_name)
             dpi = self.params.get("model_plot_dpi", 300)
-            plot_model(model, to_file=plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
+            plot_model(discriminator_model_obj, to_file=plot_path, show_shapes=True, dpi=dpi, expand_nested=True, show_layer_activations=True)
             self.logger.info(f"Discriminator architecture plot saved to {plot_path}")
         except Exception as e:
             self.logger.warning(f"Could not plot Discriminator model: {e}. Ensure pydot and graphviz are installed.")
@@ -956,38 +960,16 @@ class GANTrainerPlugin:
             tf.keras.metrics.AUC(name='d_auc')
         ]
 
-        # Assuming the model built by the user code is assigned to a variable, 
-        # and that variable is what would be returned. Let's call it 'discriminator_model_obj'.
-        # The user's original code would have created this 'discriminator_model_obj'.
-        # For the purpose of this edit, we need to ensure this object (not necessarily self.discriminator yet) is compiled.
-        # If the user's code assigns to self.discriminator directly, e.g.:
-        # self.discriminator = Model(inputs, outputs, name="Discriminator")
-        # self.discriminator.summary(...)
-        # self._plot_model_architecture(self.discriminator, ...)
-        # Then the following compile call on self.discriminator is correct, assuming no other issues.
-        # Given the error, the most robust fix is to compile the model that is about to be returned.
-
-        # Placeholder: The actual model object should be used here. 
-        # If the method builds `self.discriminator` directly, then using `self.discriminator` is fine.
-        # If it builds a local model `d_model_to_return`, then that should be compiled and returned.
-        # For this fix, we'll assume the model is indeed in `self.discriminator` after its creation, summary and plot.
-        if self.discriminator is None:
-            # This case should ideally not happen if summary and plot worked on self.discriminator.
-            # However, to be safe and address the NoneType error directly:
-            self.logger.error("self.discriminator is None before compile in _build_discriminator. This indicates an issue with model instantiation or assignment.")
-            # Attempt to re-create or fetch it if there's a known way, otherwise this will fail.
-            # For now, we'll let it proceed to hit the error if it's truly None, 
-            # as the fix relies on it being non-None after model definition.
-            # A more robust solution would require seeing the exact model instantiation line.
-            pass # Allow to proceed and potentially hit the error if it's truly None, to highlight the core issue.
-
-        # This was the failing line. It assumes self.discriminator is the model to be compiled.
-        self.discriminator.compile(
+        # Compile the created model object
+        discriminator_model_obj.compile(
             optimizer=self.discriminator_optimizer,
             loss='binary_crossentropy',
             metrics=d_metrics
         )
         self.logger.info(f"Discriminator compiled with optimizer {self.discriminator_optimizer.__class__.__name__}, loss 'binary_crossentropy', and metrics: {[m.name if hasattr(m, 'name') else str(m) for m in d_metrics]}.")
+        
+        # Assign the compiled model to self.discriminator
+        self.discriminator = discriminator_model_obj
         
         return self.discriminator # Return the compiled model instance
 
@@ -1056,10 +1038,10 @@ class GANTrainerPlugin:
             current_gen_output_seq_len = 1
             current_gen_output_features = generated_output_tensor.shape[-1]
             self.logger.info(f"GAN Build: Generator output is 2D. Assuming Seq_len=1, Features={current_gen_output_features}. Reshaping to 3D.")
-            processed_gen_output_for_discriminator = layers.Reshape((1, current_gen_output_features))(generated_output_tensor)
+            processed_gen_output_for_discriminator = Reshape((1, current_gen_output_features))(generated_output_tensor) # Changed
         else:
             self.logger.error(f"GAN Build: Generator output has unexpected shape {generated_output_tensor.shape}. Expected 2D or 3D.")
-            raise ValueError(f"Generator output has unexpected shape {generated_output_tensor.shape}")
+            raise ValueError("Generator output has unexpected shape {generated_output_tensor.shape}")
 
         # --- Feature Slicing (if generator produces more features than discriminator base expects) ---
         # This is important if the generator produces, say, 6 features, but the discriminator's base features are only the first 4 (e.g., OHLC).
@@ -1080,9 +1062,8 @@ class GANTrainerPlugin:
         else: # TIs are calculated externally, discriminator expects final feature set.
               # No, if TIs are external, the generator output should still be sliced to num_base_features,
               # then TIs are calculated on these, then concatenated. The discriminator then sees num_features_for_discriminator.
-              # So, slicing to num_base_features is generally correct here.
-            target_feature_count for_slicing = self.num_base_features
-            self.logger.info(f"GAN Build: TensorFlowTALayer is NOT active. Generator output will be sliced to self.num_base_features ({target_feature_count_for_slicing}) for external TI calculation.")
+            target_feature_count_forslicing = self.num_base_features
+            self.logger.info(f"GAN Build: TensorFlowTALayer is NOT active. Generator output will be sliced to self.num_base_features ({target_feature_count_forslicing}) for external TI calculation.")
 
 
         if current_gen_output_features > target_feature_count_for_slicing:
@@ -1090,7 +1071,7 @@ class GANTrainerPlugin:
             processed_gen_output_for_discriminator = processed_gen_output_for_discriminator[:, :, :target_feature_count_for_slicing]
             current_gen_output_features = target_feature_count_for_slicing # Update effective feature count after slicing
         elif current_gen_output_features < target_feature_count_for_slicing:
-            self.logger.error(f"GAN Build: Generator output features ({current_gen_output_features}) is LESS than target_feature_count_for_slicing ({target_feature_count_for_slicing}). This is problematic.")
+            self.logger.error(f"GAN Build: Generator output features ({current_gen_output_features}) is LESS than target_feature_count_for_slicing ({target_feature_count_for_slicing}).")
             # This shouldn't happen if num_base_features is set correctly based on generator's capabilities.
             # Consider raising an error or padding, but padding might hide issues.
             raise ValueError(f"Generator output features ({current_gen_output_features}) less than target ({target_feature_count_for_slicing}).")
@@ -1102,6 +1083,9 @@ class GANTrainerPlugin:
         # self.seq_len is the discriminator's expected input sequence length.
         # current_gen_output_seq_len is what the generator actually outputted.
         if current_gen_output_seq_len != self.seq_len:
+           
+
+            
             self.logger.info(f"GAN Build: Generator output sequence length ({current_gen_output_seq_len}) differs from discriminator's expected ({self.seq_len}). Adjusting...")
             if self.seq_len == 1 and current_gen_output_seq_len > 1:
                 # Take the last time step from the generator's output sequence
@@ -1110,7 +1094,7 @@ class GANTrainerPlugin:
             elif self.seq_len > 1 and current_gen_output_seq_len == 1:
                 # Repeat the single time step from generator to match discriminator's sequence length
                 self.logger.info(f"  Repeating generator's single time step {self.seq_len} times for discriminator.")
-                processed_gen_output_for_discriminator = layers.RepeatVector(self.seq_len)(processed_gen_output_for_discriminator) # Output: (batch, self.seq_len, features)
+                processed_gen_output_for_discriminator = RepeatVector(self.seq_len)(processed_gen_output_for_discriminator) # Changed
             else:
                 # More complex scenario, e.g., upsampling or downsampling. Not handled by default.
                 self.logger.error(f"GAN Build: Unhandled sequence length mismatch. Generator output seq_len={current_gen_output_seq_len}, Discriminator expects seq_len={self.seq_len}. Cannot automatically adjust.")
@@ -1460,48 +1444,26 @@ class GANTrainerPlugin:
 
 
             # --- Train with fake data ---
-            # Generate a batch of fake data using the FeederPlugin and Generator
-            if not self.feeder_plugin:
-                self.logger.error("FeederPlugin is not available. Cannot generate fake data for discriminator training.")
-                # Potentially skip this epoch or abort, for now, skip D training on fake
-                d_loss_fake = [0,0] # Placeholder
-            else:
-                # The FeederPlugin should provide a dictionary of inputs for the generator
-                # The keys of this dictionary should match what the generator expects.
-                # self.generator_actual_input_names_ordered holds the Keras names of the generator's inputs in order.
-                # The FeederPlugin's get_batch method needs to provide data for these.
-                
-                # How FeederPlugin provides data:
-                # It might return a dict like {"latent_vector": ..., "conditional_data": ...}
-                # Or it might return a list/tuple of arrays if the order is implicitly known.
-                # We need to map feeder output to the generator's Keras input names.
+            # Initialize d_loss_fake with NaNs, matching the structure of d_loss_real (e.g., [loss, acc])
+            d_loss_fake = [np.nan] * len(d_loss_real) if hasattr(d_loss_real, '__len__') and len(d_loss_real) > 0 else [np.nan, np.nan]
 
-                # Let's assume feeder_plugin.get_batch(batch_size) returns a dictionary
-                # where keys are like self.feeder_key_name_latent, self.feeder_key_name_conditional etc.
+            if not self.feeder_plugin:
+                self.logger.warning("FeederPlugin is not available. Discriminator training on fake data will be skipped for this batch.")
+                # d_loss_fake remains as NaNs
+            else:
                 try:
                     feeder_output_dict = self.feeder_plugin.get_batch(batch_size)
                     if not isinstance(feeder_output_dict, dict):
                         raise ValueError("Feeder output for GAN training is not a dictionary.")
 
-                    # Prepare the list of input arrays for generator.predict() in the correct order.
-                    # self.generator_actual_input_names_ordered contains the Keras names.
-                    # We need to find which feeder key corresponds to which Keras input name.
-                    # The roles (e.g., self.gan_latent_input_keras_name_hint) store the Keras name for a given role (latent, conditional).
-                    # The feeder keys (e.g., self.feeder_key_name_latent) are used to get data from feeder_output_dict.
-
                     generator_inputs_for_predict = []
-                    if not self.generator.inputs: # Generator has no Keras.Input layers defined
+                    if not self.generator.inputs:
                          self.logger.info("Generator has no explicit Keras inputs. Calling generator.predict([])")
-                         # generator_inputs_for_predict remains empty list
                     elif not self.generator_actual_input_names_ordered:
-                        self.logger.error("Generator has Keras inputs, but self.generator_actual_input_names_ordered is empty. Cannot prepare generator inputs.")
-                        raise ValueError("generator_actual_input_names_ordered is empty.")
+                        raise ValueError("generator_actual_input_names_ordered is empty for G training.")
                     else:
-                        # Map feeder output to ordered generator inputs
                         for keras_input_name_needed_by_gen in self.generator_actual_input_names_ordered:
                             found_input_for_gen = False
-                            # Check if this Keras input name corresponds to a known role (latent, conditional, context)
-                            # and get the data from feeder_output_dict using the role's feeder key.
                             if keras_input_name_needed_by_gen == self.gan_latent_input_keras_name_hint and self.feeder_key_name_latent in feeder_output_dict:
                                 generator_inputs_for_predict.append(feeder_output_dict[self.feeder_key_name_latent])
                                 found_input_for_gen = True
@@ -1528,19 +1490,14 @@ class GANTrainerPlugin:
                                 else:
                                     self.logger.error(f"Could not find data in FeederPlugin output for generator Keras input: '{keras_input_name_needed_by_gen}'. Feeder keys: {list(feeder_output_dict.keys())}")
                                     raise ValueError(f"Missing data for generator input '{keras_input_name_needed_by_gen}' from feeder.")
-                        
                         self.logger.debug(f"Prepared {len(generator_inputs_for_predict)} inputs for generator.predict().")
 
                     # Generate fake data sequences
                     # generator.predict() output should be (batch_size, gen_output_seq_len, gen_output_features)
                     # or (batch_size, gen_output_features) if gen_output_seq_len is 1 and squeezed.
-                    generated_data_raw = self.generator.predict(generator_inputs_for_predict, batch_size=batch_size) # Use actual batch_size for predict
+                    generated_data_raw = self.generator.predict(generator_inputs_for_predict, batch_size=batch_size)
                     self.logger.debug(f"Raw generated data shape: {generated_data_raw.shape}")
 
-                    # Process generated_data_raw to match discriminator input requirements (reshaping, slicing, TIs)
-                    # This logic should mirror parts of _build_gan's processing of generator output.
-
-                    # 1. Reshape if 2D output from generator
                     processed_fake_data = generated_data_raw
                     current_fake_seq_len = -1
                     current_fake_features = -1
@@ -1550,7 +1507,7 @@ class GANTrainerPlugin:
                         current_fake_features = generated_data_raw.shape[-1]
                         processed_fake_data = np.reshape(generated_data_raw, (batch_size, 1, current_fake_features))
                         self.logger.debug(f"Reshaped 2D generated data to 3D: {processed_fake_data.shape}")
-                    elif len(generated_data_raw.shape) == 3: # (batch, seq, features)
+                    elif len(generated_data_raw.shape) == 3: # (batch, seq_len, features)
                         current_fake_seq_len = generated_data_raw.shape[1]
                         current_fake_features = generated_data_raw.shape[2]
                         self.logger.debug(f"Generated data is 3D: {processed_fake_data.shape}")
@@ -1591,36 +1548,25 @@ class GANTrainerPlugin:
                         for i in range(processed_fake_data.shape[0]): # Iterate over batch
                             sample_df = pd.DataFrame(processed_fake_data[i], columns=self.base_feature_names_ordered)
                             try:
-                                sample_with_tis_df = self._calculate_technical_indicators(
+                                sample_with_tis_df, _ = self._calculate_technical_indicators(
                                     sample_df,
                                     strategy=self.tas_strategy_for_discriminator_tis,
                                     feature_names_for_output=self.discriminator_feature_names
                                 )
                                 if sample_with_tis_df.shape[1] != self.num_features_for_discriminator:
                                     self.logger.error(f"External TI calculation for FAKE data sample {i} resulted in {sample_with_tis_df.shape[1]} features, but discriminator expects {self.num_features_for_discriminator}. Columns: {sample_with_tis_df.columns.tolist()}")
-                                    # If error, fill with zeros of correct shape to avoid crashing, but log heavily
-                                    # This is a workaround for the pandas-ta TypeError with NaNs from generated data
-                                    # A better fix is in _calculate_technical_indicators to handle NaNs gracefully.
-                                    # For now, if it fails, we might not be able to train D on this fake sample correctly.
-                                    # Let's assume _calculate_technical_indicators is robust or we accept potential errors here.
                                     raise ValueError("Feature count mismatch after external TI calculation for fake data.")
                                 fake_batch_for_d_list.append(sample_with_tis_df.values)
-                            except TypeError as te: # Catch the specific TypeError from pandas-ta
-                                self.logger.error(f"TypeError during _calculate_technical_indicators for FAKE data sample {i}: {te}. Columns: {sample_df.columns}. Data head:\\n{sample_df.head()}", exc_info=True)
-                                # Create a zero array of the expected shape for this sample to allow training to continue
-                                # This is a stop-gap. The root cause of NaNs/NoneTypes in generated data or TI calc needs fixing.
-                                # For now, if it fails, we might not be able to train D on this fake sample correctly.
-                                # Let's assume _calculate_technical_indicators is robust or we accept potential errors here.
+                            except TypeError as te:
+                                self.logger.error(f"TypeError during _calculate_technical_indicators for FAKE data sample {i}: {te}. Columns: {sample_df.columns}. Data head:\\\\n{sample_df.head()}", exc_info=True)
                                 zero_sample = np.zeros((self.seq_len, self.num_features_for_discriminator))
                                 fake_batch_for_d_list.append(zero_sample)
                                 self.logger.warning(f"Replaced problematic fake sample {i} with zeros due to TI calculation error.")
                             except Exception as e_ti_fake:
                                 self.logger.error(f"Error in _calculate_technical_indicators for FAKE data sample {i}: {e_ti_fake}", exc_info=True)
-                                # Fallback to zeros for this sample
                                 zero_sample = np.zeros((self.seq_len, self.num_features_for_discriminator))
                                 fake_batch_for_d_list.append(zero_sample)
                                 self.logger.warning(f"Replaced problematic fake sample {i} with zeros due to TI calculation error.")
-
 
                         fake_batch_for_d = np.array(fake_batch_for_d_list)
                         self.logger.debug(f"Fake batch for D (after external TIs) shape: {fake_batch_for_d.shape}")
@@ -1648,18 +1594,37 @@ class GANTrainerPlugin:
 
                 except Exception as e_gan_train:
                     self.logger.error(f"Error during GAN model training (generator update): {e_gan_train}", exc_info=True)
-                    g_loss = [np.nan, np.nan] # Indicate failure
+                    g_loss = [np.nan, np.nan] 
+                finally:
+                    # Reset discriminator's trainable state for next iteration
+                    self.discriminator.trainable = True
 
             # Store losses
-            d_losses.append(d_loss[0] if isinstance(d_loss, (list, np.ndarray)) and len(d_loss) > 0 else np.nan)
-            g_losses.append(g_loss[0] if isinstance(g_loss, (list, np.ndarray)) and len(g_loss) > 0 else np.nan)
+            # Ensure d_loss and g_loss are lists/arrays and have at least one element before accessing [0]
+            current_d_loss_val = d_loss[0] if hasattr(d_loss, '__len__') and len(d_loss) > 0 and not np.isnan(d_loss[0]) else np.nan
+            current_g_loss_val = g_loss[0] if hasattr(g_loss, '__len__') and len(g_loss) > 0 and not np.isnan(g_loss[0]) else np.nan
+            d_losses.append(current_d_loss_val)
+            g_losses.append(current_g_loss_val)
 
             epoch_duration = time.time() - epoch_start_time
             # Log progress
-            if (epoch + 1) % (save_interval // 10 if save_interval >= 100 else 10) == 0 or epoch == 0 : # Log more frequently initially or if save_interval is small
-                self.logger.info(f"Epoch {epoch+1}/{epochs} | D Loss: {d_loss[0]:.4f} (R: {d_loss_real[0]:.4f}, F: {d_loss_fake[0]:.4f}) "
-                                 f"| D Acc: {100*d_loss[1]:.2f}% (R: {100*d_loss_real[1]:.2f}%, F: {100*d_loss_fake[1]:.2f}%) "
-                                 f"| G Loss: {g_loss[0]:.4f} | G Acc: {100*g_loss[1]:.2f}% | Time/Epoch: {epoch_duration:.2f}s")
+            if (epoch + 1) % (save_interval // 10 if save_interval >= 100 else 10) == 0 or epoch == 0 :
+                # Safely access parts of d_loss, d_loss_real, d_loss_fake, g_loss for logging
+                log_d_loss = d_loss[0] if hasattr(d_loss, '__len__') and len(d_loss) > 0 else np.nan
+                log_d_acc = d_loss[1] * 100 if hasattr(d_loss, '__len__') and len(d_loss) > 1 else np.nan
+                
+                log_d_loss_real = d_loss_real[0] if hasattr(d_loss_real, '__len__') and len(d_loss_real) > 0 else np.nan
+                log_d_acc_real = d_loss_real[1] * 100 if hasattr(d_loss_real, '__len__') and len(d_loss_real) > 1 else np.nan
+                
+                log_d_loss_fake = d_loss_fake[0] if hasattr(d_loss_fake, '__len__') and len(d_loss_fake) > 0 else np.nan
+                log_d_acc_fake = d_loss_fake[1] * 100 if hasattr(d_loss_fake, '__len__') and len(d_loss_fake) > 1 else np.nan
+                
+                log_g_loss = g_loss[0] if hasattr(g_loss, '__len__') and len(g_loss) > 0 else np.nan
+                log_g_acc = g_loss[1] * 100 if hasattr(g_loss, '__len__') and len(g_loss) > 1 else np.nan
+                
+                self.logger.info(f"Epoch {epoch+1}/{epochs} | D Loss: {log_d_loss:.4f} (R: {log_d_loss_real:.4f}, F: {log_d_loss_fake:.4f}) "
+                                 f"| D Acc: {log_d_acc:.2f}% (R: {log_d_acc_real:.2f}%, F: {log_d_acc_fake:.2f}%) "
+                                 f"| G Loss: {log_g_loss:.4f} | G Acc: {log_g_acc:.2f}% | Time/Epoch: {epoch_duration:.2f}s")
 
             # Save models and plot losses at intervals
             if (epoch + 1) % save_interval == 0 or (epoch + 1) == epochs:
