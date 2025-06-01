@@ -786,6 +786,32 @@ class GANTrainerPlugin:
             
             generated_base_features_raw = self.generator.predict(generator_inputs, verbose=0)
 
+            # Ensure generated_base_features_raw is 3D before TI calculation
+            # This mirrors the Reshape layer in _build_gan for the standalone generator's output
+            if generated_base_features_raw.ndim == 2:
+                # Infer target_reshape_dim which is self.actual_generator_output_dim
+                # self.actual_generator_output_dim should be set correctly in __init__
+                target_reshape_dim = -1 # Default, works if only one dimension is unspecified
+                if hasattr(self, 'actual_generator_output_dim') and self.actual_generator_output_dim > 0:
+                    target_reshape_dim = self.actual_generator_output_dim
+                
+                # self.generator_output_actual_seq_len should also be correctly set
+                # It defines the sequence length dimension for the reshape operation
+                if hasattr(self, 'generator_output_actual_seq_len') and self.generator_output_actual_seq_len > 0:
+                    try:
+                        generated_base_features_raw = generated_base_features_raw.reshape(
+                            (self.params["gan_batch_size"], self.generator_output_actual_seq_len, target_reshape_dim)
+                        )
+                        self.logger.info(f"GANTrainerPlugin (train): Reshaped generator output from 2D to 3D. New shape: {generated_base_features_raw.shape}")
+                    except ValueError as e:
+                        self.logger.error(f"GANTrainerPlugin (train): Error reshaping 2D generator output to 3D. Shape was {generated_base_features_raw.shape}, target_reshape_dim={target_reshape_dim}, generator_output_actual_seq_len={self.generator_output_actual_seq_len}. Error: {e}")
+                        raise
+                else:
+                    self.logger.error("GANTrainerPlugin (train): Cannot reshape 2D generator output. 'generator_output_actual_seq_len' is not properly set.")
+                    # Potentially raise an error or handle as critical failure
+                    raise AttributeError("'generator_output_actual_seq_len' not set, cannot reshape generator output.")
+
+
             # Calculate TIs for generated data
             generated_features_with_tis = self._calculate_technical_indicators(generated_base_features_raw) # (batch, seq_len, num_features_for_discriminator)
             generated_data_for_discriminator = generated_features_with_tis
@@ -1163,6 +1189,8 @@ class GANTrainerPlugin:
                         processed_indicator_calls.add(call_key)
                         logger.debug(f"Calculated MOM_{length}")
                     except Exception as e: logger.warning(f"Error calculating MOM_{length}: {e}")
+
+           
 
             # ROC (Rate of Change) (e.g., ROC_14)
             roc_configs = set() # Stores (length)
