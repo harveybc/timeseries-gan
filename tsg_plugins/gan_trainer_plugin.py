@@ -2,23 +2,24 @@
 
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers, Model
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, LSTM, GRU, Bidirectional, Concatenate, LayerNormalization, Dropout, LeakyReLU, Reshape, Flatten, Activation, Add, Multiply, Attention, Embedding, Conv1D, MaxPooling1D, GlobalAveragePooling1D, TimeDistributed
+from tensorflow.keras.optimizers import Adam, RMSprop, SGD
+from tensorflow.keras.metrics import Precision, Recall, AUC, MeanSquaredError, MeanAbsoluteError
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint, TensorBoard, CSVLogger
 from tensorflow.keras.utils import plot_model
-import pandas as pd
-import pandas_ta as ta
-import numpy as np
-import logging
-import os
-import time
-import json # Added for saving metrics
-import matplotlib.pyplot as plt # Added for plotting
-from copy import deepcopy
-from typing import Any, Dict, List, Tuple, Union, Optional
+from tensorflow.keras.regularizers import l1, l2, l1_l2
+import tensorflow.keras.backend as K
 
-# Assuming your generator plugin (like VAEGeneratorPlugin) and a new discriminator model definition exist
-# from .generator_plugin import VAEGeneratorPlugin # Or your specific generator plugin
-# from .discriminator_model import build_discriminator # You'll create this
+import numpy as np
+import pandas as pd
+import os
+import json
+import logging # Ensure logging is imported
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from copy import deepcopy
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # Custom Keras Layer for Technical Indicator Calculation using tf.numpy_function
-class TensorFlowTALayer(layers.Layer):
+class TensorFlowTALayer(keras.layers.Layer):
     def __init__(self, base_feature_names: List[str], ti_names_to_calculate: List[str],
                  num_base_features: int, num_total_features: int, seq_len: int, **kwargs):
         super().__init__(**kwargs)
@@ -1080,7 +1081,7 @@ class GANTrainerPlugin:
               # No, if TIs are external, the generator output should still be sliced to num_base_features,
               # then TIs are calculated on these, then concatenated. The discriminator then sees num_features_for_discriminator.
               # So, slicing to num_base_features is generally correct here.
-            target_feature_count_for_slicing = self.num_base_features
+            target_feature_count for_slicing = self.num_base_features
             self.logger.info(f"GAN Build: TensorFlowTALayer is NOT active. Generator output will be sliced to self.num_base_features ({target_feature_count_for_slicing}) for external TI calculation.")
 
 
