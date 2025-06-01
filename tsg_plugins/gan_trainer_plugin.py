@@ -394,14 +394,14 @@ class GANTrainerPlugin:
         self.gen_input_seq_len = self.params.get("seq_len", 18)
         self.gen_input_latent_dim = self.params.get("latent_dim", 32) # Used for GAN latent input
         
-        self.base_feature_names = self.params.get("base_feature_names_ordered", [])
-        self.num_base_features = len(self.base_feature_names)
+        self.base_feature_names_ordered = self.params.get("base_feature_names_ordered", []) # CORRECTED
+        self.num_base_features = len(self.base_feature_names_ordered) # CORRECTED to use _ordered
         
         # Derive ti_names_to_calculate from discriminator features and base features
         all_discriminator_features = self.params.get("feature_names_for_discriminator_ordered", [])
-        if all_discriminator_features and self.base_feature_names:
-            # This assumes base_feature_names are a subset and appear first in all_discriminator_features
-            self.ti_names_to_calculate = [f for f in all_discriminator_features if f not in self.base_feature_names]
+        if all_discriminator_features and self.base_feature_names_ordered:
+            # This assumes base_feature_names_ordered are a subset and appear first in all_discriminator_features
+            self.ti_names_to_calculate = [f for f in all_discriminator_features if f not in self.base_feature_names_ordered]
         else:
             self.ti_names_to_calculate = []
             self.logger.warning("_initialize_core_parameters_from_config: Could not derive ti_names_to_calculate due to missing feature lists in params.")
@@ -417,7 +417,7 @@ class GANTrainerPlugin:
         self.logger.info(
             f"GANTrainerPlugin (_initialize_core_parameters): "
             f"gen_input_seq_len={self.gen_input_seq_len}, gen_input_latent_dim={self.gen_input_latent_dim}, "
-            f"num_base_features={self.num_base_features} (from {len(self.base_feature_names)} names), "
+            f"num_base_features={self.num_base_features} (from {len(self.base_feature_names_ordered)} names), "
             f"num_tis={self.num_tis} (from {len(self.ti_names_to_calculate)} names), "
             f"num_features_for_discriminator={self.num_features_for_discriminator}, "
             f"seq_len (for D and TI)={self.seq_len}, "
@@ -444,8 +444,8 @@ class GANTrainerPlugin:
         self.gen_input_latent_dim = self.params.get("latent_dim", 32) # Default to 32
         
         # Update feature-related attributes based on the latest self.params
-        self.base_feature_names = self.params.get("base_feature_names_ordered", [])
-        self.num_base_features = len(self.base_feature_names)
+        self.base_feature_names_ordered = self.params.get("base_feature_names_ordered", [])
+        self.num_base_features = len(self.base_feature_names_ordered)
         
         self.ti_names_to_calculate = self.params.get("ti_names_to_calculate", [])
         self.num_tis = len(self.ti_names_to_calculate)
