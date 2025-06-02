@@ -475,8 +475,13 @@ class GANTrainerPlugin:
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
-        self.ti_names_for_discriminator = []
-        self.config = deepcopy(config)
+        self.ti_names_for_discriminator = [] # Initialize this attribute first
+        # Initialize self.params by copying class-level plugin_params and then updating with config
+        self.params = deepcopy(self.plugin_params) # Initialize self.params with defaults
+        if config:
+            self.params.update(config) # Update with instance-specific config
+
+        self.config = deepcopy(config) # Keep a copy of the original config if needed for other purposes
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
         self.preprocessor_plugin_instance = preprocessor_plugin_instance
@@ -493,7 +498,16 @@ class GANTrainerPlugin:
 
         self.logger.info("GANTrainerPlugin: Initializing...")
         
-        # Core model components will be built in set_params
+        # Update self.params with any relevant items from the main config passed to __init__
+        # This ensures that parameters set in the main config override plugin defaults if necessary.
+        # The previous self.params.update(config) should handle this, but let's be explicit if needed.
+        # For example, if 'latent_dim' or 'seq_len' are in the main config and should directly set plugin params:
+        # relevant_config_keys_for_params = ['latent_dim', 'seq_len', 'gan_epochs', 'gan_batch_size'] # etc.
+        # for key in relevant_config_keys_for_params:
+        #     if key in self.config:
+        #         self.params[key] = self.config[key]
+
+        # Core model components will be built in set_params or called from there
         self.generator: Optional[Model] = None 
         self.discriminator: Optional[Model] = None
         self.gan_model: Optional[Model] = None
@@ -528,37 +542,42 @@ class GANTrainerPlugin:
 
     def _get_config_param(self, key: str, default: Any = None) -> Any:
         """
-        Helper method to get a parameter from the config with a default value.
+        Helper method to get a parameter from self.params (primary) or self.config (fallback).
         Args:
             key: Parameter key as string.
             default: Default value to return if the key is not found.
         Returns:
-            Value of the parameter from the config, or the default value.
+            Value of the parameter from self.params or self.config, or the default value.
         """
+        # Prioritize self.params as it should contain the merged and processed parameters
+        if key in self.params:
+            return self.params[key]
+        # Fallback to self.config if needed, though ideally self.params is comprehensive
+        # self.logger.debug(f"_get_config_param: Key '{key}' not in self.params, checking self.config.")
         return self.config.get(key, default)
 
     def _initialize_core_parameters_from_config(self):
         """Initializes core GAN, Generator, and Discriminator parameters.
         Derives dimensions and input names from Keras models where possible,
-        falling back to config values if necessary.
+        falling back to config values (from self.params) if necessary.
         """
         self.logger.info("Starting _initialize_core_parameters_from_config...")
 
-        # --- Ensure Feeder Key Names are available (expected to be set in __init__) ---
-        # These are used to identify generator input layers by name.
-        # Example initialization in __init__:
-        # self.feeder_key_name_noise = self.params.get("feeder_key_name_noise", "latent")
-        # self.feeder_key_name_conditional = self.params.get("feeder_key_name_conditional", "conditional")
-        # self.feeder_key_name_context = self.params.get("feeder_key_name_context", "context")
-        if not hasattr(self, 'feeder_key_name_noise'):
-            self.logger.warning("Attribute 'feeder_key_name_noise' not set. Defaulting to 'latent'. Consider setting it from config in __init__.")
-            self.feeder_key_name_noise = "latent"
-        if not hasattr(self, 'feeder_key_name_conditional'):
-            self.logger.warning("Attribute 'feeder_key_name_conditional' not set. Defaulting to 'conditional'. Consider setting it from config in __init__.")
-            self.feeder_key_name_conditional = "conditional"
-        if not hasattr(self, 'feeder_key_name_context'):
-            self.logger.warning("Attribute 'feeder_key_name_context' not set. Defaulting to 'context'. Consider setting it from config in __init__.")
-            self.feeder_key_name_context = "context"
+        # --- Ensure Feeder Key Names are available (expected to be set in self.params) ---
+        if 'feeder_key_name_noise' not in self.params:
+            self.logger.warning("Parameter 'feeder_key_name_noise' not in self.params. Defaulting to 'latent'.")
+            self.params['feeder_key_name_noise'] = "latent"
+        self.feeder_key_name_noise = self.params['feeder_key_name_noise']
+        
+        if 'feeder_key_name_conditional' not in self.params:
+            self.logger.warning("Parameter 'feeder_key_name_conditional' not in self.params. Defaulting to 'conditional'.")
+            self.params['feeder_key_name_conditional'] = "conditional"
+        self.feeder_key_name_conditional = self.params['feeder_key_name_conditional']
+
+        if 'feeder_key_name_context' not in self.params:
+            self.logger.warning("Parameter 'feeder_key_name_context' not in self.params. Defaulting to 'context'.")
+            self.params['feeder_key_name_context'] = "context"
+        self.feeder_key_name_context = self.params['feeder_key_name_context']
 
         # --- Generator Output Parameters (used by Discriminator construction) ---
         self.seq_len = None
@@ -1196,11 +1215,106 @@ class GANTrainerPlugin:
         pass
 
     def set_params(self, **kwargs):
-        # ... (method content as before) ...
-        pass
+        """
+        Updates plugin parameters and rebuilds models if necessary.
+        """
+        self.logger.info(f"GANTrainerPlugin: Setting parameters with kwargs: {list(kwargs.keys())}")
 
-    def get_params(self, deep: bool = True) -> dict:
-        # ... (method content as before) ...
-        pass
+        # Update self.params with new kwargs. This is the primary parameter store.
+        if not hasattr(self, 'params') or self.params is None:
+            self.params = deepcopy(self.plugin_params) # Ensure params is initialized
+            self.logger.info("GANTrainerPlugin.set_params: self.params was not initialized. Initialized with plugin_params defaults.")
 
-    # ... (any other methods like generate_synthetic_data, etc.)
+        for key, value in kwargs.items():
+            self.params[key] = value
+            # Also update self.config if these kwargs are meant to be part of the main config scope
+            # This depends on how self.config is used elsewhere. Generally, self.params should be sufficient.
+            if hasattr(self, 'config') and self.config is not None:
+                self.config[key] = value 
+            else:
+                self.config = {key: value} # Initialize if it doesn't exist
+
+        self.logger.info(f"GANTrainerPlugin: Updated self.params. Keys: {list(self.params.keys())}")
+
+        # Update instance attributes that are direct copies of params for convenience
+        # Example: self.epochs = self.params.get('gan_epochs', 10000)
+        # self.batch_size = self.params.get('gan_batch_size', 32)
+
+        # Resolve paths for saving results based on updated params
+        self.results_base_dir = self.params.get("results_base_dir", "examples/results/gan_training")
+        self.models_dir = os.path.join(self.results_base_dir, self.params.get("save_model_dir", "models"))
+        self.plots_dir = os.path.join(self.results_base_dir, self.params.get("save_plot_dir", "plots"))
+        self.metrics_dir = os.path.join(self.results_base_dir, self.params.get("save_metrics_dir", "metrics"))
+
+        os.makedirs(self.models_dir, exist_ok=True)
+        os.makedirs(self.plots_dir, exist_ok=True)
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        self.logger.info(f"GANTrainerPlugin: Results will be saved under {self.results_base_dir}")
+
+        # Model plot file paths
+        self.generator_model_plot_file = os.path.join(self.plots_dir, self.params.get("generator_model_plot_file", "generator_architecture.png"))
+        self.discriminator_model_plot_file = os.path.join(self.plots_dir, self.params.get("discriminator_model_plot_file", "discriminator_architecture.png"))
+        self.gan_model_plot_file = os.path.join(self.plots_dir, self.params.get("gan_model_plot_file", "gan_architecture.png"))
+        self.model_plot_dpi = self.params.get("model_plot_dpi", 300)
+
+        # Retrieve the generator model from the generator_plugin_instance
+        if self.generator_plugin:
+            if hasattr(self.generator_plugin, 'generator_model') and self.generator_plugin.generator_model:
+                self.generator = self.generator_plugin.generator_model
+                self.logger.info("GANTrainerPlugin: Generator model retrieved from generator_plugin.generator_model.")
+            elif hasattr(self.generator_plugin, 'model') and self.generator_plugin.model: # Fallback
+                self.generator = self.generator_plugin.model
+                self.logger.info("GANTrainerPlugin: Generator model retrieved from generator_plugin.model.")
+            elif hasattr(self.generator_plugin, 'get_model') and callable(self.generator_plugin.get_model):
+                self.generator = self.generator_plugin.get_model()
+                self.logger.info("GANTrainerPlugin: Generator model retrieved via generator_plugin.get_model().")
+            else:
+                self.logger.error("GANTrainerPlugin: Could not retrieve generator model from generator_plugin_instance.")
+                # raise ValueError("Generator model not found in generator_plugin_instance.") # Consider if this should be fatal
+        else:
+            self.logger.warning("GANTrainerPlugin: generator_plugin_instance is not provided. Generator model cannot be set.")
+
+        if self.generator is None:
+            self.logger.error("GANTrainerPlugin: CRITICAL - Generator model is None after attempting to retrieve it. Cannot proceed with GAN setup.")
+            # Depending on workflow, this might be acceptable if models are loaded later, but typically fatal for GAN building.
+            # For now, we allow it to proceed, but _initialize_core_parameters_from_config and model building will likely fail.
+
+        # Initialize core parameters (like seq_len, latent_dim, feature_dims) based on the (potentially new) generator and config
+        # This must be called AFTER self.generator is set and self.params is updated.
+        self._initialize_core_parameters_from_config()
+        self.logger.info("GANTrainerPlugin: Core parameters initialized after set_params.")
+
+        # Build or re-build models if they don't exist or if critical parameters changed
+        # For simplicity, let's assume we always rebuild if set_params is called with a generator.
+        # More sophisticated logic could check if a rebuild is truly necessary.
+        if self.generator: # Only build if we have a generator
+            self.logger.info("GANTrainerPlugin: Building/Rebuilding Discriminator and GAN models...")
+            if self.discriminator:
+                self.logger.info("GANTrainerPlugin: Existing discriminator found, will be replaced.")
+            self.discriminator = self._build_discriminator()
+            
+            if self.gan_model:
+                self.logger.info("GANTrainerPlugin: Existing GAN model found, will be replaced.")
+            self.gan_model = self._build_gan()
+            self.logger.info("GANTrainerPlugin: Discriminator and GAN models built/rebuilt.")
+        else:
+            self.logger.warning("GANTrainerPlugin: Generator model not available in set_params. Discriminator and GAN models not built/rebuilt.")
+
+        self.logger.info("GANTrainerPlugin: set_params complete.")
+
+    def get_params(self, deep: bool = True) -> Dict[str, Any]:
+        """
+        Gets parameters for this plugin.
+        Args:
+            deep: If True, will return a deep copy of the parameters.
+        Returns:
+            A dictionary of parameters.
+        """
+        if not hasattr(self, 'params') or self.params is None:
+            # This case should ideally not happen if __init__ and set_params are correctly called.
+            self.logger.warning("GANTrainerPlugin.get_params: self.params is not initialized. Returning a copy of class-level plugin_params.")
+            return deepcopy(self.plugin_params) if deep else self.plugin_params.copy()
+        
+        return deepcopy(self.params) if deep else self.params.copy()
+
+# ...existing code...
