@@ -116,44 +116,36 @@ def main():
     y la ejecución del pipeline completo (preprocesamiento, entrenamiento, predicción y evaluación).
     """
     print("Parsing initial arguments...")
-    # args, unknown_args = parse_args() # OLD WAY
-    # cli_args: Dict[str, Any] = vars(args) # OLD WAY
+    args, unknown_args = parse_args()
+    cli_args: Dict[str, Any] = vars(args)
 
-    # NEW WAY: Initialize an empty args object or a default one if needed for other logic
-    class EmptyArgs:
-        def __init__(self):
-            self.remote_load_config = None
-            self.load_config = None # No longer loading external config file by default
-            self.username = None
-            self.password = None
-            # Add other args with default values if they are used elsewhere before full config merge
-            # self.quiet_mode = False 
-
-    args = EmptyArgs()
-    cli_args: Dict[str, Any] = {} # No CLI args to override defaults initially
-    file_config: Dict[str, Any] = {} # No file config loaded by default
-    unknown_args_dict: Dict[str, Any] = {} # No unknown args dict by default
-
-    print("Loading default configuration from app.config.py...")
+    print("Loading default configuration...")
     config: Dict[str, Any] = DEFAULT_VALUES.copy()
     current_config = config # Use current_config as the main mutable config dictionary
 
-    # REMOVED: file_config loading based on args.load_config or args.remote_load_config
+    file_config: Dict[str, Any] = {}
+    # Carga remota de configuración si se solicita
+    if args.remote_load_config:
+        try:
+            file_config = remote_load_config(args.remote_load_config, args.username, args.password)
+            print(f"Loaded remote config: {file_config}")
+        except Exception as e:
+            print(f"Failed to load remote configuration: {e}")
+            sys.exit(1)
 
-    # The config is now directly from DEFAULT_VALUES from app.config.py
-    # No initial merge with file_config or cli_args is needed here if we rely on defaults.
-    # If specific CLI args (other than --config_file) should override DEFAULT_VALUES,
-    # that logic would need to be preserved or adapted.
-    # For now, simplifying to use DEFAULT_VALUES as the primary source.
-    # unknown_args_dict = process_unknown_args(unknown_args) # Not needed if not parsing unknown
-    # current_config = merge_config(current_config, {}, {}, {}, cli_args, unknown_args_dict)
+    # Carga local de configuración si se solicita
+    if args.load_config:
+        try:
+            file_config = load_config(args.load_config)
+            print(f"Loaded local config: {file_config}")
+        except Exception as e:
+            print(f"Failed to load local configuration: {e}")
+            sys.exit(1)
 
-
-    # --- Determine operation mode ---
-    # Assuming 'train_gan' as the default mode since --mode is removed.
-    # If other modes are needed, this needs to be handled differently.
-    current_config['mode'] = 'train_gan'
-    print(f"Operation mode set to: {current_config['mode']}")
+    # Primera fusión de la configuración (sin parámetros específicos de plugins)
+    print("Merging configuration with CLI arguments and unknown args (first pass, no plugin params)...")
+    unknown_args_dict = process_unknown_args(unknown_args)
+    current_config = merge_config(current_config, {}, {}, file_config, cli_args, unknown_args_dict)
 
     # --- Initialize Plugins ---
     feeder_plugin = None
@@ -589,37 +581,18 @@ def main():
 
     if is_gan_training_mode:
         print("▶ Starting GAN training mode...")
-        if trainer_plugin:
-            try:
-                x_train_file_path = current_config.get("x_train_file")
-                gan_epochs = current_config.get("gan_epochs")
-                gan_batch_size = current_config.get("gan_batch_size")
+        if not trainer_plugin:
+            print("❌ GANTrainerPlugin not loaded. Cannot start GAN training.")
+            sys.exit(1)
+        try:
+            trainer_plugin.train(x_train_file=current_config.get("x_train_file"))
+            print("✔︎ GAN training process finished.")
+            sys.exit(0) 
+        except Exception as e:
+            print(f"❌ GAN training failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
 
-                if x_train_file_path and os.path.exists(x_train_file_path):
-                    print(f"Loading training data from: {x_train_file_path}")
-                    # Ensure pandas (pd) and os are imported at the top of main.py
-                    x_real_df = pd.read_csv(x_train_file_path)
-                    print(f"Data loaded. Shape: {x_real_df.shape}. Calling trainer_plugin.train...")
-                    
-                    # Call train with the expected arguments
-                    trainer_plugin.train(
-                        x_real_df=x_real_df,
-                        epochs=gan_epochs,
-                        batch_size=gan_batch_size
-                    )
-                    print("✔︎ GAN training process completed/attempted.")
-                else:
-                    # Use logger if available, otherwise print
-                    error_msg = f"❌ ERROR: x_train_file not found at '{x_train_file_path}' or path not configured. GAN training cannot proceed."
-                    print(error_msg)
-                    # Consider using logging module if integrated: logger.error(error_msg)
-                    # sys.exit(1) # Optionally exit if this is critical
-            except Exception as e:
-                print(f"❌ GAN training failed: {e}")
-                traceback.print_exc() # Ensure traceback is imported
-        else:
-            print("❌ Trainer plugin not available for GAN training mode.")
-    
     elif is_hyperparam_opt_mode:
         print("▶ Running hyperparameter optimization with Optimizer Plugin…")
         try:
@@ -834,7 +807,7 @@ def main():
 
         if X_train_processed_full_anytype is None:
             raise ValueError(f"Preprocessor did not return 'x_train' data after processing '{x_train_file_path}'. Check preprocessor logic and output keys.")
-        # datetimes_train_processed_full_anytype can be None if preprocessor doesn't return it, handle gracefully for initial_datetimes_for_gen_window
+        # datetimes_train_processed_full_anytype can be None if preprocessor doesn't return it, handle gracefully for initial_datetimes_for_gen_window_series
 
         X_train_processed_full_np: np.ndarray
         if isinstance(X_train_processed_full_anytype, pd.DataFrame):

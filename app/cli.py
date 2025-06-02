@@ -50,12 +50,16 @@ def parse_args():
     # Remote config & logging
     parser.add_argument('-rl', '--remote_log', type=str,
                         help='URL of remote API endpoint for saving debug information.')
+    parser.add_argument('-rlc', '--remote_load_config', type=str,
+                        help='URL of remote JSON configuration file to download and execute.')
     parser.add_argument('-rsc', '--remote_save_config', type=str,
                         help='URL of remote API endpoint to save configuration in JSON format.')
     parser.add_argument('-u', '--username', type=str,
                         help='Username for the API endpoint.')
     parser.add_argument('-p', '--password', type=str,
                         help='Password for the API endpoint.')
+    parser.add_argument('-lc', '--load_config', type=str,
+                        help='Path to load a configuration file.')
     parser.add_argument('-sc', '--save_config', type=str,
                         help='Path to save the current configuration.')
     parser.add_argument('-sl', '--save_log', type=str,
