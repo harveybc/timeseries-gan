@@ -35,6 +35,7 @@ DEFAULT_VALUES = {
     "max_steps_train": 25200,
     "latent_shape": [18, 32], 
     "batch_size": 32, 
+    "seq_len": 144, # ADDED: Corresponds to generator_decoder_input_window_size or expected output sequence length
     
     # --- Parameters for FeederPlugin ---
     "feeder_sampling_method": "standard_normal", 
