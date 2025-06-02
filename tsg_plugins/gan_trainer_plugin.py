@@ -472,7 +472,7 @@ class GANTrainerPlugin:
         self.config = deepcopy(config)
         self.generator_plugin = generator_plugin_instance
         self.feeder_plugin = feeder_plugin_instance
-        self.preprocessor_plugin = preprocessor_plugin_instance
+        self.preprocessor_plugin_instance = preprocessor_plugin_instance
 
         # Initialize logger for this instance
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
@@ -787,30 +787,67 @@ class GANTrainerPlugin:
         current_plugin_defaults.update(self.config) # self.config now contains initial config + **params
         self.params = current_plugin_defaults
 
+        # --- ADDED: Assign self.generator from generator_plugin_instance BEFORE initializing core params ---
+        if self.generator_plugin: # Check if the plugin instance itself exists
+            if hasattr(self.generator_plugin, 'generator_model') and self.generator_plugin.generator_model:
+                self.generator = self.generator_plugin.generator_model
+                self.logger.info("GANTrainerPlugin (set_params): Assigned self.generator from self.generator_plugin.generator_model.")
+            elif hasattr(self.generator_plugin, 'model') and self.generator_plugin.model: # Common fallback name
+                self.generator = self.generator_plugin.model
+                self.logger.info("GANTrainerPlugin (set_params): Assigned self.generator from self.generator_plugin.model.")
+            else:
+                self.logger.warning("GANTrainerPlugin (set_params): self.generator_plugin exists, but 'generator_model' or 'model' attribute not found or is None. self.generator remains potentially None.")
+        else:
+            self.logger.warning("GANTrainerPlugin (set_params): self.generator_plugin is None. Cannot assign self.generator from it.")
+        # --- END ADDED ---
+
         # After self.params is fully updated, re-initialize core parameters
-        self._initialize_core_parameters_from_config()
+        self._initialize_core_parameters_from_config() # Now self.generator should be set if available
 
         # Update generator's actual output dim if generator is available
-        if self.generator and hasattr(self.generator, 'output_shape'):
-            try: # Try .output_shape first
-                if self.generator.output_shape and len(self.generator.output_shape) > 1 and isinstance(self.generator.output_shape[-1], int):
-                    self.actual_generator_output_dim = self.generator.output_shape[-1]
-                else: # Try .output.shape as a fallback
-                    self.actual_generator_output_dim = self.generator.output.shape[-1]
-                self.logger.info(f"GANTrainerPlugin (set_params): Updated actual_generator_output_dim: {self.actual_generator_output_dim}")
+        self.actual_generator_output_dim = self.num_base_features # Initialize with a fallback
 
-                if self.actual_generator_output_dim != self.num_base_features:
-                    self.logger.warning(
-                        f"GANTrainerPlugin (set_params): MISMATCH! Actual generator output dim ({self.actual_generator_output_dim}) "
-                        f"vs configured num_base_features ({self.num_base_features}). Slicing will occur in _build_gan."
-                    )
-            except Exception as e_shape:
-                 self.logger.warning(f"GANTrainerPlugin (set_params): Could not get generator output dim: {e_shape}. Using self.num_base_features ({self.num_base_features}) as assumed actual_generator_output_dim.")
-                 self.actual_generator_output_dim = self.num_base_features
+        if self.generator:
+            resolved_output_dim = None
+            # Try to get from generator.output_shape
+            if hasattr(self.generator, 'output_shape') and self.generator.output_shape:
+                output_shape = self.generator.output_shape
+                if isinstance(output_shape, (list, tuple)) and len(output_shape) > 0:
+                    last_dim = output_shape[-1]
+                    if isinstance(last_dim, int):
+                        resolved_output_dim = last_dim
+                        self.logger.info(f"GANTrainerPlugin (set_params): actual_generator_output_dim from generator.output_shape: {resolved_output_dim}")
+
+            # If not found, try from generator.output.shape (for symbolic tensors)
+            if resolved_output_dim is None and hasattr(self.generator, 'output') and hasattr(self.generator.output, 'shape'):
+                tensor_shape = self.generator.output.shape
+                if tensor_shape and len(tensor_shape) > 0:
+                    last_tensor_dim = tensor_shape[-1]
+                    if isinstance(last_tensor_dim, tf.compat.v1.Dimension): # TensorFlow Dimension object
+                        if last_tensor_dim.value is not None:
+                            resolved_output_dim = last_tensor_dim.value
+                            self.logger.info(f"GANTrainerPlugin (set_params): actual_generator_output_dim from generator.output.shape (tf.Dimension): {resolved_output_dim}")
+                    elif isinstance(last_tensor_dim, int): # Plain integer
+                        resolved_output_dim = last_tensor_dim
+                        self.logger.info(f"GANTrainerPlugin (set_params): actual_generator_output_dim from generator.output.shape (int): {resolved_output_dim}")
+            
+            if resolved_output_dim is not None:
+                self.actual_generator_output_dim = resolved_output_dim
+            else:
+                self.logger.warning(f"GANTrainerPlugin (set_params): Could not reliably determine actual_generator_output_dim from generator model. Using self.num_base_features ({self.num_base_features}) as fallback.")
+                # self.actual_generator_output_dim is already self.num_base_features
+
+            if self.num_base_features is not None and self.actual_generator_output_dim != self.num_base_features:
+                self.logger.warning(
+                    f"GANTrainerPlugin (set_params): MISMATCH! Actual generator output dim ({self.actual_generator_output_dim}) "
+                    f"vs configured num_base_features ({self.num_base_features}). Check model architecture and configurations."
+                )
+        else:
+            self.logger.warning("GANTrainerPlugin (set_params): self.generator is None. Cannot determine actual_generator_output_dim. Using self.num_base_features.")
+            # self.actual_generator_output_dim is already self.num_base_features
 
 
         # Re-initialize optimizers if learning rates might have changed
-        # (This logic is from existing code, seems fine)
         if hasattr(self, 'g_optimizer') and self.g_optimizer is not None:
             current_lr_g = self.params.get("generator_lr", 1e-4); current_beta1_g = self.params.get("generator_beta1", 0.5)
             if self.g_optimizer.learning_rate != current_lr_g or self.g_optimizer.beta_1 != current_beta1_g:
@@ -831,15 +868,13 @@ class GANTrainerPlugin:
         if self.generator:
             self.logger.info("GANTrainerPlugin (set_params): Generator is available. Building/rebuilding Discriminator and GAN models.")
             try:
-                # Ensure core parameters are up-to-date before building
-                # self._initialize_core_parameters_from_config() # Already called earlier in set_params
-
-                self.logger.info(f"GANTrainerPlugin (set_params): About to build Discriminator. Current relevant params: self.seq_len={self.seq_len}, self.num_features_for_discriminator={self.num_features_for_discriminator}")
+                # Ensure core parameters are up-to-date before building (already called)
+                self.logger.info(f"GANTrainerPlugin (set_params): About to build Discriminator. Relevant params: seq_len={self.seq_len}, num_features_for_discriminator={self.num_features_for_discriminator}, num_base_features={self.num_base_features}")
                 self.discriminator = self._build_discriminator()
                 
-                if self.discriminator: # Check if discriminator was built successfully
-                    self.logger.info(f"GANTrainerPlugin (set_params): Discriminator built. About to build GAN. Current relevant params for GAN inputs: latent_dim={self.gen_input_latent_dim}, conditional_dim={self.conditional_dim_for_generator}, context_dim={self.context_dim_for_generator}")
-                    self.gan_model = self._build_gan() # _build_gan also checks for self.discriminator
+                if self.discriminator: 
+                    self.logger.info(f"GANTrainerPlugin (set_params): Discriminator built. About to build GAN. Relevant params for GAN inputs: latent_input_shape={self.latent_input_shape_for_gan_input_layer}, conditional_dim={self.conditional_dim_for_generator}, context_dim={self.context_dim_for_generator}")
+                    self.gan_model = self._build_gan() 
                     if self.gan_model:
                         self.logger.info("GANTrainerPlugin (set_params): Discriminator and GAN models built/rebuilt successfully.")
                     else:
@@ -850,13 +885,12 @@ class GANTrainerPlugin:
                 self.logger.error(f"GANTrainerPlugin (set_params): Error during model building: {e}", exc_info=True)
         else:
             self.logger.warning("GANTrainerPlugin (set_params): Generator is not available. Discriminator and GAN models cannot be built/rebuilt at this time.")
-            # Ensure models are None if generator is not available
             self.discriminator = None
             self.gan_model = None
             self.logger.info("GANTrainerPlugin (set_params): Discriminator and GAN models set to None as generator is unavailable.")
 
-        # Note: The old gan_model_dir is not used with the new path structure.
-        # Directories are created on-demand by save_models, _plot_losses etc.
+    # Note: The old gan_model_dir is not used with the new path structure.
+    # Directories are created on-demand by save_models, _plot_losses etc.
 
     def _get_scaled_date_features(self, datetimes_series: pd.Series) -> np.ndarray:
         """
@@ -1121,7 +1155,7 @@ class GANTrainerPlugin:
 
         # Extract fundamental features for conditional input
         conditional_fundamental_cols = self.params.get("conditional_fundamental_feature_names", [])
-        conditional_fundamental_df = None
+                             conditional_fundamental_df = None
         if conditional_fundamental_cols:
             missing_fund_cols = [col for col in conditional_fundamental_cols if col not in x_real_df.columns]
             if missing_fund_cols:
