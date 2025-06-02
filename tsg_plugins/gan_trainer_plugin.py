@@ -408,14 +408,13 @@ class GANTrainerPlugin:
         "discriminator_lr": 1e-4,
         "discriminator_beta1": 0.5,
         "gan_save_interval": 500,
-        "latent_dim": 32,
-        "seq_len": 18,
-        # "gan_model_dir": "models/gan_trained", # Replaced by new path structure
+        # "latent_dim": 32, # This will be derived or taken from generator config
+        # "seq_len": 18, # This will be derived from generator output
         "discriminator_conv_filters": [64, 128],
         "discriminator_conv_kernel_size": 3,
         "discriminator_lstm_units": 64,
         "discriminator_dropout_rate": 0.3,
-        "gan_generator_output_actual_seq_len": 1,
+        # "gan_generator_output_actual_seq_len": 1, # Derived from generator
         "enable_reduce_lr_on_plateau": True,
         "lr_reduction_factor": 0.5,
         "lr_patience": 50,
@@ -428,11 +427,10 @@ class GANTrainerPlugin:
         "es_min_delta": 0.001,
         "es_monitor_metric": "g_loss",
 
-        # New structured path configuration
         "results_base_dir": "examples/results/phase_4_3",
-        "save_model_dir": "models", # Subdirectory for .keras files under results_base_dir
-        "save_plot_dir": "plots",   # Subdirectory for .png plots under results_base_dir
-        "save_metrics_dir": "metrics", # Subdirectory for .json metrics under results_base_dir
+        "save_model_dir": "models",
+        "save_plot_dir": "plots",
+        "save_metrics_dir": "metrics",
 
         "generator_model_plot_file": "generator_architecture.png",
         "discriminator_model_plot_file": "discriminator_architecture.png",
@@ -441,18 +439,32 @@ class GANTrainerPlugin:
 
         "save_generator_epoch_template": "generator_epoch_{epoch}.keras",
         "final_generator_model_filename": "generator_final.keras",
-
         "save_discriminator_epoch_template": "discriminator_epoch_{epoch}.keras",
         "final_discriminator_model_filename": "discriminator_final.keras",
-
         "save_gan_epoch_template": "gan_epoch_{epoch}.keras",
         "final_gan_model_filename": "gan_final.keras",
-
         "loss_plot_epoch_template": "loss_plot_epoch_{epoch}.png",
         "final_loss_plot_filename": "loss_plot_final.png",
         "loss_plot_dpi": 300,
+        "training_metrics_filename": "training_metrics.json",
+
+        # Configuration for features fed into the discriminator's main architecture
+        # If TensorFlowTALayer is used, these are the base features for TA calculation (e.g. OHLC)
+        # If no TAlayer, these are all features the discriminator ConvNet sees.
+        "discriminator_input_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"], # Example from normalized_d4.csv
         
-        "training_metrics_filename": "training_metrics.json"
+        # Configuration for conditional inputs to the Generator
+        "feeder_date_feature_names_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week"], # From normalized_d4.csv
+        "feeder_max_day_of_month": 31.0,
+        "feeder_max_hour_of_day": 24.0, # Assumes 0-23
+        "feeder_max_day_of_week": 7.0,  # Assumes 0-6
+        # Add other feeder_max_... if other date features like day_of_year, minute_of_hour are used.
+
+        "conditional_fundamental_feature_names": ["S&P500_Close", "vix_close"], # From normalized_d4.csv
+        "num_conditional_prev_tick_features": 5, # Number of features from the start of the real sequence to use as conditional input
+                                                 # Total conditional dim = len(date_feats) + len(fund_feats) + num_prev_tick_feats
+                                                 # e.g. 3 + 2 + 5 = 10
+        "datetime_col_name_in_x_real_df": "DATE_TIME" # Column name for datetimes in input x_real_df
     }
 
     def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, feeder_plugin_instance: Optional[Any] = None, preprocessor_plugin_instance: Optional[Any] = None):
@@ -696,11 +708,6 @@ class GANTrainerPlugin:
             # Example Keras input layer names: "input_latent_vector", "input_conditional_data", "input_context_vector"
             # Or, if not named, rely on the order and config params for dimensions.
 
-            # Store the Keras names of the generator inputs for matching and ordering
-            # self.generator_actual_input_names_ordered will be populated based on the order of self.generator.inputs
-            # and will store the Keras name of each input layer.
-            # This list is then used in the train() method to prepare inputs for generator.predict() in the correct order.
-
             # Default to config values, then try to override with model-derived values.
             self.gen_input_latent_dim = self.params.get('latent_dim')
             self.gen_input_seq_len = self.params.get('seq_len') # Often, latent vector might share seq_len if it's a sequence
@@ -784,20 +791,37 @@ class GANTrainerPlugin:
             # A more robust fallback might try to infer based on typical dimensionalities if there's a standard order.
             if not found_latent:
                 self.logger.warning(f"Could not identify LATENT input layer for generator by name matching feeder key '{self.feeder_key_name_latent}'. Will rely on config value for 'latent_dim' ({self.gen_input_latent_dim}) for GAN construction.")
+            
             if not found_conditional:
-                self.logger.warning(f"Could not identify CONDITIONAL input layer for generator by name matching feeder key '{self.feeder_key_name_conditional}'. Will rely on config value for 'conditional_dim' ({self.conditional_dim_for_generator}) for GAN construction.")
+                self.logger.warning(f"Could not identify CONDITIONAL input layer for generator by name matching feeder key '{self.feeder_key_name_conditional}'.")
+                if self.conditional_dim_for_generator is None: # Check if it's still None
+                    num_date_feats = len(self.params.get("feeder_date_feature_names_for_conditioning", []))
+                    num_fund_feats = len(self.params.get("conditional_fundamental_feature_names", []))
+                    num_prev_tick_feats = self.params.get("num_conditional_prev_tick_features", 0)
+                    calculated_cond_dim_from_parts = num_date_feats + num_fund_feats + num_prev_tick_feats
+                    
+                    if calculated_cond_dim_from_parts > 0:
+                        self.conditional_dim_for_generator = calculated_cond_dim_from_parts
+                        self.logger.info(f"Set 'conditional_dim_for_generator' to {self.conditional_dim_for_generator} based on the sum of configured conditional feature parts, as 'conditional_dim' was not explicitly in params and not model-derived.")
+            
             if not found_context:
                 self.logger.warning(f"Could not identify CONTEXT input layer for generator by name matching feeder key '{self.feeder_key_name_context}'. Will rely on config value for 'context_dim' ({self.context_dim_for_generator}) for GAN construction.")
+                # Similar fallback for context_dim could be added here if needed and if self.context_dim_for_generator is None
 
             # Ensure essential dimensions are set for GAN building
             if self.gen_input_latent_dim is None:
                 self.logger.error(f"Critical: gen_input_latent_dim is None after attempting to derive from model and config. This is required for GAN input. Check generator model input for latent vector and 'latent_dim' in config.")
                 raise ValueError("Generator latent input dimension (gen_input_latent_dim) could not be determined.")
-            # conditional_dim_for_generator and context_dim_for_generator can be None if not used by the GAN, _build_gan should handle this.
+            
             if self.conditional_dim_for_generator is None:
-                self.logger.info("conditional_dim_for_generator is None. GAN will be built without a dedicated conditional input if this was not derived from model or set in config.")
+                self.logger.info("conditional_dim_for_generator is None. GAN will be built without a dedicated conditional input (either not configured via 'conditional_dim', model-derived, or sum of parts is 0).")
+            else:
+                self.logger.info(f"Final 'conditional_dim_for_generator': {self.conditional_dim_for_generator}")
+
             if self.context_dim_for_generator is None:
-                self.logger.info("context_dim_for_generator is None. GAN will be built without a dedicated context input if this was not derived from model or set in config.")
+                self.logger.info("context_dim_for_generator is None. GAN will be built without a dedicated context input (not configured via 'context_dim' or model-derived).")
+            else:
+                self.logger.info(f"Final 'context_dim_for_generator': {self.context_dim_for_generator}")
 
         else: # No generator model or no inputs in generator model
             self.logger.warning("Generator model or its inputs are not defined. GAN input dimensions will be based purely on config values.")
@@ -927,14 +951,16 @@ class GANTrainerPlugin:
         """
         Generates scaled date/time features from a pandas Series of datetime objects.
         Features are scaled to be generally within the 0-1 range.
+        Uses 'feeder_date_feature_names_for_conditioning' and 'feeder_max_...' from self.params.
         """
         if datetimes_series is None or datetimes_series.empty:
             # Determine expected number of features to return an empty array of correct width
+            # Ensure param name matches what's used in plugin_params
             feature_names_for_conditioning = self.params.get("feeder_date_feature_names_for_conditioning", [])
             num_expected_features = len(feature_names_for_conditioning)
             return np.empty((0, num_expected_features), dtype=float)
 
-        # Expected feature names for conditioning, from config
+        # Ensure param name matches what's used in plugin_params
         feature_names_for_conditioning = self.params.get("feeder_date_feature_names_for_conditioning", [])
         if not feature_names_for_conditioning:
             return np.array([]).reshape(len(datetimes_series), 0)
@@ -942,179 +968,291 @@ class GANTrainerPlugin:
         all_scaled_features = []
         num_samples = len(datetimes_series)
 
+        # Ensure dt accessor is available (i.e., series contains datetime-like objects)
+        if not pd.api.types.is_datetime64_any_dtype(datetimes_series):
+            try:
+                datetimes_series = pd.to_datetime(datetimes_series)
+            except Exception as e:
+                self.logger.error(f"_get_scaled_date_features: Could not convert series to datetime: {e}. Returning empty.")
+                return np.empty((num_samples, len(feature_names_for_conditioning) if feature_names_for_conditioning else 0), dtype=float)
+
+
         if "day_of_week" in feature_names_for_conditioning:
-            max_val = self.params.get("feeder_max_day_of_week", 7.0) - 1.0 # 0-6 for dayofweek
-            scaled_val = datetimes_series.dt.dayofweek.values / max_val if max_val > 0 else np.zeros(num_samples)
+            # pandas dayofweek is 0 (Mon) to 6 (Sun). Max value for scaling should be 6.0 if 0-6.
+            # If config "feeder_max_day_of_week" is 7.0, it implies input is 1-7 or 0-6 and we want to scale to [0, 6/6=1] or [0, (7-1)/(7-1)=1]
+            max_val = self.params.get("feeder_max_day_of_week", 7.0) # Default to 7 (e.g. for 1-7 days)
+            # If pandas dayofweek (0-6) is used, scaling should be against 6.
+            # Let's assume max_val in config is the number of unique values (e.g., 7 for days of week).
+            # So, if values are 0-6, then (value) / (max_val - 1)
+            actual_max_for_0_based = max_val - 1.0
+            scaled_val = datetimes_series.dt.dayofweek.values / actual_max_for_0_based if actual_max_for_0_based > 0 else np.zeros(num_samples)
             all_scaled_features.append(scaled_val)
 
         if "day_of_month" in feature_names_for_conditioning:
-            max_val = self.params.get("feeder_max_day_of_month", 31.0) - 1.0 # 0-30 for day_of_month (1-31)
-            scaled_val = (datetimes_series.dt.day.values - 1.0) / max_val if max_val > 0 else np.zeros(num_samples)
+            # pandas day is 1-31. Max value for scaling should be 31.0.
+            # If config "feeder_max_day_of_month" is 31.0.
+            # Scaled: (day - 1) / (max_val - 1)
+            max_val = self.params.get("feeder_max_day_of_month", 31.0)
+            actual_max_for_1_based = max_val -1.0 # (31-1) = 30 for range 0-30
+            scaled_val = (datetimes_series.dt.day.values - 1.0) / actual_max_for_1_based if actual_max_for_1_based > 0 else np.zeros(num_samples)
             all_scaled_features.append(scaled_val)
 
         if "hour_of_day" in feature_names_for_conditioning:
-            max_val = self.params.get("feeder_max_hour_of_day", 24.0) - 1.0 # 0-23 for hour
-            scaled_val = datetimes_series.dt.hour.values / max_val if max_val > 0 else np.zeros(num_samples)
+            # pandas hour is 0-23. Max value for scaling should be 23.0.
+            # If config "feeder_max_hour_of_day" is 24.0 (number of unique values).
+            # Scaled: hour / (max_val - 1)
+            max_val = self.params.get("feeder_max_hour_of_day", 24.0)
+            actual_max_for_0_based = max_val - 1.0 # (24-1) = 23 for range 0-23
+            scaled_val = datetimes_series.dt.hour.values / actual_max_for_0_based if actual_max_for_0_based > 0 else np.zeros(num_samples)
             all_scaled_features.append(scaled_val)
 
         if "minute_of_hour" in feature_names_for_conditioning:
-            max_val = self.params.get("feeder_max_minute_of_hour", 60.0) - 1.0 # 0-59 for minute
-            scaled_val = datetimes_series.dt.minute.values / max_val if max_val > 0 else np.zeros(num_samples)
+            max_val = self.params.get("feeder_max_minute_of_hour", 60.0)
+            actual_max_for_0_based = max_val - 1.0
+            scaled_val = datetimes_series.dt.minute.values / actual_max_for_0_based if actual_max_for_0_based > 0 else np.zeros(num_samples)
             all_scaled_features.append(scaled_val)
 
         if "second_of_minute" in feature_names_for_conditioning:
-            max_val = self.params.get("feeder_max_second_of_minute", 60.0) - 1.0 # 0-59 for second
-            scaled_val = datetimes_series.dt.second.values / max_val if max_val > 0 else np.zeros(num_samples)
+            max_val = self.params.get("feeder_max_second_of_minute", 60.0)
+            actual_max_for_0_based = max_val - 1.0
+            scaled_val = datetimes_series.dt.second.values / actual_max_for_0_based if actual_max_for_0_based > 0 else np.zeros(num_samples)
             all_scaled_features.append(scaled_val)
             
+        if "day_of_year" in feature_names_for_conditioning: # Added
+            max_val = self.params.get("feeder_max_day_of_year", 366.0) # For 1-366
+            actual_max_for_1_based = max_val - 1.0
+            scaled_val = (datetimes_series.dt.dayofyear.values - 1.0) / actual_max_for_1_based if actual_max_for_1_based > 0 else np.zeros(num_samples)
+            all_scaled_features.append(scaled_val)
+
         if "is_weekend" in feature_names_for_conditioning:
-            # dayofweek: Monday=0, Sunday=6. Weekend is Saturday (5) or Sunday (6).
-            is_weekend_val = (datetimes_series.dt.dayofweek >= 5).astype(float)
+            is_weekend_val = (datetimes_series.dt.dayofweek >= 5).astype(float) # Saturday=5, Sunday=6
             all_scaled_features.append(is_weekend_val)
 
         if not all_scaled_features:
-            # This case should ideally not be reached if feature_names_for_conditioning is not empty
-            # and datetimes_series is not empty.
             return np.array([]).reshape(num_samples, 0)
         
         stacked_features = np.stack(all_scaled_features, axis=-1)
+        
+        # Ensure the number of generated features matches the length of feature_names_for_conditioning
+        if stacked_features.shape[1] != len(feature_names_for_conditioning):
+            self.logger.warning(f"_get_scaled_date_features: Mismatch in generated date features ({stacked_features.shape[1]}) vs. requested ({len(feature_names_for_conditioning)}). This may be due to some requested features not being implemented. Padding/truncating.")
+            # Create a correctly shaped array of zeros
+            correctly_shaped_features = np.zeros((num_samples, len(feature_names_for_conditioning)))
+            # Fill with generated features, truncating or leaving zeros if mismatch
+            num_to_copy = min(stacked_features.shape[1], len(feature_names_for_conditioning))
+            if num_to_copy > 0:
+                correctly_shaped_features[:, :num_to_copy] = stacked_features[:, :num_to_copy]
+            return correctly_shaped_features
+            
         return stacked_features
 
+    def _get_scaled_fundamental_features(self, fundamental_features_df_batch: pd.DataFrame) -> np.ndarray:
+        """
+        Extracts and returns specified fundamental features.
+        Assumes features in fundamental_features_df_batch are already scaled (e.g., 0-1).
+        Uses 'conditional_fundamental_feature_names' from self.params.
+        """
+        if fundamental_features_df_batch is None or fundamental_features_df_batch.empty:
+            num_expected_features = len(self.params.get("conditional_fundamental_feature_names", []))
+            return np.empty((0, num_expected_features), dtype=float)
 
-    def _get_data_generator(self, x_real_processed_np: np.ndarray, 
-                            real_datetimes_series_for_batch: Optional[pd.Series], 
+        feature_names = self.params.get("conditional_fundamental_feature_names", [])
+        if not feature_names:
+            return np.array([]).reshape(len(fundamental_features_df_batch), 0)
+
+        # Select the specified columns. Ensure they exist.
+        missing_cols = [col for col in feature_names if col not in fundamental_features_df_batch.columns]
+        if missing_cols:
+            self.logger.warning(f"_get_scaled_fundamental_features: Missing fundamental columns: {missing_cols}. Returning zeros for them.")
+            # Create a result array with zeros
+            result_array = np.zeros((len(fundamental_features_df_batch), len(feature_names)))
+            # Fill in existing columns
+            for i, name in enumerate(feature_names):
+                if name in fundamental_features_df_batch.columns:
+                    result_array[:, i] = fundamental_features_df_batch[name].values
+            return result_array
+            
+        return fundamental_features_df_batch[feature_names].values
+
+
+    def _get_data_generator(self, 
+                            x_real_processed_np_epoch: np.ndarray, 
+                            real_datetimes_series_epoch: Optional[pd.Series],
+                            fundamental_features_df_epoch: Optional[pd.DataFrame],
+                            epoch_context_vectors_aligned: Optional[np.ndarray], # NEW ARGUMENT
                             batch_size: int):
         """
-        Data generator that yields batches of real samples and corresponding conditional data.
-        Assumes x_real_processed_np and real_datetimes_series_for_batch are already shuffled for the epoch.
+        Data generator that yields batches of real samples, corresponding conditional data,
+        and corresponding context data (if available/configured).
+        Assumes input data is already shuffled for the epoch.
         """
-        num_samples = x_real_processed_np.shape[0]
-        indices = np.arange(num_samples) # Data is already shuffled, so iterate sequentially
+        num_samples = x_real_processed_np_epoch.shape[0]
+        indices = np.arange(num_samples)
+
+        date_feature_names = self.params.get("feeder_date_feature_names_for_conditioning", [])
+        fund_feature_names = self.params.get("conditional_fundamental_feature_names", [])
+        num_prev_tick_features = self.params.get("num_conditional_prev_tick_features", 0)
+        
+        expected_total_conditional_features = self.conditional_dim_for_generator if self.conditional_dim_for_generator is not None else 0
 
         for i in range(0, num_samples, batch_size):
             batch_indices = indices[i:i + batch_size]
             actual_batch_size = len(batch_indices)
             if actual_batch_size == 0: continue
 
-            real_samples_batch = x_real_processed_np[batch_indices]
+            real_samples_batch = x_real_processed_np_epoch[batch_indices]
 
-            # --- Conditional Data Batch ---
-            # Target shape: (actual_batch_size, self.conditional_dim_for_generator)
-            # self.conditional_dim_for_generator should be 10 based on the problem description.
+            all_conditional_components = []
+            num_actual_date_features = 0
+            if date_feature_names:
+                if real_datetimes_series_epoch is not None and not real_datetimes_series_epoch.empty:
+                    batch_datetimes = real_datetimes_series_epoch.iloc[batch_indices]
+                    if not batch_datetimes.empty:
+                        scaled_date_features_batch = self._get_scaled_date_features(batch_datetimes)
+                        if scaled_date_features_batch is not None and scaled_date_features_batch.shape[0] == actual_batch_size:
+                            all_conditional_components.append(scaled_date_features_batch)
+                            num_actual_date_features = scaled_date_features_batch.shape[1]
+                        else:
+                            self.logger.warning(f"_get_data_generator: _get_scaled_date_features issue. Shape: {scaled_date_features_batch.shape if scaled_date_features_batch is not None else 'None'}")
+                if num_actual_date_features != len(date_feature_names):
+                    all_conditional_components.append(np.zeros((actual_batch_size, len(date_feature_names))))
+                    num_actual_date_features = len(date_feature_names)
+
+            num_actual_fund_features = 0
+            if fund_feature_names:
+                if fundamental_features_df_epoch is not None and not fundamental_features_df_epoch.empty:
+                    batch_fundamentals_df = fundamental_features_df_epoch.iloc[batch_indices]
+                    if not batch_fundamentals_df.empty:
+                        scaled_fund_features_batch = self._get_scaled_fundamental_features(batch_fundamentals_df)
+                        if scaled_fund_features_batch is not None and scaled_fund_features_batch.shape[0] == actual_batch_size:
+                            all_conditional_components.append(scaled_fund_features_batch)
+                            num_actual_fund_features = scaled_fund_features_batch.shape[1]
+                        else:
+                             self.logger.warning(f"_get_data_generator: _get_scaled_fundamental_features issue. Shape: {scaled_fund_features_batch.shape if scaled_fund_features_batch is not None else 'None'}")
+                if num_actual_fund_features != len(fund_feature_names):
+                    all_conditional_components.append(np.zeros((actual_batch_size, len(fund_feature_names))))
+                    num_actual_fund_features = len(fund_feature_names)
+
+            num_actual_prev_tick_features = 0
+            if num_prev_tick_features > 0:
+                if real_samples_batch.shape[2] >= num_prev_tick_features:
+                    prev_tick_features_batch = real_samples_batch[:, 0, :num_prev_tick_features]
+                    all_conditional_components.append(prev_tick_features_batch)
+                    num_actual_prev_tick_features = prev_tick_features_batch.shape[1]
+                else:
+                    self.logger.warning(f"_get_data_generator: Not enough features in real_samples_batch ({real_samples_batch.shape[2]}) to extract {num_prev_tick_features} prev_tick features. Padding.")
+                    all_conditional_components.append(np.zeros((actual_batch_size, num_prev_tick_features)))
+                    num_actual_prev_tick_features = num_prev_tick_features
+
+            if all_conditional_components:
+                final_conditional_batch = np.concatenate(all_conditional_components, axis=1)
+            else: 
+                final_conditional_batch = np.zeros((actual_batch_size, 0))
+
+            current_total_cond_features = final_conditional_batch.shape[1]
+            if current_total_cond_features != expected_total_conditional_features:
+                self.logger.debug(f"_get_data_generator: Current conditional features {current_total_cond_features}, expected {expected_total_conditional_features}. Adjusting.")
+                adjusted_batch = np.zeros((actual_batch_size, expected_total_conditional_features))
+                copy_cols = min(current_total_cond_features, expected_total_conditional_features)
+                if copy_cols > 0:
+                    adjusted_batch[:, :copy_cols] = final_conditional_batch[:, :copy_cols]
+                final_conditional_batch = adjusted_batch
             
-            final_conditional_batch = np.zeros((actual_batch_size, 0)) # Start with an empty array for features
-
-            # Part 1: Date features
-            scaled_date_features_batch = None
-            num_generated_date_features = 0
-            if real_datetimes_series_for_batch is not None and not real_datetimes_series_for_batch.empty:
-                batch_datetimes = real_datetimes_series_for_batch.iloc[batch_indices]
-                if not batch_datetimes.empty:
-                    scaled_date_features_batch = self._get_scaled_date_features(batch_datetimes)
-                    if scaled_date_features_batch is not None and scaled_date_features_batch.shape[0] == actual_batch_size:
-                        num_generated_date_features = scaled_date_features_batch.shape[1]
-                    else: # Shape mismatch or None returned
-                        self.logger.warning(f"_get_data_generator: _get_scaled_date_features did not return expected data for batch. Shape: {scaled_date_features_batch.shape if scaled_date_features_batch is not None else 'None'}")
-                        scaled_date_features_batch = None # Ensure it's None if problematic
-                        num_generated_date_features = 0
+            context_batch_for_yield: Optional[np.ndarray] = None
+            if self.context_dim_for_generator is not None and self.context_dim_for_generator > 0:
+                if epoch_context_vectors_aligned is not None:
+                    context_batch_for_yield = epoch_context_vectors_aligned[batch_indices]
+                    if (context_batch_for_yield.shape[0] != actual_batch_size or
+                        context_batch_for_yield.shape[1] != self.context_dim_for_generator):
+                        self.logger.warning(f"_get_data_generator: Context vector batch shape mismatch. Expected ({actual_batch_size}, {self.context_dim_for_generator}), got {context_batch_for_yield.shape}. Using zeros for this batch.")
+                        context_batch_for_yield = np.zeros((actual_batch_size, self.context_dim_for_generator))
+                else:
+                    context_batch_for_yield = np.zeros((actual_batch_size, self.context_dim_for_generator))
             
-            if scaled_date_features_batch is not None and num_generated_date_features > 0:
-                final_conditional_batch = np.concatenate([final_conditional_batch, scaled_date_features_batch], axis=1)
+            yield real_samples_batch, final_conditional_batch, context_batch_for_yield
 
-            # Part 2: Other conditional features to make up self.conditional_dim_for_generator
-            # This is where "previously generated tick's data" or other logic would go.
-            # For now, padding with zeros.
-            
-            expected_total_conditional_features = self.conditional_dim_for_generator if self.conditional_dim_for_generator is not None else 0
-            
-            current_num_conditional_features = final_conditional_batch.shape[1]
-            num_remaining_to_pad = expected_total_conditional_features - current_num_conditional_features
-
-            if num_remaining_to_pad > 0:
-                padding_features = np.zeros((actual_batch_size, num_remaining_to_pad))
-                final_conditional_batch = np.concatenate([final_conditional_batch, padding_features], axis=1)
-            elif num_remaining_to_pad < 0: # Too many features generated (e.g. date features > total conditional dim)
-                self.logger.warning(f"_get_data_generator: Generated more conditional features ({current_num_conditional_features}) than expected ({expected_total_conditional_features}). Truncating.")
-                final_conditional_batch = final_conditional_batch[:, :expected_total_conditional_features]
-
-            # Ensure final shape is (actual_batch_size, self.conditional_dim_for_generator)
-            if final_conditional_batch.shape[1] != expected_total_conditional_features:
-                 # This might happen if conditional_dim_for_generator is 0 or None and we still tried to make non-empty batch
-                if expected_total_conditional_features == 0 and final_conditional_batch.shape[1] != 0 : # We have features but expected none
-                     final_conditional_batch = np.zeros((actual_batch_size, 0))
-                elif expected_total_conditional_features > 0 : # Expected some, but shape is wrong (should have been caught by padding/truncating)
-                    self.logger.error(f"_get_data_generator: CRITICAL - Final conditional batch shape is {final_conditional_batch.shape}, but expected features {expected_total_conditional_features}. Re-padding/truncating forcefully.")
-                    # Force shape:
-                    temp_batch = np.zeros((actual_batch_size, expected_total_conditional_features))
-                    copy_cols = min(final_conditional_batch.shape[1], expected_total_conditional_features)
-                    if copy_cols > 0:
-                        temp_batch[:, :copy_cols] = final_conditional_batch[:, :copy_cols]
-                    final_conditional_batch = temp_batch
-            
-            yield real_samples_batch, final_conditional_batch
-
-    def train(self, x_real_df: pd.DataFrame, x_real_df_datetimes: Optional[pd.Series] = None, start_epoch: int = 0):
+    def train(self, x_real_df: pd.DataFrame, start_epoch: int = 0):
         self.logger.info("Starting GAN training process...")
 
-        # Retrieve parameters
         epochs = self.params.get("gan_epochs", 10000)
         batch_size = self.params.get("gan_batch_size", 32)
         save_interval = self.params.get("gan_save_interval", 500)
+        datetime_col_name = self.params.get("datetime_col_name_in_x_real_df", "DATE_TIME")
 
         if self.generator is None or self.discriminator is None or self.gan_model is None:
-            self.logger.error("train: Generator, Discriminator, or GAN model is not initialized. Cannot train. Call set_params first.")
+            self.logger.error("train: Models not initialized. Call set_params first.")
             return {"status": "error", "message": "Models not initialized."}
 
-        # --- Data Preparation ---
         if x_real_df is None or x_real_df.empty:
-            self.logger.error("train: Real data (x_real_df) is None or empty. Cannot train.")
+            self.logger.error("train: Real data (x_real_df) is None or empty.")
             return {"status": "error", "message": "Input data is missing."}
 
-        real_data_df_values = x_real_df.select_dtypes(include=np.number).fillna(0).values
+        # --- Data Preparation ---
+        # Extract datetimes first
+        if datetime_col_name not in x_real_df.columns:
+            self.logger.error(f"train: Datetime column '{datetime_col_name}' not found in x_real_df.")
+            return {"status": "error", "message": f"Datetime column '{datetime_col_name}' missing."}
         
-        # Windowing the data to create sequences
-        # x_real_df is (total_timesteps, features_for_discriminator_input_raw)
-        # self.seq_len is the discriminator's input sequence length
-        # self.num_features_for_discriminator is what D expects after any internal TA layer
+        x_real_df_datetimes_original = pd.to_datetime(x_real_df[datetime_col_name])
+
+        # Extract features for discriminator input
+        discriminator_input_cols = self.params.get("discriminator_input_feature_names", [])
+        if not discriminator_input_cols:
+            self.logger.error("train: 'discriminator_input_feature_names' not configured.")
+            return {"status": "error", "message": "'discriminator_input_feature_names' missing."}
+        
+        missing_disc_cols = [col for col in discriminator_input_cols if col not in x_real_df.columns]
+        if missing_disc_cols:
+            self.logger.error(f"train: Missing discriminator input columns in x_real_df: {missing_disc_cols}")
+            return {"status": "error", "message": f"Missing discriminator input columns: {missing_disc_cols}"}
+            
+        real_data_df_values = x_real_df[discriminator_input_cols].fillna(0).values # For discriminator sequences
+
+        # Extract fundamental features for conditional input
+        conditional_fundamental_cols = self.params.get("conditional_fundamental_feature_names", [])
+        conditional_fundamental_df = None
+        if conditional_fundamental_cols:
+            missing_fund_cols = [col for col in conditional_fundamental_cols if col not in x_real_df.columns]
+            if missing_fund_cols:
+                self.logger.warning(f"train: Missing conditional fundamental columns in x_real_df: {missing_fund_cols}. They will be zero-padded in generator.")
+                # Create a placeholder DataFrame with zeros if columns are missing, to maintain structure
+                conditional_fundamental_df = pd.DataFrame(np.zeros((len(x_real_df), len(conditional_fundamental_cols))), columns=conditional_fundamental_cols)
+            else:
+                conditional_fundamental_df = x_real_df[conditional_fundamental_cols].fillna(0)
         
         num_total_timesteps = real_data_df_values.shape[0]
-        num_input_features = real_data_df_values.shape[1]
-
-        # Adjust this logic based on whether TensorFlowTALayer is used and what it expects
-        # For now, assume real_data_df_values has features that are either directly used by D
-        # or are base features for TensorFlowTALayer.
-        # The discriminator input is defined by (self.seq_len, self.num_features_for_discriminator)
-        # If TensorFlowTALayer is used, it's the first layer and it transforms (seq_len, num_base_features)
-        # to (seq_len, num_features_for_discriminator).
-        # So, the input data here should be (seq_len, num_base_features).
-        # Let's assume num_input_features should match self.num_base_features if TAlayer is active.
-        # This detail needs careful alignment with the TensorFlowTALayer's configuration.
-        # For now, we'll assume real_data_df_values has the features expected by the D's input layer.
         
         if num_total_timesteps < self.seq_len:
-            self.logger.error(f"Not enough data ({num_total_timesteps} timesteps) to form sequences of length {self.seq_len}.")
+            self.logger.error(f"Not enough data ({num_total_timesteps} timesteps) for sequences of length {self.seq_len}.")
             return {"status": "error", "message": "Not enough data for sequences."}
 
         x_real_sequences = []
         real_datetimes_sequences_list = []
+        conditional_fundamental_sequences_list = []
 
         for i in range(num_total_timesteps - self.seq_len + 1):
             x_real_sequences.append(real_data_df_values[i : i + self.seq_len, :])
-            if x_real_df_datetimes is not None and not x_real_df_datetimes.empty:
-                # Use the datetime of the last observation in the sequence for conditional features
-                real_datetimes_sequences_list.append(x_real_df_datetimes.iloc[i + self.seq_len - 1])
+            # Datetime corresponds to the *last* observation in the sequence window
+            real_datetimes_sequences_list.append(x_real_df_datetimes_original.iloc[i + self.seq_len - 1])
+            if conditional_fundamental_df is not None:
+                # Fundamental features also correspond to the *last* observation in the sequence window
+                conditional_fundamental_sequences_list.append(conditional_fundamental_df.iloc[i + self.seq_len - 1].to_dict())
         
         if not x_real_sequences:
-            self.logger.error("No sequences created after windowing. Cannot train.")
+            self.logger.error("No sequences created. Cannot train.")
             return {"status": "error", "message": "No sequences after windowing."}
 
-        x_real_processed_np = np.array(x_real_sequences) # Shape: (num_samples, seq_len, num_input_features)
+        x_real_processed_np = np.array(x_real_sequences)
+        real_datetimes_series_for_generator = pd.Series(real_datetimes_sequences_list, dtype='datetime64[ns]')
         
-        real_datetimes_series_for_generator: Optional[pd.Series] = None
-        if x_real_df_datetimes is not None and real_datetimes_sequences_list:
-            real_datetimes_series_for_generator = pd.Series(real_datetimes_sequences_list, 
-                                                            index=pd.RangeIndex(len(real_datetimes_sequences_list)))
-        
+        fundamental_features_df_for_generator: Optional[pd.DataFrame] = None
+        if conditional_fundamental_sequences_list:
+            fundamental_features_df_for_generator = pd.DataFrame(conditional_fundamental_sequences_list)
+            # Ensure column order matches config if created from dicts
+            if conditional_fundamental_cols:
+                 fundamental_features_df_for_generator = fundamental_features_df_for_generator[conditional_fundamental_cols]
+
+
         num_samples = x_real_processed_np.shape[0]
         self.logger.info(f"Prepared {num_samples} sequences of length {self.seq_len} for training.")
 
@@ -1130,108 +1268,160 @@ class GANTrainerPlugin:
             np.random.shuffle(shuffled_indices)
             
             x_real_shuffled_epoch = x_real_processed_np[shuffled_indices]
-            real_datetimes_shuffled_epoch: Optional[pd.Series] = None
-            if real_datetimes_series_for_generator is not None:
-                real_datetimes_shuffled_epoch = real_datetimes_series_for_generator.iloc[shuffled_indices].reset_index(drop=True)
+            real_datetimes_shuffled_epoch = real_datetimes_series_for_generator.iloc[shuffled_indices].reset_index(drop=True)
+            
+            fundamental_features_shuffled_epoch: Optional[pd.DataFrame] = None
+            if fundamental_features_df_for_generator is not None:
+                fundamental_features_shuffled_epoch = fundamental_features_df_for_generator.iloc[shuffled_indices].reset_index(drop=True)
+
+            epoch_context_vectors_np: Optional[np.ndarray] = None
+            if self.context_dim_for_generator is not None and self.context_dim_for_generator > 0:
+                if self.feeder_plugin and hasattr(self.feeder_plugin, 'get_aligned_context_vectors'):
+                    try:
+                        self.logger.info(f"Attempting to get context vectors from FeederPlugin for {num_samples} samples.")
+                        epoch_context_vectors_np = self.feeder_plugin.get_aligned_context_vectors(real_datetimes_shuffled_epoch)
+                        
+                        if epoch_context_vectors_np is not None:
+                            if epoch_context_vectors_np.shape[0] != num_samples:
+                                self.logger.error(f"Context vectors shape mismatch from Feeder: got {epoch_context_vectors_np.shape[0]} samples, expected {num_samples}. Using zeros for epoch.")
+                                epoch_context_vectors_np = None 
+                            elif epoch_context_vectors_np.shape[1] != self.context_dim_for_generator:
+                                self.logger.error(f"Context vectors dim mismatch from Feeder: got {epoch_context_vectors_np.shape[1]} dims, expected {self.context_dim_for_generator}. Using zeros for epoch.")
+                                epoch_context_vectors_np = None
+                            else:
+                                self.logger.info(f"Successfully retrieved context vectors of shape {epoch_context_vectors_np.shape} from FeederPlugin for the epoch.")
+                        else:
+                            self.logger.warning("FeederPlugin.get_aligned_context_vectors returned None. Context vectors will be zeros if required by generator.")
+                    except Exception as e:
+                        self.logger.error(f"Error getting context vectors from FeederPlugin: {e}. Context vectors will be zeros if required by generator.", exc_info=True)
+                        epoch_context_vectors_np = None
+                else:
+                    self.logger.info("Context vectors may be required (context_dim > 0) but FeederPlugin or 'get_aligned_context_vectors' method not available. Context vectors will be zeros if required by generator.")
 
             # Create data generator for this epoch with shuffled data
-            data_gen_epoch = self._get_data_generator(x_real_shuffled_epoch, 
-                                                      real_datetimes_shuffled_epoch, 
-                                                      batch_size)
+            data_gen_epoch = self._get_data_generator(
+                x_real_shuffled_epoch, 
+                real_datetimes_shuffled_epoch, 
+                fundamental_features_shuffled_epoch,
+                epoch_context_vectors_np, 
+                batch_size
+            )
             
             num_batches = (num_samples + batch_size - 1) // batch_size
-            
             epoch_d_losses_real, epoch_d_losses_fake, epoch_g_losses = [], [], []
 
             for batch_idx in range(num_batches):
                 try:
-                    real_samples_batch, conditional_data_batch = next(data_gen_epoch)
+                    real_samples_batch, conditional_data_batch, context_data_batch_from_gen = next(data_gen_epoch)
                 except StopIteration:
-                    self.logger.warning(f"Epoch {epoch+1}, batch {batch_idx+1}: Data generator exhausted. This might indicate an issue if not the last batch.")
+                    self.logger.warning(f"Epoch {epoch+1}, batch {batch_idx+1}: Data generator exhausted.")
                     break 
                 
                 actual_batch_size = real_samples_batch.shape[0]
                 if actual_batch_size == 0: continue
 
                 # --- Train Discriminator ---
-                y_real = np.ones((actual_batch_size, 1)) * 0.9 # Label smoothing
-                d_loss_real_metrics = self.discriminator.train_on_batch(real_samples_batch, y_real, verbose=0)
+                y_real = np.ones((actual_batch_size, 1)) * 0.9
+                d_loss_real_metrics = self.discriminator.train_on_batch(real_samples_batch, y_real) # Removed verbose=0
 
                 # Generate fake samples
-                # 1. Latent noise (z)
-                if self.gen_input_seq_len and self.gen_input_seq_len > 0:
+                if self.gen_input_seq_len and self.gen_input_seq_len > 0: # For sequential latent vector
                     z_noise_shape = (actual_batch_size, self.gen_input_seq_len, self.gen_input_latent_dim)
-                else:
+                else: # For flat latent vector
                     z_noise_shape = (actual_batch_size, self.gen_input_latent_dim)
                 z_noise = np.random.normal(0, 1, z_noise_shape)
 
-                # Prepare inputs for generator.predict()
-                # This list must match the order and number of self.generator.inputs
                 gen_inputs_for_predict_list = []
-                if self.gen_input_latent_dim is not None and self.gen_input_latent_dim > 0 : # Check if latent input is configured
+                if self.gen_input_latent_dim is not None and self.gen_input_latent_dim > 0:
                     gen_inputs_for_predict_list.append(z_noise)
                 
                 if self.conditional_dim_for_generator is not None and self.conditional_dim_for_generator > 0:
-                    # Ensure conditional_data_batch has the correct shape for the generator's conditional input
                     if conditional_data_batch.shape[1] != self.conditional_dim_for_generator:
-                         self.logger.error(f"Batch {batch_idx+1}: Conditional data batch feature size {conditional_data_batch.shape[1]} does not match generator's expected conditional_dim {self.conditional_dim_for_generator}. Skipping batch.")
-                         continue # Or handle by reshaping/re-padding, but _get_data_generator should ensure this.
+                         self.logger.error(f"Batch {batch_idx+1}: Cond data batch dim {conditional_data_batch.shape[1]} vs expected {self.conditional_dim_for_generator}. Skipping D fake.")
+                         d_loss_fake_metrics = [0.0] * len(self.discriminator.metrics_names) # type: ignore
+                         epoch_d_losses_fake.append(d_loss_fake_metrics[0])
+                         epoch_g_losses.append(0.0) 
+                         continue 
                     gen_inputs_for_predict_list.append(conditional_data_batch)
                 
                 if self.context_dim_for_generator is not None and self.context_dim_for_generator > 0:
-                    context_data_batch_placeholder = np.zeros((actual_batch_size, self.context_dim_for_generator)) # Placeholder
-                    gen_inputs_for_predict_list.append(context_data_batch_placeholder)
+                    if context_data_batch_from_gen is not None and context_data_batch_from_gen.shape[0] == actual_batch_size and context_data_batch_from_gen.shape[1] == self.context_dim_for_generator:
+                        gen_inputs_for_predict_list.append(context_data_batch_from_gen)
+                    else: # Fallback if context_data_batch_from_gen is None or wrong shape (though _get_data_generator should provide zeros)
+                        self.logger.warning(f"Epoch {epoch+1}, Batch {batch_idx+1}: Context data from generator is None or has wrong shape for G.predict(). Expected ({actual_batch_size}, {self.context_dim_for_generator}), got {context_data_batch_from_gen.shape if context_data_batch_from_gen is not None else 'None'}. Using zeros.")
+                        gen_inputs_for_predict_list.append(np.zeros((actual_batch_size, self.context_dim_for_generator)))
 
                 generated_samples = None
                 if len(gen_inputs_for_predict_list) == len(self.generator.inputs):
-                    if not self.generator.inputs: # No inputs expected
-                        generated_samples = self.generator.predict(None, verbose=0)
-                    else: # Single or multiple inputs
-                        predict_input_arg = gen_inputs_for_predict_list[0] if len(gen_inputs_for_predict_list) == 1 else gen_inputs_for_predict_list
-                        generated_samples = self.generator.predict(predict_input_arg, verbose=0)
+                    predict_input_arg = gen_inputs_for_predict_list[0] if len(gen_inputs_for_predict_list) == 1 else gen_inputs_for_predict_list
+                    if not self.generator.inputs and not gen_inputs_for_predict_list : # No inputs for generator and none provided
+                         generated_samples = self.generator.predict(None, verbose=0)
+                    elif self.generator.inputs and gen_inputs_for_predict_list:
+                         generated_samples = self.generator.predict(predict_input_arg, verbose=0)
+                    elif not self.generator.inputs and gen_inputs_for_predict_list:
+                         self.logger.warning(f"Epoch {epoch+1}, Batch {batch_idx+1}: Generator expects no inputs, but inputs were provided. Calling with None.")
+                         generated_samples = self.generator.predict(None, verbose=0)
+                    else: # Generator expects inputs, but none were assembled (e.g. all dims were 0)
+                         self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: Generator expects inputs, but assembled list is empty. Skipping D fake training.")
+                         d_loss_fake_metrics = [0.0] * len(self.discriminator.metrics_names) # type: ignore
                 else:
-                    self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: Mismatch in number of inputs for generator.predict(). Expected {len(self.generator.inputs)}, got {len(gen_inputs_for_predict_list)}. Skipping D fake training.")
-                    # Create dummy metrics to prevent crash, or skip batch
-                    d_loss_fake_metrics = [0.0] * len(self.discriminator.metrics_names)
-
+                    self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: Mismatch inputs for G.predict(). Expected {len(self.generator.inputs)}, got {len(gen_inputs_for_predict_list)}. Skipping D fake.")
+                
 
                 if generated_samples is not None:
                     y_fake = np.zeros((actual_batch_size, 1))
-                    d_loss_fake_metrics = self.discriminator.train_on_batch(generated_samples, y_fake, verbose=0)
-                else: # If generated_samples is None due to input mismatch
-                    # d_loss_fake_metrics already set to dummy values
-                    pass
+                    d_loss_fake_metrics = self.discriminator.train_on_batch(generated_samples, y_fake) # Removed verbose=0
+                else: # generated_samples is None
+                    # d_loss_fake_metrics already set to dummy if error occurred
+                     if 'd_loss_fake_metrics' not in locals(): # Ensure it exists
+                        d_loss_fake_metrics = [0.0] * len(self.discriminator.metrics_names) # type: ignore
 
 
                 # --- Train Generator (via GAN model) ---
-                # Inputs for GAN model's train_on_batch should match self.gan_model.inputs
-                gan_inputs_list = []
+                gan_inputs_list = [] # Inputs for self.gan_model.train_on_batch
+                # These must match the Keras Input layers defined in _build_gan for the GAN model
+                # _build_gan creates inputs named like 'gan_input_latent', 'gan_input_conditional', 'gan_input_context'
+                # The order here should correspond to how these were added to gan_keras_inputs_for_model_definition in _build_gan
+
+                # Assuming the order in _build_gan is: latent, conditional, context (if they exist)
                 if self.gen_input_latent_dim is not None and self.gen_input_latent_dim > 0:
-                    gan_inputs_list.append(z_noise) # Re-use z_noise from D training
+                    gan_inputs_list.append(z_noise)
                 if self.conditional_dim_for_generator is not None and self.conditional_dim_for_generator > 0:
-                    gan_inputs_list.append(conditional_data_batch) # Re-use
+                    gan_inputs_list.append(conditional_data_batch) 
+                
                 if self.context_dim_for_generator is not None and self.context_dim_for_generator > 0:
-                    # Re-use placeholder context data
-                    gan_inputs_list.append(context_data_batch_placeholder)
-
-                g_loss_metrics = [0.0] * len(self.gan_model.metrics_names) # Default if GAN training skipped
+                    if context_data_batch_from_gen is not None and context_data_batch_from_gen.shape[0] == actual_batch_size and context_data_batch_from_gen.shape[1] == self.context_dim_for_generator:
+                        gan_inputs_list.append(context_data_batch_from_gen)
+                    else: # Fallback
+                        self.logger.warning(f"Epoch {epoch+1}, Batch {batch_idx+1}: Context data from generator is None or has wrong shape for GAN input. Expected ({actual_batch_size}, {self.context_dim_for_generator}), got {context_data_batch_from_gen.shape if context_data_batch_from_gen is not None else 'None'}. Using zeros.")
+                        gan_inputs_list.append(np.zeros((actual_batch_size, self.context_dim_for_generator)))
+                
+                g_loss_metrics_val = [0.0] * len(self.gan_model.metrics_names) # type: ignore # Default
                 if len(gan_inputs_list) == len(self.gan_model.inputs):
-                    y_gan = np.ones((actual_batch_size, 1)) # Target for G is to make D output 1 (real)
-                    if not self.gan_model.inputs: # No inputs expected
-                        g_loss_metrics = self.gan_model.train_on_batch(None, y_gan, verbose=0)
-                    else:
-                        train_input_arg = gan_inputs_list[0] if len(gan_inputs_list) == 1 else gan_inputs_list
-                        g_loss_metrics = self.gan_model.train_on_batch(train_input_arg, y_gan, verbose=0)
+                    y_gan = np.ones((actual_batch_size, 1))
+                    
+                    train_input_arg_gan = gan_inputs_list[0] if len(gan_inputs_list) == 1 else gan_inputs_list
+                    if not self.gan_model.inputs and not gan_inputs_list:
+                         g_loss_metrics_val = self.gan_model.train_on_batch(None, y_gan) # Removed verbose=0
+                    elif self.gan_model.inputs and gan_inputs_list:
+                         g_loss_metrics_val = self.gan_model.train_on_batch(train_input_arg_gan, y_gan) # Removed verbose=0
+                    elif not self.gan_model.inputs and gan_inputs_list:
+                         self.logger.warning(f"Epoch {epoch+1}, Batch {batch_idx+1}: GAN model expects no inputs, but inputs were provided. Calling with None.")
+                         g_loss_metrics_val = self.gan_model.train_on_batch(None, y_gan)
+                    else: # GAN expects inputs, but list is empty
+                         self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: GAN model expects inputs, but assembled list is empty. Skipping G.")
+
                 else:
-                    self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: Mismatch in number of inputs for gan_model.train_on_batch(). Expected {len(self.gan_model.inputs)}, got {len(gan_inputs_list)}. Skipping G training.")
-
+                    self.logger.error(f"Epoch {epoch+1}, Batch {batch_idx+1}: Mismatch inputs for GAN.train(). Expected {len(self.gan_model.inputs)}, got {len(gan_inputs_list)}. Skipping G.")
+                
                 # Store batch losses
-                epoch_d_losses_real.append(d_loss_real_metrics[0])
-                epoch_d_losses_fake.append(d_loss_fake_metrics[0])
-                epoch_g_losses.append(g_loss_metrics[0] if isinstance(g_loss_metrics, list) else g_loss_metrics)
+                # d_loss_real_metrics and d_loss_fake_metrics are lists: [loss, acc, prec, recall, auc]
+                # g_loss_metrics_val is also a list if GAN has metrics, or just a float for loss
+                epoch_d_losses_real.append(d_loss_real_metrics[0] if isinstance(d_loss_real_metrics, list) else d_loss_real_metrics)
+                epoch_d_losses_fake.append(d_loss_fake_metrics[0] if isinstance(d_loss_fake_metrics, list) else d_loss_fake_metrics)
+                epoch_g_losses.append(g_loss_metrics_val[0] if isinstance(g_loss_metrics_val, list) else g_loss_metrics_val)
 
 
-            # --- End of Batch Loop ---
             avg_d_loss_real = np.mean(epoch_d_losses_real) if epoch_d_losses_real else 0
             avg_d_loss_fake = np.mean(epoch_d_losses_fake) if epoch_d_losses_fake else 0
             avg_g_loss = np.mean(epoch_g_losses) if epoch_g_losses else 0
