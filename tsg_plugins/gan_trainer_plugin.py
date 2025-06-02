@@ -1193,6 +1193,7 @@ class GANTrainerPlugin:
 
         self.logger.info(f"GAN Build: Defining Keras GAN Model with inputs: {[inp.name for inp in gan_keras_inputs_for_model_definition]} and output: {gan_output.name}")
         gan_model = Model(inputs=gan_keras_inputs_for_model_definition, outputs=gan_output, name="GAN_Generator_plus_Discriminator")
+        self.gan_model = gan_model # Assign local model to instance attribute
         
         # Compile the GAN model
         # The generator's weights are updated through the GAN model
