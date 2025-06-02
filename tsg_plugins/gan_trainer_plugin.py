@@ -1155,7 +1155,7 @@ class GANTrainerPlugin:
 
         # Extract fundamental features for conditional input
         conditional_fundamental_cols = self.params.get("conditional_fundamental_feature_names", [])
-                             conditional_fundamental_df = None
+        conditional_fundamental_df = None
         if conditional_fundamental_cols:
             missing_fund_cols = [col for col in conditional_fundamental_cols if col not in x_real_df.columns]
             if missing_fund_cols:
