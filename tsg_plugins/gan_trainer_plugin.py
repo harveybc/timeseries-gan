@@ -537,155 +537,124 @@ class GANTrainerPlugin:
         """
         self.logger.info("Initializing core GAN parameters from config and loaded models...")
 
-        # --- Generator Output Parameters (used by Discriminator and GAN construction) ---
+        # --- Generator Output Parameters (used by Discriminator construction) ---
         self.generator_output_actual_seq_len = None
         self.generator_output_actual_features = None
+        self.logger.info("Attempting to determine generator output dimensions...")
 
-        if self.generator and hasattr(self.generator, 'outputs') and self.generator.outputs:
-            self.logger.info(f"Attempting to derive output dimensions from generator model: {self.generator.name}")
-            self.logger.info(f"Generator model outputs: {self.generator.outputs}")
-            # Assuming the primary output for sequence length determination is the first one
-            # For a typical timeseries generator, output shape is (batch, seq_len, features)
-            try:
-                generator_output_shape = self.generator.outputs[0].shape
-                self.logger.info(f"Generator model output[0] shape: {generator_output_shape}")
-                if len(generator_output_shape) == 3:
-                    self.generator_output_actual_seq_len = generator_output_shape[1]
-                    self.generator_output_actual_features = generator_output_shape[2]
-                    self.logger.info(f"Derived from Generator model output: generator_output_actual_seq_len = {self.generator_output_actual_seq_len}, generator_output_actual_features = {self.generator_output_actual_features}")
-                elif len(generator_output_shape) == 2: # Handle cases where generator might output 2D (e.g. if seq_len is 1 and squeezed)
-                    self.logger.warning(f"Generator model output shape {generator_output_shape} is 2D. Assuming seq_len=1 and features={generator_output_shape[1]}. This might be unexpected for a sequence generator.")
-                    # Try to get seq_len from config as a primary source if model output is ambiguous
-                    self.generator_output_actual_seq_len = self.params.get('gan_generator_output_actual_seq_len') or self.params.get('seq_len') or 1
-                    self.generator_output_actual_features = generator_output_shape[1]
-                    self.logger.info(f"Derived from 2D Generator model output: generator_output_actual_seq_len = {self.generator_output_actual_seq_len} (config/defaulted), generator_output_actual_features = {self.generator_output_actual_features}")
+        if self.generator:
+            self.logger.info(f"Generator model is present. Type: {type(self.generator)}")
+            output_shape_from_model = None
+            output_features_from_model = None
+            
+            # Try direct .output_shape attribute
+            if hasattr(self.generator, 'output_shape'):
+                self.logger.info(f"Generator has 'output_shape' attribute: {self.generator.output_shape}")
+                if isinstance(self.generator.output_shape, tuple) and len(self.generator.output_shape) == 3:
+                    if isinstance(self.generator.output_shape[1], int) and isinstance(self.generator.output_shape[2], int):
+                        output_shape_from_model = self.generator.output_shape[1]
+                        output_features_from_model = self.generator.output_shape[2]
+                        self.logger.info(f"Derived from generator.output_shape (tuple): seq_len={output_shape_from_model}, features={output_features_from_model}")
+                elif isinstance(self.generator.output_shape, list) and \
+                     self.generator.output_shape and \
+                     isinstance(self.generator.output_shape[0], tuple) and \
+                     len(self.generator.output_shape[0]) == 3:
+                    if isinstance(self.generator.output_shape[0][1], int) and isinstance(self.generator.output_shape[0][2], int):
+                        output_shape_from_model = self.generator.output_shape[0][1]
+                        output_features_from_model = self.generator.output_shape[0][2]
+                        self.logger.info(f"Derived from generator.output_shape (list of tuples): seq_len={output_shape_from_model}, features={output_features_from_model}")
                 else:
-                    self.logger.warning(f"Generator model output shape {generator_output_shape} is not 3D or 2D. Cannot automatically derive seq_len and features for GAN. Falling back to config.")
-            except Exception as e:
-                self.logger.error(f"Error accessing generator model outputs or shape: {e}. Falling back to config.")
-        else:
-            if not self.generator:
-                self.logger.warning("Generator Keras model (self.generator) is None. Cannot derive output dimensions from model.")
-            elif not hasattr(self.generator, 'outputs') or not self.generator.outputs:
-                self.logger.warning(f"Generator Keras model (self.generator: {self.generator.name if self.generator else 'None'}) has no 'outputs' attribute or it's empty. Cannot derive output dimensions from model.")
+                    self.logger.info("Generator 'output_shape' is not a 3D tuple or list of 3D tuples of integers.")
 
-        # Fallback to config if model-derived values are still None
+            # If not found, try .output.shape (Keras functional API tensor)
+            if output_shape_from_model is None and hasattr(self.generator, 'output'):
+                self.logger.info("Generator has 'output' attribute.")
+                if hasattr(self.generator.output, 'shape') and len(self.generator.output.shape) == 3:
+                    # Ensure dimensions are integers, not None or other types
+                    if isinstance(self.generator.output.shape[1], int) and isinstance(self.generator.output.shape[2], int):
+                        output_shape_from_model = self.generator.output.shape[1]
+                        output_features_from_model = self.generator.output.shape[2]
+                        self.logger.info(f"Derived from generator.output.shape: seq_len={output_shape_from_model}, features={output_features_from_model}")
+                    else:
+                        self.logger.info(f"Generator 'output.shape' is 3D but dimensions are not integers: {self.generator.output.shape}")
+                else:
+                    self.logger.info(f"Generator 'output.shape' is not 3D: {getattr(self.generator.output, 'shape', 'N/A')}")
+            elif output_shape_from_model is None and not hasattr(self.generator, 'output_shape'):
+                 self.logger.info("Generator does not have 'output_shape' attribute.")
+            elif output_shape_from_model is None : # Already checked output_shape, now checking if 'output' attr exists
+                self.logger.info("Generator does not have 'output' attribute or 'output_shape' was not suitable.")
+
+
+            if output_shape_from_model is not None and output_features_from_model is not None:
+                self.generator_output_actual_seq_len = output_shape_from_model
+                self.generator_output_actual_features = output_features_from_model
+                self.logger.info(f"Successfully set generator output dims from model: seq_len={self.generator_output_actual_seq_len}, features={self.generator_output_actual_features}")
+            else:
+                self.logger.warning("Could not determine generator output seq_len/features from the model structure.")
+        else:
+            self.logger.warning("Generator model (self.generator) is None. Cannot derive output dimensions from model.")
+
+        # Fallback to config if model-derived values are not available
+        config_seq_len = self.params.get('gan_generator_output_actual_seq_len', self.params.get('seq_len'))
+        self.logger.info(f"Config fallback for seq_len: 'gan_generator_output_actual_seq_len'={self.params.get('gan_generator_output_actual_seq_len')}, 'seq_len'={self.params.get('seq_len')}. Chosen: {config_seq_len}")
+        if self.generator_output_actual_seq_len is None and config_seq_len is not None:
+            self.generator_output_actual_seq_len = int(config_seq_len) # Ensure it's an int
+            self.logger.info(f"Using config for generator_output_actual_seq_len: {self.generator_output_actual_seq_len}")
+
+        config_features_gan = self.params.get('gan_generator_output_actual_features')
+        config_features_base = self.params.get('num_base_features_generated')
+        config_features_dim = self.params.get('feature_dim')
+        self.logger.info(f"Config fallbacks for features: 'gan_generator_output_actual_features'={config_features_gan}, 'num_base_features_generated'={config_features_base}, 'feature_dim'={config_features_dim}")
+
+        chosen_config_features = None
+        if config_features_gan is not None:
+            chosen_config_features = config_features_gan
+        elif config_features_base is not None:
+            chosen_config_features = config_features_base
+        elif config_features_dim is not None:
+            chosen_config_features = config_features_dim
+        
+        self.logger.info(f"Chosen config features (before plugin check): {chosen_config_features}")
+
+        if self.generator_output_actual_features is None and chosen_config_features is not None:
+            self.generator_output_actual_features = int(chosen_config_features) # Ensure it's an int
+            self.logger.info(f"Using config for generator_output_actual_features: {self.generator_output_actual_features}")
+        elif self.generator_output_actual_features is None: # If still None, try GeneratorPlugin's params
+            self.logger.info("Attempting to derive features from GeneratorPlugin's 'decoder_output_feature_names'.")
+            if self.generator_plugin_instance and hasattr(self.generator_plugin_instance, 'params'):
+                # Ensure params is a dict before calling .get()
+                gen_plugin_params = self.generator_plugin_instance.params if isinstance(self.generator_plugin_instance.params, dict) else {}
+                
+                decoder_output_names = gen_plugin_params.get('generator_decoder_output_feature_names',
+                                                             gen_plugin_params.get('decoder_output_feature_names', []))
+                self.logger.info(f"GeneratorPlugin 'decoder_output_feature_names' (or alias): {decoder_output_names}")
+                if decoder_output_names and isinstance(decoder_output_names, list) and len(decoder_output_names) > 0:
+                    self.generator_output_actual_features = len(decoder_output_names)
+                    self.logger.info(f"Derived generator_output_actual_features ({self.generator_output_actual_features}) from GeneratorPlugin's 'decoder_output_feature_names'.")
+                else:
+                    self.logger.info("GeneratorPlugin's 'decoder_output_feature_names' is empty, not a list, or not found.")
+            else:
+                self.logger.info("No generator_plugin_instance or it lacks 'params' attribute or params is not a dict.")
+        
+        # Critical check: Ensure these are now set, otherwise GAN/Discriminator cannot be built.
+        error_messages = []
         if self.generator_output_actual_seq_len is None:
-            self.generator_output_actual_seq_len = self.params.get('gan_generator_output_actual_seq_len') or self.params.get('seq_len')
-            self.logger.info(f"Using config/fallback for generator_output_actual_seq_len: {self.generator_output_actual_seq_len}")
-
+            error_messages.append("Could not determine generator output sequence length (checked model, params: 'gan_generator_output_actual_seq_len', 'seq_len').")
         if self.generator_output_actual_features is None:
-            # Try specific config, then general feature_dim, then from generator_params if available in main_config
-            self.generator_output_actual_features = self.params.get('gan_generator_output_actual_features') or \
-                                                    self.params.get('num_base_features_generated') or \
-                                                    self.params.get('feature_dim')
-            
-            if not self.generator_output_actual_features and hasattr(self, 'config') and isinstance(self.config, dict):
-                generator_params_key = next((key for key in self.config if key.endswith('generator_params')), None)
-                if generator_params_key:
-                    generator_params = self.config.get(generator_params_key, {})
-                    decoder_output_names = generator_params.get('generator_decoder_output_feature_names', 
-                                                                generator_params.get('decoder_output_feature_names', [])) # Check both keys
-                    if decoder_output_names:
-                        self.generator_output_actual_features = len(decoder_output_names)
-                        self.logger.info(f"Derived generator_output_actual_features from '{generator_params_key}' sub-config 'decoder_output_feature_names': {self.generator_output_actual_features}")
-            
-            self.logger.info(f"Using config/fallback for generator_output_actual_features: {self.generator_output_actual_features}")
+            error_messages.append("Could not determine generator output features (checked model, params: 'gan_generator_output_actual_features', 'num_base_features_generated', 'feature_dim', or 'generator_decoder_output_feature_names' from GeneratorPlugin).")
 
+        if error_messages:
+            full_error_msg = "Critical: " + " ".join(error_messages) + \
+                             " Please ensure the generator Keras model is loaded correctly and has defined outputs, OR provide these values in the trainer configuration: \n" + \
+                             "  - 'gan_generator_output_actual_seq_len' or 'seq_len' (for sequence length)\n" + \
+                             "  - 'gan_generator_output_actual_features', 'num_base_features_generated', 'feature_dim', or ensure 'generator_decoder_output_feature_names' is set in the generator's specific config section (for features)."
+            self.logger.error(full_error_msg)
+            raise ValueError(full_error_msg)
 
-        # Final check and error if still not determined
-        if self.generator_output_actual_seq_len is None or self.generator_output_actual_features is None:
-            missing_parts = []
-            if self.generator_output_actual_seq_len is None:
-                missing_parts.append("sequence length (checked model, params: 'gan_generator_output_actual_seq_len', 'seq_len')")
-            if self.generator_output_actual_features is None:
-                missing_parts.append("features (checked model, params: 'gan_generator_output_actual_seq_len', 'num_base_features_generated', 'feature_dim', or len of 'decoder_output_feature_names' in generator's own config section)")
-            
-            error_msg = (f"Critical: Could not determine generator output {', and '.join(missing_parts)}. "
-                         "Please ensure the generator Keras model is loaded correctly and has defined outputs, "
-                         "OR provide these values in the trainer configuration: \n"
-                         "  - 'gan_generator_output_actual_seq_len' or 'seq_len' (for sequence length)\n"
-                         "  - 'gan_generator_output_actual_features', 'num_base_features_generated', 'feature_dim', or ensure 'generator_decoder_output_feature_names' is set in the generator's specific config section (for features).")
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        self.logger.info(f"Final determined Generator output: sequence length = {self.generator_output_actual_seq_len}, features = {self.generator_output_actual_features}")
-
-        # --- Base features (subset of generator's output, used for TI calculation) ---
-        # This should typically match generator_output_actual_features unless TIs are calculated on a subset
-        self.num_base_features = self.params.get('num_base_features_generated', self.generator_output_actual_features)
-        if self.num_base_features > self.generator_output_actual_features:
-            self.logger.warning(f"Configured 'num_base_features_generated' ({self.num_base_features}) is greater than "
-                                f"generator's output features ({self.generator_output_actual_features}). Clamping to generator's output features.")
-            self.num_base_features = self.generator_output_actual_features
-        self.logger.info(f"Number of base features for TI calculation (num_base_features): {self.num_base_features}")
-
-
-        # --- Discriminator Input Parameters ---
-        # Discriminator's sequence length should match the generator's output sequence length
+        # Assign to self.seq_len and self.num_base_features as these are used elsewhere
         self.seq_len = self.generator_output_actual_seq_len 
-        self.logger.info(f"Discriminator input sequence length (self.seq_len) set to: {self.seq_len} (from generator output)")
-            
-        self.base_feature_names_ordered = self.params.get('base_feature_names_ordered', [])
-        if not self.base_feature_names_ordered and self.generator_plugin_instance:
-            if hasattr(self.generator_plugin_instance, 'params') and isinstance(self.generator_plugin_instance.params, dict):
-                gen_plugin_params = self.generator_plugin_instance.params
-                self.base_feature_names_ordered = gen_plugin_params.get('generator_decoder_output_feature_names', 
-                                                                        gen_plugin_params.get('decoder_output_feature_names', []))
-                if self.base_feature_names_ordered:
-                    self.logger.info(f"Derived 'base_feature_names_ordered' from GeneratorPlugin's 'decoder_output_feature_names': {self.base_feature_names_ordered}")
-
-        if not self.base_feature_names_ordered:
-            self.logger.warning("'base_feature_names_ordered' is not set and could not be derived from GeneratorPlugin. "
-                                "This is crucial for naming features for TI calculation and discriminator input. "
-                                "Attempting to proceed, but may cause issues. Please configure 'base_feature_names_ordered' in trainer_params.")
-            if self.num_base_features > 0: # num_base_features should be determined by now
-                self.base_feature_names_ordered = [f"feature_{i}" for i in range(self.num_base_features)]
-                self.logger.info(f"Using generic 'base_feature_names_ordered': {self.base_feature_names_ordered}")
-        else:
-            if len(self.base_feature_names_ordered) != self.num_base_features:
-                self.logger.warning(f"Mismatch between length of 'base_feature_names_ordered' ({len(self.base_feature_names_ordered)}) "
-                                    f"and 'num_base_features' ({self.num_base_features}). Adjusting 'num_base_features' to {len(self.base_feature_names_ordered)} "
-                                    "to match 'base_feature_names_ordered'.")
-                self.num_base_features = len(self.base_feature_names_ordered)
-        
-        self.logger.info(f"Final 'base_feature_names_ordered': {self.base_feature_names_ordered} (Count: {self.num_base_features})")
-
-        self.tas_strategy_for_discriminator_tis = self.params.get('tas_strategy_for_discriminator_tis', [])
-        if isinstance(self.tas_strategy_for_discriminator_tis, str):
-            try:
-                self.tas_strategy_for_discriminator_tis = json.loads(self.tas_strategy_for_discriminator_tis)
-            except json.JSONDecodeError:
-                self.logger.error(f"Failed to parse 'tas_strategy_for_discriminator_tis' string as JSON: {self.tas_strategy_for_discriminator_tis}. Using empty list.")
-                self.tas_strategy_for_discriminator_tis = []
-        self.logger.info(f"Technical analysis strategy for discriminator TIs: {self.tas_strategy_for_discriminator_tis}")
-        
-        # Initialize discriminator_feature_names with base features. TIs will be added later.
-        self.discriminator_feature_names = list(self.base_feature_names_ordered)
-        
-        # num_features_for_discriminator: This will be finalized after a test TI calculation if not explicitly set.
-        # For now, we use the configured value or estimate it.
-        configured_num_features_disc = self.params.get('num_features_for_discriminator')
-        if configured_num_features_disc:
-            self.num_features_for_discriminator = configured_num_features_disc
-            self.logger.info(f"Using configured 'num_features_for_discriminator': {self.num_features_for_discriminator}. "
-                             "Ensure TI strategy and base features combine to this number.")
-        else:
-            # Estimate based on base features + TIs from strategy (rough estimate for now)
-            estimated_ti_features = 0
-            for ti_spec in self.tas_strategy_for_discriminator_tis:
-                if isinstance(ti_spec, dict) and 'kind' in ti_spec:
-                    ti_name_base = ti_spec['kind'].lower()
-                    if ti_name_base == "macd": estimated_ti_features += 3
-                    elif ti_name_base in ["rsi", "ema", "sma", "roc", "mom", "stochrsi_k", "stochrsi_d"]: estimated_ti_features += 1 
-                    elif ti_name_base in ["stoch_k", "stoch_d"]: estimated_ti_features += 1 # typically separate
-                    elif ti_name_base == "adx": estimated_ti_features += 3 # ADX, DMP, DMN
-                    elif ti_name_base == "bbands": estimated_ti_features += 3 # Lower, Mid, Upper
-                    else: estimated_ti_features += 1 # Default assumption for unknown TIs
-            
-            self.num_features_for_discriminator = self.num_base_features + estimated_ti_features
-            self.logger.info(f"Estimated 'num_features_for_discriminator' based on {self.num_base_features} base features and TI strategy: {self.num_features_for_discriminator} (this may be refined after first TI calculation).")
-
+        self.num_base_features = self.generator_output_actual_features
+        self.logger.info(f"Final generator output dimensions set: self.seq_len={self.seq_len}, self.num_base_features={self.num_base_features}")
 
         # --- Generator Input Parameters (used by GAN construction for its inputs) ---
         # These define the shapes of the inputs that the GAN model will pass to the generator internally.
