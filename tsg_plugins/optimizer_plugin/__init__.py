@@ -1,20 +1,17 @@
 """
-Modular Optimizer Plugin Package
+Optimizer Plugin Package
 
-Provides genetic algorithm optimization for hyperparameter tuning
-of synthetic data generation pipelines.
+DEAP-based genetic algorithm optimization for hyperparameter tuning.
 """
 
 from .optimizer_plugin import OptimizerPlugin
-from .genetic_algorithm_manager import GeneticAlgorithmManager
-from .hyperparameter_handler import HyperparameterHandler
-from .evaluation_engine import EvaluationEngine
-from .plugin_coordinator import PluginCoordinator
+from .genetic_optimizer import GeneticOptimizer
+from .parameter_manager import ParameterManager
+from .evaluation_runner import EvaluationRunner
 
 __all__ = [
     'OptimizerPlugin',
-    'GeneticAlgorithmManager', 
-    'HyperparameterHandler',
-    'EvaluationEngine',
-    'PluginCoordinator'
+    'GeneticOptimizer',
+    'ParameterManager', 
+    'EvaluationRunner'
 ]
