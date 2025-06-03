@@ -28,8 +28,26 @@ class FeederPlugin:
     - Condition extraction and processing
     """
     
+    # Default plugin configuration
+    plugin_params: Dict[str, Any] = {
+        'latent_dim': 64,
+        'normalization_method': 'standard',
+        'handle_missing': 'interpolate',
+        'outlier_method': 'clip',
+        'outlier_threshold': 3.0,
+        'condition_columns': [],
+        'condition_method': 'concatenate',
+        'condition_dim': 0,
+        'use_temporal_conditions': False
+    }
+    plugin_debug_vars = ['latent_dim', 'normalization_method', 'handle_missing', 'outlier_method']
+    
     def __init__(self, config: Dict[str, Any]):
         """Initialize the feeder plugin."""
+        # Mandatory parameter initialization
+        self.params = self.plugin_params.copy()
+        if config:
+            self.params.update(config)
         self.config = config
         
         # Initialize sub-modules
@@ -353,3 +371,16 @@ class FeederPlugin:
         """Clean up plugin resources."""
         self.reset()
         logger.info("FeederPlugin cleanup completed")
+    
+    def set_params(self, **kwargs):
+        """Update plugin parameters with provided configuration."""
+        for key, value in kwargs.items():
+            self.params[key] = value
+
+    def get_debug_info(self):
+        """Return debug information for the plugin."""
+        return {var: self.params.get(var) for var in self.plugin_debug_vars}
+
+    def add_debug_info(self, debug_info):
+        """Add plugin debug information to the given dictionary."""
+        debug_info.update(self.get_debug_info())
