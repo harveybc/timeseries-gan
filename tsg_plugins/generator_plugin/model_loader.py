@@ -64,7 +64,13 @@ class ModelLoader:
                     self.logger.debug("Using default deserialization settings")
             
             # Load the model
-            model = load_model(model_path)
+            try:
+                # Try loading without compiling to support .keras format
+                model = load_model(model_path, compile=False)
+                self.logger.debug("Model loaded with compile=False")
+            except TypeError:
+                # Fallback to default loading
+                model = load_model(model_path)
             
             # Validate model
             if not self._validate_model(model):

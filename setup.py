@@ -78,12 +78,13 @@ setup(
             "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin", # Ensure this points to your evaluator
         ],
         "optimizer.plugins": [
-            # Corrected entry: points to the OptimizerPlugin class in tsg_plugins
             "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
-            # If you had an old entry like "default_optimizer = optimizer_plugins.default_optimizer:Plugin", remove or comment it out.
         ],
         "trainer.plugins": [
             "gan_trainer = tsg_plugins.gan_trainer_plugin.gan_trainer_plugin:GANTrainerPlugin",
+        ],
+        "preprocessor.plugins": [
+            "stl_preprocessor = tsg_plugins.feeder_plugin.data_preprocessor:DataPreprocessor",
         ],
     },
 
