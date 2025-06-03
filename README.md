@@ -87,5 +87,3 @@ timeseries-gan/
 - **Extreme Modularity**: Generator plugin fully modularized to 10 modules under 420 lines each
 - **Pre-trained Models**: Ready-to-use encoder/decoder models for EUR/USD hourly data
 - **Flexible Architecture**: Plugin-based system for easy extension and customization
-
-Run `sdg --help` to see all available command-line arguments.
