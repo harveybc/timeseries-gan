@@ -9,7 +9,7 @@ Modules:
 - real_data_processor: Handles real data loading and preprocessing
 """
 
-from .synthetic_generator import SyntheticGenerator
+from .synthetic_generator import SyntheticDataGenerator
 from .real_data_processor import RealDataProcessor
 
-__all__ = ['SyntheticGenerator', 'RealDataProcessor']
+__all__ = ['SyntheticDataGenerator', 'RealDataProcessor']
