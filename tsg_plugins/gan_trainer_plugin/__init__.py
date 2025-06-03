@@ -12,12 +12,9 @@ Modules:
 - data_generator: Training data generation and batching
 - model_persistence: Model saving and loading operations
 - training_metrics: Training progress tracking and visualization
-- model_builder: Discriminator and GAN model construction
-- loss_calculator: GAN loss computation and metrics
-- data_generator: Training data generation and batching
-- model_persistence: Model saving and loading operations
-- training_callbacks: Training callbacks and monitoring
-- technical_indicators: TensorFlow technical indicator layer
+- parameter_manager: Parameter extraction and validation
+- directory_manager: Output directory setup and management
+- plugin_interface: Plugin interactions and model extraction
 """
 
 from .gan_trainer_plugin import GANTrainerPlugin
