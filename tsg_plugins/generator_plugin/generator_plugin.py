@@ -20,6 +20,8 @@ from .initial_data_handler import InitialDataHandler
 from .data_generator import DataGenerator
 from .technical_indicator_calculator import TechnicalIndicatorCalculator
 from .sequence_builder import SequenceBuilder
+from tensorflow import keras
+keras.config.enable_unsafe_deserialization()
 
 
 class GeneratorPlugin:
