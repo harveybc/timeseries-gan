@@ -57,7 +57,11 @@ timeseries-gan/
 │       ├── latent_shape_inference.py # Latent shape compatibility
 │       └── output_manager.py     # Output file management
 ├── tsg_plugins/                  # Plugin implementations
-│   ├── feeder_plugin.py          # Data feeding and conditioning (589 lines)
+│   ├── feeder_plugin/            # FULLY MODULARIZED (394 lines main)
+│   │   ├── feeder_plugin.py      # Main plugin interface and orchestration
+│   │   ├── encoder_handler.py    # Keras model loading and encoding (201 lines)
+│   │   ├── data_preprocessor.py  # Data normalization and cleaning (329 lines)
+│   │   └── condition_manager.py  # Condition extraction and processing (394 lines)
 │   ├── generator_plugin/         # FULLY MODULARIZED (360 lines main)
 │   │   ├── generator_plugin.py   # Main plugin interface
 │   │   ├── normalization_handler.py # Data normalization
@@ -84,6 +88,8 @@ timeseries-gan/
 ## Features
 
 - **57 Features**: OHLC prices, 15 technical indicators, date features, fundamental data
-- **Extreme Modularity**: Generator plugin fully modularized to 10 modules under 420 lines each
+- **Extreme Modularity**: Feeder and generator plugins fully modularized with components under 400 lines each
+- **Keras Integration**: Full migration to Keras/TensorFlow from PyTorch for better compatibility
 - **Pre-trained Models**: Ready-to-use encoder/decoder models for EUR/USD hourly data
 - **Flexible Architecture**: Plugin-based system for easy extension and customization
+- **Comprehensive Testing**: Unit and integration tests for all modular components

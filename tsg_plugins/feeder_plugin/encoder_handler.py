@@ -28,7 +28,7 @@ class EncoderHandler:
         self.config = config
         
         # Model management
-        self.encoder_model = None
+        self.model = None
         self.model_path = None
         
         # Latent space properties
@@ -65,13 +65,30 @@ class EncoderHandler:
                 logger.error(f"Model file not found: {model_path}")
                 return False
             
-            # Load Keras model
-            self.encoder_model = keras.models.load_model(model_path)
+            # Load Keras model with error handling for different formats
+            try:
+                # Try loading as is (works for .keras format)
+                self.model = keras.models.load_model(model_path)
+            except Exception as e1:
+                try:
+                    # Try loading with compile=False for problematic custom objects
+                    self.model = keras.models.load_model(model_path, compile=False)
+                    # Recompile with safe defaults
+                    self.model.compile(
+                        optimizer='adam',
+                        loss='mean_squared_error',
+                        metrics=['mean_squared_error']
+                    )
+                    logger.info("Model recompiled with safe defaults")
+                except Exception as e2:
+                    logger.error(f"Failed both loading attempts: {str(e1)}, {str(e2)}")
+                    return False
+            
             self.model_path = model_path
             
             # Get model input/output shapes
-            self.expected_input_shape = self.encoder_model.input_shape[1:]
-            self.expected_output_shape = self.encoder_model.output_shape[1:]
+            self.expected_input_shape = self.model.input_shape[1:]
+            self.expected_output_shape = self.model.output_shape[1:]
             
             # Update latent dimension from model
             if len(self.expected_output_shape) == 1:
@@ -103,7 +120,7 @@ class EncoderHandler:
             dummy_input = np.random.randn(1, *self.expected_input_shape)
             
             # Test encoding
-            encoded = self.encoder_model.predict(dummy_input, verbose=0)
+            encoded = self.model.predict(dummy_input, verbose=0)
             
             if encoded.shape[1:] != self.expected_output_shape:
                 logger.error(f"Model output shape mismatch: expected {self.expected_output_shape}, got {encoded.shape[1:]}")
@@ -137,7 +154,7 @@ class EncoderHandler:
                 return None
             
             # Perform encoding
-            encoded = self.encoder_model.predict(data, verbose=0)
+            encoded = self.model.predict(data, verbose=0)
             
             # Update statistics
             self._update_latent_stats(encoded)
@@ -184,14 +201,14 @@ class EncoderHandler:
             'input_shape': self.expected_input_shape,
             'output_shape': self.expected_output_shape,
             'latent_dim': self.latent_dim,
-            'trainable_params': self.encoder_model.count_params()
+            'trainable_params': self.model.count_params()
         }
     
     def cleanup(self):
         """Clean up resources."""
-        if self.encoder_model is not None:
-            del self.encoder_model
-            self.encoder_model = None
+        if self.model is not None:
+            del self.model
+            self.model = None
         
         self.model_loaded = False
         self.is_initialized = False
