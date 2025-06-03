@@ -1,0 +1,825 @@
+# SDG System Reference Documentation
+
+## Table of Contents
+
+1. [System Overview](#system-overview)
+2. [Sequential Conditional VAE-GAN Architecture](#sequential-conditional-vae-gan-architecture)
+3. [Operation Modes](#operation-modes)
+4. [Configuration Parameters](#configuration-parameters)
+5. [File Structure and Integration](#file-structure-and-integration)
+6. [Detailed Code Documentation](#detailed-code-documentation)
+
+---
+
+## System Overview
+
+The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework that implements a Sequential Conditional Variational Autoencoder–Generative Adversarial Network (SC-VAE-GAN) for generating high-quality multi-feature time series data. The system is designed with extreme modularity and separation of concerns, making it highly maintainable, testable, and extensible.
+
+### Key Features
+
+- **57-Feature Time Series Generation**: Generates OHLC prices, 15 technical indicators, cyclical date features, and fundamental market data
+- **Three Operation Modes**: Train, Generate, and Optimize with dedicated pipeline modules
+- **Pre-trained Models**: Ready-to-use encoder/decoder models trained on EUR/USD hourly data
+- **Extreme Modularity**: Largest module under 630 lines, with generator plugin fully modularized into 10 modules under 420 lines each
+- **Plugin Architecture**: Extensible design supporting custom feeders, generators, evaluators, and optimizers
+
+---
+
+## Sequential Conditional VAE-GAN Architecture
+
+### Architecture Overview
+
+The system combines three key machine learning components in a sequential pipeline:
+
+1. **Variational Autoencoder (VAE)**: Pre-trained encoder/decoder for feature representation learning
+2. **Conditional Generation**: Date and fundamental features for temporal conditioning  
+3. **Generative Adversarial Network (GAN)**: Adversarial training for improved synthetic data quality
+
+### Autoencoder Model Analysis
+
+The pre-trained autoencoder models (located in `examples/results/phase_4_3/`) implement a sophisticated encoder-decoder architecture:
+
+#### Encoder Model (`phase_4_3_cnn_small_encoder_model.keras`)
+- **Input**: Multi-feature time series windows (144 timesteps × 57 features)
+- **Architecture**: Conv1D layers with attention mechanisms and LSTM components
+- **Output**: Latent representations with shape `[18, 32]` (sequence_length=18, latent_dim=32)
+- **Purpose**: Compress real market data into meaningful latent representations
+
+#### Decoder Model (`phase_4_3_cnn_small_decoder_model.keras`) 
+- **Input**: Multiple input streams:
+  - `decoder_input_z_seq`: Latent sequences `[18, 32]`
+  - `input_x_window`: Real data window for conditioning `[144, features]`
+  - `decoder_input_conditions`: Date/fundamental conditioning features
+  - `decoder_input_h_context`: Context vector `[64]`
+- **Architecture**: Sophisticated decoder with multiple input handling
+- **Output**: Base features subset (17 features) including:
+  - OHLC prices: `["OPEN", "LOW", "HIGH"]` 
+  - Bollinger Band ratios: `["BC-BO", "BH-BL"]`
+  - Multi-timeframe price ticks: `["CLOSE_15m_tick_1" through "CLOSE_15m_tick_8", "CLOSE_30m_tick_1" through "CLOSE_30m_tick_8"]`
+
+#### Integration with GAN Training
+- **Generator**: Uses the pre-trained VAE decoder as the GAN generator
+- **Discriminator**: Custom Conv1D/LSTM architecture that processes full 57-feature sequences
+- **Training**: Adversarial training improves the quality of decoder outputs while preserving VAE learned representations
+
+### Data Flow Architecture
+
+```
+Real Data → Feeder Plugin → Generator Plugin → Discriminator → Evaluation
+    ↓            ↓              ↓                ↓              ↓
+Date/Fund.   Latent Noise   VAE Decoder    GAN Training   Metrics
+Features     Generation     + TI Calc.     Improvement    Computation
+```
+
+1. **Feeder Plugin**: Generates latent noise and conditioning features
+2. **Generator Plugin**: Uses VAE decoder + technical indicator calculations
+3. **Discriminator**: Distinguishes real vs synthetic for adversarial training
+4. **Evaluation**: Comprehensive metrics on distributional and temporal properties
+
+---
+
+## Operation Modes
+
+### 1. Train Mode
+
+**Purpose**: Train the GAN discriminator and improve the generator using adversarial training.
+
+#### Input Files Required
+- **Training Data**: `examples/data/phase_3/normalized_d4.csv` (default)
+- **Validation Data**: `examples/data/phase_3/normalized_d5.csv` (default)
+- **Pre-trained Models**: 
+  - Encoder: `examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras`
+  - Decoder: `examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras`
+- **Normalization Params**: `examples/data/phase_3/phase_3_debug_out.json`
+
+#### Process Flow
+1. **Data Loading**: Load training data with 57 features
+2. **Model Initialization**: Load pre-trained VAE encoder/decoder
+3. **Discriminator Building**: Create Conv1D/LSTM discriminator architecture
+4. **GAN Training**: Adversarial training loop for specified epochs
+5. **Model Persistence**: Save improved generator and discriminator models
+
+#### Output Files Generated
+- **Improved Generator**: `{gan_model_dir}/generator_epoch_{epoch}.keras`
+- **Trained Discriminator**: `{gan_model_dir}/discriminator_epoch_{epoch}.keras`
+- **Final Models**: `{save_generator_sequential_model_file}`, `{save_discriminator_sequential_model_file}`
+- **Training Metrics**: `{gan_loss_plot_file}` (loss visualization)
+- **Debug Information**: Training logs and progress metrics
+
+#### Key Configuration Parameters
+```python
+# Training duration
+gan_epochs = 1000  # Number of adversarial training epochs
+
+# Model architecture  
+discriminator_lstm_units = 128  # LSTM units in discriminator
+discriminator_dense_units = 64  # Dense layer units
+
+# Learning rates
+generator_lr = 0.0002  # Adam optimizer learning rate for generator
+discriminator_lr = 0.0002  # Adam optimizer learning rate for discriminator
+
+# Data handling
+gan_batch_size = 32  # Batch size for training
+x_train_file = "examples/data/phase_3/normalized_d4.csv"
+```
+
+#### Example Command
+```bash
+sdg --trainer gan_trainer --gan_epochs 1000 --gan_batch_size 32 \
+    --x_train_file examples/data/phase_3/normalized_d4.csv \
+    --generator_lr 0.0002 --discriminator_lr 0.0002
+```
+
+### 2. Generate Mode
+
+**Purpose**: Generate synthetic time series data using trained models.
+
+#### Input Files Required
+- **Base Data**: `examples/data/phase_3/normalized_d4.csv` (for initial window)
+- **Trained Models**:
+  - Generator: `examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras`
+  - Encoder: `examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras` (for feeder)
+- **Normalization Params**: `examples/data/phase_3/phase_3_debug_out.json`
+
+#### Process Flow
+1. **Initial Window Loading**: Load real data for conditioning window
+2. **Noise Generation**: Generate latent sequences via feeder plugin
+3. **Conditional Feature Creation**: Generate date and fundamental features
+4. **Synthetic Generation**: Use VAE decoder to generate base features
+5. **Technical Indicator Calculation**: Compute 15 technical indicators
+6. **Feature Assembly**: Combine all features into final 57-feature sequences
+7. **Data Export**: Save synthetic data to CSV with proper formatting
+
+#### Output Files Generated
+- **Synthetic Data**: `{output_file}` - CSV with 57 features and synthetic datetime sequence
+- **Evaluation Metrics**: `{metrics_file}` - Comprehensive evaluation results (if evaluator enabled)
+- **Debug Information**: Generation logs and validation reports
+
+#### Key Configuration Parameters
+```python
+# Generation volume
+n_samples = 12600  # Number of synthetic samples to generate
+max_steps_train = 25200  # Real data rows for initial conditioning
+
+# Model paths
+generator_sequential_model_file = "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras"
+encoder_model_file = "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras"
+
+# Sequence parameters
+seq_len = 144  # Sequence length for input/output windows
+latent_shape = [18, 32]  # (sequence_length, latent_dim) for latent space
+
+# Feature configuration
+generator_full_feature_names_ordered = [  # All 57 features in final output
+    "DATE_TIME", "OPEN", "HIGH", "LOW", "CLOSE", "RSI", "MACD", ...
+]
+```
+
+#### Generated Features (57 Total)
+1. **OHLC Prices** (4): OPEN, HIGH, LOW, CLOSE
+2. **Technical Indicators** (15): RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, Stochastic_%D, ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+3. **Date Features** (8): day_of_month_sin/cos, hour_of_day_sin/cos, day_of_week_sin/cos, day_of_year_sin/cos
+4. **Fundamental Features** (2): S&P500_Close, vix_close
+5. **Log Returns** (1): log_return
+6. **Decomposition Features** (6): stl_trend, stl_seasonal, stl_resid, wav_approx_L2, wav_detail_L1, wav_detail_L2
+7. **Multi-Taper Features** (4): mtm_band_0, mtm_band_1, mtm_band_2, mtm_band_3
+8. **Bollinger Band Ratios** (4): BC-BO, BH-BL, BH-BO, BO-BL
+9. **Multi-Timeframe Features** (16): CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+10. **Conditional Features** (3): day_of_month, hour_of_day, day_of_week
+
+#### Example Command
+```bash
+sdg --n_samples 1000 --output_file synthetic_eur_usd.csv \
+    --generator_sequential_model_file models/decoder.keras \
+    --max_steps_train 5000 --seq_len 144
+```
+
+### 3. Optimize Mode
+
+**Purpose**: Perform hyperparameter optimization using genetic algorithms to find optimal GAN training parameters.
+
+#### Input Files Required
+- **Training Data**: Same as Train Mode
+- **Pre-trained Models**: Same as Train Mode
+- **Evaluation Data**: For fitness function evaluation
+
+#### Process Flow
+1. **Population Initialization**: Create initial hyperparameter population
+2. **Fitness Evaluation**: Train mini-GANs with different hyperparameters
+3. **Genetic Operations**: Selection, crossover, and mutation
+4. **Evolution**: Iterate through generations to optimize fitness
+5. **Best Configuration**: Export optimal hyperparameters
+
+#### Output Files Generated
+- **Optimization Results**: Best hyperparameter combinations
+- **Population History**: Evolution tracking across generations
+- **Fitness Scores**: Performance metrics for each configuration
+
+#### Key Configuration Parameters
+```python
+# Genetic algorithm settings
+run_hyperparameter_optimization = True
+population_size = 10  # Number of individuals in population
+n_generations = 5  # Number of evolutionary generations
+
+# Genetic operators
+cxpb = 0.5  # Crossover probability
+mutpb = 0.2  # Mutation probability
+
+# Hyperparameter search space
+hyperparameter_bounds = {
+    "generator_lr": (0.0001, 0.001),
+    "discriminator_lr": (0.0001, 0.001),
+    "gan_batch_size": (16, 64),
+    "discriminator_lstm_units": (64, 256)
+}
+
+# Evaluation settings
+optimizer_n_samples_per_eval = 1000  # Samples for fitness evaluation
+```
+
+#### Example Command
+```bash
+sdg --run_hyperparameter_optimization True --population_size 20 \
+    --n_generations 10 --optimizer_n_samples_per_eval 1000
+```
+
+---
+
+## Configuration Parameters
+
+All configuration parameters are defined in `app/config.py` with comprehensive defaults. Below is the complete reference:
+
+### Plugin Selection Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `feeder` | str | "default_feeder" | Feeder plugin name for noise generation |
+| `generator` | str | "default_generator" | Generator plugin name (VAE decoder wrapper) |
+| `evaluator` | str | "default_evaluator" | Evaluator plugin name for metrics computation |
+| `optimizer` | str | "default_optimizer" | Optimizer plugin name for hyperparameter tuning |
+
+### Data Source Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `x_train_file` | str | "examples/data/phase_3/normalized_d4.csv" | Primary training data source |
+| `y_train_file` | str | "examples/data/phase_3/normalized_d4.csv" | Training target data |
+| `x_validation_file` | str | "examples/data/phase_3/normalized_d5.csv" | Validation data source |
+| `y_validation_file` | str | "examples/data/phase_3/normalized_d5.csv" | Validation target data |
+| `x_test_file` | str | "examples/data/phase_3/normalized_d6.csv" | Test data source |
+| `y_test_file` | str | "examples/data/phase_3/normalized_d6.csv" | Test target data |
+| `target_column` | str | "CLOSE" | Primary target column for predictions |
+
+### Generation Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `n_samples` | int | 12600 | Number of synthetic samples/windows to generate |
+| `max_steps_train` | int | 25200 | Number of real data rows for initial conditioning |
+| `seq_len` | int | 144 | Sequence length for input/output windows |
+| `latent_shape` | [int, int] | [18, 32] | (sequence_length, latent_dim) for latent space |
+| `batch_size` | int | 32 | Batch size for training/generation |
+
+### Feeder Plugin Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `feeder_sampling_method` | str | "standard_normal" | Noise sampling method ("standard_normal" or "from_encoder") |
+| `feeder_encoder_sampling_technique` | str | "direct" | Encoder sampling technique ("direct", "kde", or "copula") |
+| `encoder_model_file` | str | "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras" | Pre-trained VAE encoder path |
+| `feeder_real_data_file_has_header` | bool | True | Whether CSV has header row |
+| `feeder_datetime_col_in_real_data` | str | "DATE_TIME" | DateTime column name in CSV |
+| `feeder_date_features_for_conditioning` | List[str] | ["day_of_month", "hour_of_day", "day_of_week", "day_of_year"] | Date features for conditioning |
+| `feeder_fundamental_features_for_conditioning` | List[str] | ["S&P500_Close", "vix_close"] | Fundamental features for conditioning |
+| `feeder_max_day_of_month` | int | 31 | Maximum day of month for scaling |
+| `feeder_max_hour_of_day` | int | 23 | Maximum hour for scaling |
+| `feeder_max_day_of_week` | int | 6 | Maximum day of week for scaling |
+| `feeder_max_day_of_year` | int | 366 | Maximum day of year for scaling |
+| `feeder_context_vector_dim` | int | 64 | Context vector dimensionality |
+| `feeder_context_vector_strategy` | str | "random" | Context vector strategy ("random" or "zeros") |
+
+### Generator Plugin Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `generator_sequential_model_file` | str | "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras" | Pre-trained decoder model path |
+| `generator_decoder_input_window_size` | int | 144 | Expected input sequence length |
+| `generator_normalization_params_file` | str | "examples/data/phase_3/phase_3_debug_out.json" | Normalization parameters JSON |
+| `context_vector_dim` | int | 64 | Context vector dimension (must match feeder) |
+
+#### Generator Feature Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `generator_full_feature_names_ordered` | List[str] | [57 features] | Complete ordered list of all output features |
+| `generator_decoder_output_feature_names` | List[str] | [17 features] | Features directly output by VAE decoder |
+| `generator_ohlc_feature_names` | List[str] | ["OPEN", "HIGH", "LOW", "CLOSE"] | OHLC price features |
+| `generator_ti_feature_names` | List[str] | [15 TI names] | Technical indicator feature names |
+| `generator_date_conditional_feature_names` | List[str] | [4 date features] | Date conditioning features |
+| `generator_feeder_conditional_feature_names` | List[str] | ["S&P500_Close", "vix_close"] | Fundamental conditioning features |
+
+#### Technical Indicator Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `generator_ti_calculation_min_lookback` | int | 200 | Minimum data points for TI calculations |
+| `generator_ti_params` | Dict | See below | Technical indicator calculation parameters |
+
+**Technical Indicator Parameters Detail:**
+```python
+generator_ti_params = {
+    "rsi_length": 14,        # RSI period
+    "ema_length": 14,        # EMA period  
+    "macd_fast": 12,         # MACD fast EMA
+    "macd_slow": 26,         # MACD slow EMA
+    "macd_signal": 9,        # MACD signal line
+    "stoch_k": 14,           # Stochastic %K period
+    "stoch_d": 3,            # Stochastic %D period
+    "stoch_smooth_k": 3,     # Stochastic %K smoothing
+    "adx_length": 14,        # ADX period
+    "atr_length": 14,        # ATR period
+    "cci_length": 14,        # CCI period
+    "willr_length": 14,      # Williams %R period
+    "mom_length": 14,        # Momentum period
+    "roc_length": 14,        # Rate of Change period
+    "bb_length": 20,         # Bollinger Bands period
+    "bb_std": 2.0            # Bollinger Bands standard deviation multiplier
+}
+```
+
+### GAN Training Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gan_epochs` | int | 1000 | Total GAN training epochs |
+| `gan_batch_size` | int | 32 | Batch size for GAN training |
+| `generator_lr` | float | 0.0002 | Generator learning rate |
+| `generator_beta1` | float | 0.5 | Generator Adam beta1 parameter |
+| `discriminator_lr` | float | 0.0002 | Discriminator learning rate |
+| `discriminator_beta1` | float | 0.5 | Discriminator Adam beta1 parameter |
+| `discriminator_lstm_units` | int | 128 | LSTM units in discriminator |
+| `discriminator_dense_units` | int | 64 | Dense layer units in discriminator |
+| `gan_save_interval` | int | 100 | Epoch interval for saving models |
+
+### Evaluator Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `evaluator_metrics` | List[str] | ["mmd", "acf", "wasserstein", "kstest", "discriminative_score", "predictive_score", "visual"] | Metrics to compute |
+| `evaluator_mmd_gamma` | float | None | MMD RBF kernel gamma parameter |
+| `evaluator_acf_nlags` | int | 40 | Number of lags for autocorrelation analysis |
+| `evaluator_predictive_model_type` | str | "lstm" | Model type for predictive score |
+| `evaluator_predictive_epochs` | int | 50 | Epochs for predictive model training |
+| `evaluator_predictive_batch_size` | int | 32 | Batch size for predictive evaluation |
+
+### Optimizer Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `run_hyperparameter_optimization` | bool | False | Enable hyperparameter optimization |
+| `population_size` | int | 10 | GA population size |
+| `n_generations` | int | 5 | Number of GA generations |
+| `cxpb` | float | 0.5 | Crossover probability |
+| `mutpb` | float | 0.2 | Mutation probability |
+| `optimizer_n_samples_per_eval` | int | 1000 | Samples for fitness evaluation |
+
+### Output Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `output_file` | str | "synthetic_data.csv" | Output CSV file path |
+| `metrics_file` | str | "evaluation_metrics.json" | Evaluation metrics output path |
+| `save_config` | str | "" | Configuration save path |
+| `save_log` | str | "" | Log file save path |
+| `quiet_mode` | bool | False | Suppress verbose output |
+
+---
+
+## File Structure and Integration
+
+### Complete Directory Tree
+
+```
+timeseries-gan/
+├── app/                                    # Core application modules (modular architecture)
+│   ├── __init__.py                        # Package initialization
+│   ├── main.py                            # Entry point: CLI processing and orchestration
+│   ├── cli.py                             # Command-line argument definitions (no defaults)
+│   ├── config.py                          # DEFAULT_VALUES for all configuration parameters
+│   ├── plugin_loader.py                   # Plugin discovery via setuptools entry points
+│   ├── config_merger.py                   # Hierarchical configuration merging logic
+│   ├── data_processor.py                  # Main pipeline orchestrator (~170 lines)
+│   │
+│   ├── pipeline/                          # Operation mode pipelines (under 200 lines each)
+│   │   ├── __init__.py                    # Pipeline package initialization
+│   │   ├── train_pipeline.py              # GAN training workflow (~180 lines)
+│   │   ├── optimize_pipeline.py           # Hyperparameter optimization workflow (~190 lines)
+│   │   └── generate_pipeline.py           # Data generation and evaluation workflow (~190 lines)
+│   │
+│   ├── data_generation/                   # Data processing modules
+│   │   ├── __init__.py                    # Data generation package initialization  
+│   │   ├── synthetic_generator.py         # Synthetic data generation logic (~200 lines)
+│   │   └── real_data_processor.py         # Real data segment processing (~130 lines)
+│   │
+│   ├── evaluation/                        # Evaluation and metrics
+│   │   ├── __init__.py                    # Evaluation package initialization
+│   │   └── metrics_evaluator.py           # Comprehensive evaluation metrics (~140 lines)
+│   │
+│   └── utils/                             # Utility modules
+│       ├── __init__.py                    # Utils package initialization
+│       ├── latent_shape_inference.py      # Latent shape compatibility (~190 lines)
+│       └── output_manager.py              # Output file management (~180 lines)
+│
+├── tsg_plugins/                           # Plugin implementations
+│   ├── __init__.py                        # Plugins package initialization
+│   ├── feeder_plugin.py                   # FeederPlugin: noise & conditioning (589 lines)
+│   ├── evaluator_plugin.py                # EvaluatorPlugin: metrics computation (368 lines)
+│   ├── optimizer_plugin.py                # OptimizerPlugin: GA hyperparameter tuning (299 lines)
+│   ├── trainer_plugin.py                  # GANTrainerPlugin: adversarial training (629 lines)
+│   │
+│   └── generator_plugin/                  # FULLY MODULARIZED Generator Plugin
+│       ├── __init__.py                    # Generator plugin package initialization (~19 lines)
+│       ├── generator_plugin.py            # Main plugin interface (360 lines)
+│       ├── normalization_handler.py       # Data normalization/denormalization (~251 lines)
+│       ├── model_loader.py                # Model loading and validation (~195 lines)
+│       ├── feature_processor.py           # Feature processing and validation (~198 lines)
+│       ├── technical_indicator_calculator.py # Technical indicator calculations (~282 lines)
+│       ├── data_generator.py              # Data generation and assembly (~227 lines)
+│       ├── sequence_builder.py            # Sequence building and windows (~420 lines)
+│       ├── feature_validator.py           # Feature validation and consistency (~151 lines)
+│       ├── initial_data_handler.py        # Initial data loading and anchoring (~190 lines)
+│       └── pandas_ta_compat.py            # Pandas-TA compatibility layer (~41 lines)
+│
+├── examples/                              # Sample data and trained models
+│   ├── data/                              # EUR/USD datasets by processing phase
+│   │   ├── phase_1/                       # Raw market data
+│   │   ├── phase_2_1/ through phase_2_4/  # Intermediate processing stages
+│   │   ├── phase_3/                       # Normalized datasets for training/validation/test
+│   │   │   ├── normalized_d4.csv          # Training data (default x_train_file)
+│   │   │   ├── normalized_d5.csv          # Validation data
+│   │   │   ├── normalized_d6.csv          # Test data
+│   │   │   └── phase_3_debug_out.json     # Normalization parameters
+│   │   └── phase_4/                       # Final processed datasets
+│   │
+│   ├── results/                           # Pre-trained models and results
+│   │   ├── phase_1/ through phase_3_3/    # Intermediate training results
+│   │   ├── phase_4_1/ through phase_4_2/  # Advanced training phases
+│   │   └── phase_4_3/                     # Final trained models (default)
+│   │       ├── phase_4_3_cnn_small_encoder_model.keras     # VAE encoder
+│   │       ├── phase_4_3_cnn_small_decoder_model.keras     # VAE decoder (generator)
+│   │       └── phase_4_3_discriminator_model.keras         # GAN discriminator
+│   │
+│   ├── scripts/                           # Example usage scripts
+│   └── config/                            # Configuration templates
+│
+├── tests/                                 # Comprehensive test suites
+│   ├── unit_tests/                        # Unit tests for individual modules
+│   │   ├── test_app_modules.py            # Tests for app/ modules
+│   │   ├── test_plugin_interfaces.py      # Plugin interface validation
+│   │   └── test_generator_modules.py      # Generator plugin module tests
+│   │
+│   └── integration_tests/                 # Integration tests
+│       ├── test_pipeline_integration.py   # Pipeline interaction tests
+│       ├── test_plugin_integration.py     # Plugin interaction tests
+│       └── test_generator_plugin_integration.py # Generator module integration
+│
+├── core/                                  # Legacy utilities (being phased out)
+│   ├── data_io.py                         # CSV read/write utilities
+│   ├── datetime_utils.py                  # DateTime manipulation utilities
+│   ├── models/                            # Model builders
+│   └── pipelines/                         # Legacy pipeline structure
+│
+├── docs/                                  # Documentation
+├── requirements.txt                       # Python dependencies
+├── setup.py                              # Package setup and plugin entry points
+├── pyproject.toml                         # Modern Python project configuration
+└── README.md                             # Brief system overview
+```
+
+### Integration Architecture
+
+#### Plugin Loading and Configuration Flow
+
+```
+CLI Arguments → config_merger.py → DEFAULT_VALUES (config.py) → Plugin Initialization
+     ↓                ↓                    ↓                         ↓
+File Configs → Hierarchical Merge → Parameter Validation → plugin_loader.py
+     ↓                ↓                    ↓                         ↓  
+Remote Configs → Final Configuration → Plugin Discovery → Entry Point Resolution
+```
+
+#### Operation Mode Dispatching
+
+```
+main.py → data_processor.py → Operation Mode Detection → Pipeline Selection
+   ↓           ↓                      ↓                      ↓
+CLI Args → Configuration Merge → Mode-Specific Pipeline → Plugin Orchestration
+   ↓           ↓                      ↓                      ↓
+Logging → Plugin Loading → {Train|Generate|Optimize}Pipeline → Result Output
+```
+
+#### Data Flow in Generate Mode
+
+```
+Initial Data (CSV) → initial_data_handler.py → Real Window Loading
+        ↓                      ↓                      ↓
+Feeder Plugin → Noise Generation → Conditioning Features → Latent Sequences
+        ↓                      ↓                      ↓
+Generator Plugin → model_loader.py → VAE Decoder → Base Feature Generation
+        ↓                      ↓                      ↓
+technical_indicator_calculator.py → TI Computation → feature_processor.py
+        ↓                      ↓                      ↓
+sequence_builder.py → Feature Assembly → normalization_handler.py → Denormalization
+        ↓                      ↓                      ↓
+output_manager.py → CSV Export → Evaluation (Optional) → Final Results
+```
+
+---
+
+## Detailed Code Documentation
+
+### Core Application Modules (app/)
+
+#### app/main.py
+**Purpose**: Application entry point and high-level orchestration
+**Key Functions**:
+- `main()`: Primary entry point handling CLI argument parsing
+- Command-line processing and configuration initialization
+- Plugin discovery and loading coordination
+- Operation mode detection and pipeline selection
+- Error handling and logging setup
+
+**Integration**: Serves as the central coordinator calling `data_processor.py` with merged configuration
+
+#### app/config.py  
+**Purpose**: Centralized default configuration management
+**Key Components**:
+- `DEFAULT_VALUES`: Dictionary containing defaults for all 100+ parameters
+- Comprehensive parameter documentation with types and descriptions
+- Plugin-specific parameter groupings
+- Feature name configurations for the 57-feature system
+
+**Integration**: Provides baseline values used by `config_merger.py` for hierarchical configuration
+
+#### app/config_merger.py
+**Purpose**: Hierarchical configuration merging logic
+**Key Functions**:
+- `merge_configs()`: Merges CLI args, file configs, and defaults
+- Configuration validation and type checking
+- Remote configuration support (future feature)
+- Plugin parameter filtering and distribution
+
+**Integration**: Called by `main.py` to create final configuration passed to all plugins
+
+#### app/data_processor.py (~170 lines)
+**Purpose**: Main pipeline orchestrator with operation mode dispatching
+**Key Functions**:
+- `process()`: Main processing function with mode detection
+- `_dispatch_to_pipeline()`: Routes to appropriate pipeline module
+- Configuration validation and plugin initialization
+- Result aggregation and output coordination
+
+**Integration**: Central hub connecting main.py to specialized pipeline modules
+
+#### app/plugin_loader.py
+**Purpose**: Plugin discovery and loading via setuptools entry points
+**Key Functions**:
+- `load_plugin()`: Dynamic plugin loading by name
+- Entry point discovery and validation
+- Plugin interface compatibility checking
+- Error handling for missing or invalid plugins
+
+**Integration**: Used by all pipeline modules to load and initialize required plugins
+
+### Pipeline Modules (app/pipeline/)
+
+#### app/pipeline/train_pipeline.py (~180 lines)
+**Purpose**: GAN training workflow coordination
+**Key Functions**:
+- `execute()`: Main training execution function
+- Training data validation and loading
+- GAN trainer plugin initialization and execution
+- Training progress monitoring and logging
+- Model persistence and result handling
+
+**Integration**: Called by `data_processor.py` for train mode, coordinates with `trainer_plugin.py`
+
+#### app/pipeline/generate_pipeline.py (~190 lines)  
+**Purpose**: Data generation and evaluation workflow
+**Key Functions**:
+- `execute()`: Main generation execution function
+- Plugin initialization (feeder, generator, evaluator)
+- Synthetic data generation coordination
+- Real data segment processing integration
+- Evaluation execution and result compilation
+
+**Integration**: Primary pipeline for generate mode, orchestrates feeder and generator plugins
+
+#### app/pipeline/optimize_pipeline.py (~190 lines)
+**Purpose**: Hyperparameter optimization workflow using genetic algorithms
+**Key Functions**:
+- `execute()`: Main optimization execution function  
+- Genetic algorithm setup and configuration
+- Population initialization and fitness evaluation
+- Evolution loop coordination (selection, crossover, mutation)
+- Best configuration identification and export
+
+**Integration**: Coordinates with `optimizer_plugin.py` for hyperparameter tuning
+
+### Data Generation Modules (app/data_generation/)
+
+#### app/data_generation/synthetic_generator.py (~200 lines)
+**Purpose**: Synthetic data generation logic encapsulation
+**Key Functions**:
+- `generate_synthetic_data()`: Core generation function
+- Target datetime sequence generation for synthetic data
+- Noise generation coordination with feeder plugin
+- Initial window preparation for conditional generation
+- Data format conversion and validation
+
+**Integration**: Used by `generate_pipeline.py` to coordinate feeder and generator plugins
+
+#### app/data_generation/real_data_processor.py (~130 lines)
+**Purpose**: Real data segment processing and integration
+**Key Functions**:
+- `load_real_data_segment()`: Real data loading and validation
+- Data preprocessing and format standardization
+- Integration preparation for combination with synthetic data
+- Feature alignment and consistency checking
+
+**Integration**: Supports `generate_pipeline.py` for real data integration scenarios
+
+### Evaluation Module (app/evaluation/)
+
+#### app/evaluation/metrics_evaluator.py (~140 lines)
+**Purpose**: Comprehensive evaluation metrics computation
+**Key Functions**:
+- `evaluate_synthetic_data()`: Main evaluation function
+- Statistical metrics computation (MMD, Wasserstein, KS tests)
+- Temporal analysis (autocorrelation functions)
+- Machine learning evaluation (discriminative and predictive scores)
+- Results persistence and reporting
+
+**Integration**: Called by `generate_pipeline.py` when evaluation is enabled
+
+### Utility Modules (app/utils/)
+
+#### app/utils/latent_shape_inference.py (~190 lines)
+**Purpose**: Automatic latent shape compatibility between plugins
+**Key Functions**:
+- `infer_latent_shape()`: Automatic shape detection from models
+- Plugin configuration updates for compatibility
+- Generator-feeder latent space coordination
+- Error handling and fallback mechanisms
+
+**Integration**: Used by pipeline modules to ensure plugin compatibility
+
+#### app/utils/output_manager.py (~180 lines)
+**Purpose**: Output file management and data operations
+**Key Functions**:
+- `save_synthetic_data()`: CSV export with proper formatting
+- Output directory management and path resolution
+- Data combination (synthetic + real data segments)
+- File validation and error handling
+
+**Integration**: Used by all pipeline modules for result output
+
+### Generator Plugin Modules (tsg_plugins/generator_plugin/)
+
+#### generator_plugin.py (360 lines) - Main Plugin Interface
+**Purpose**: Primary generator plugin interface maintaining mandatory plugin methods
+**Key Functions**:
+- `plugin_params`: Class-level parameter dictionary with defaults
+- `__init__(config, *args)`: Configuration merging and module initialization
+- `set_params(**kwargs)`: Dynamic parameter updates
+- `get_debug_info()`: Debug information compilation
+- `generate()`: Main generation method coordinating all modules
+
+**Integration**: Implements mandatory plugin interface, coordinates all specialized modules
+
+#### normalization_handler.py (~251 lines) - Data Normalization
+**Purpose**: Comprehensive data normalization and denormalization operations
+**Key Functions**:
+- `load_normalization_params()`: JSON parameter loading
+- `normalize_data()`: Min-max normalization with feature-specific handling
+- `denormalize_data()`: Reverse normalization for output
+- `handle_ohlc_relationships()`: OHLC price relationship preservation
+- `convert_log_returns_to_prices()`: Log return to price conversion
+
+**Integration**: Used by `data_generator.py` and `sequence_builder.py` for data scaling
+
+#### model_loader.py (~195 lines) - Model Loading and Validation
+**Purpose**: Keras model loading, validation, and initialization  
+**Key Functions**:
+- `load_decoder_model()`: Safe Keras model loading with error handling
+- `validate_model_structure()`: Model architecture compatibility checks
+- `get_model_input_names()`: Extract input layer names for multi-input models
+- `handle_safe_mode_loading()`: TensorFlow safe mode compatibility
+
+**Integration**: Provides loaded models to `data_generator.py` for synthetic generation
+
+#### feature_processor.py (~198 lines) - Feature Processing and Validation
+**Purpose**: Feature processing, extraction, and validation
+**Key Functions**:
+- `extract_decoder_features()`: Extract decoder output features from full arrays
+- `extract_ohlc_features()`: OHLC price feature extraction
+- `validate_feature_consistency()`: Cross-feature list validation
+- `map_feature_indices()`: Feature name to index mapping
+
+**Integration**: Used throughout the plugin for feature manipulation and validation
+
+#### technical_indicator_calculator.py (~282 lines) - Technical Indicator Calculations
+**Purpose**: Technical indicator calculations with pandas-ta integration
+**Key Functions**:
+- `calculate_technical_indicators()`: Main TI calculation function
+- `calculate_rsi()`, `calculate_macd()`, `calculate_ema()`: Individual indicator functions
+- `calculate_bollinger_bands()`: BB calculations with ratio derivation
+- `handle_insufficient_data()`: Empty DataFrame handling for edge cases
+
+**Integration**: Called by `sequence_builder.py` to add TI features to synthetic sequences
+
+#### data_generator.py (~227 lines) - Data Generation and Assembly
+**Purpose**: Data generation and feature assembly coordination
+**Key Functions**:
+- `generate_synthetic_window()`: Single window generation
+- `prepare_decoder_inputs()`: Multi-input preparation for VAE decoder
+- `generate_date_features()`: Date conditioning feature generation
+- `assemble_full_features()`: Final feature array assembly
+
+**Integration**: Core generation logic called by main plugin `generate()` method
+
+#### sequence_builder.py (~420 lines) - Sequence Building and Window Management
+**Purpose**: Synthetic sequence construction with proper feature derivation
+**Key Functions**:
+- `build_synthetic_sequence()`: Main sequence construction
+- `derive_close_from_ohlc()`: CLOSE price derivation from OHLC relationships
+- `calculate_window_derived_features()`: Window-based feature calculations
+- `manage_progress_tracking()`: Memory-efficient progress monitoring
+
+**Integration**: Orchestrates the complete sequence building process using other modules
+
+#### feature_validator.py (~151 lines) - Feature Validation and Consistency
+**Purpose**: Feature validation and consistency checking across configuration
+**Key Functions**:
+- `validate_feature_lists()`: Cross-feature list consistency validation
+- `validate_critical_parameters()`: Non-empty list validation
+- `check_subset_relationships()`: Feature subset validation
+- `log_validation_results()`: Validation result reporting
+
+**Integration**: Called during plugin initialization to ensure configuration validity
+
+#### initial_data_handler.py (~190 lines) - Initial Data Loading and Anchoring
+**Purpose**: Initial data loading and anchor value handling for generation
+**Key Functions**:
+- `load_initial_window()`: Real data window loading for conditioning
+- `extract_close_anchor()`: Close price anchor extraction
+- `prepare_initial_context()`: Context preparation for generation start
+- `validate_data_availability()`: Data sufficiency validation
+
+**Integration**: Provides initial conditions for `sequence_builder.py` and `data_generator.py`
+
+#### pandas_ta_compat.py (~41 lines) - Compatibility Layer
+**Purpose**: Pandas-TA compatibility layer for version differences
+**Key Functions**:
+- `handle_numpy_nan_import()`: NumPy NaN import compatibility
+- `resolve_version_conflicts()`: Version-specific compatibility handling
+- `provide_fallback_functions()`: Fallback implementations for missing functions
+
+**Integration**: Imported by `technical_indicator_calculator.py` for stable TI calculations
+
+### Plugin Integration Patterns
+
+#### Mandatory Plugin Interface
+All plugins implement the same interface pattern:
+```python
+class PluginName:
+    plugin_params = {...}  # Default parameters
+    
+    def __init__(self, config, *args):
+        # Configuration merging and initialization
+        
+    def set_params(self, **kwargs):
+        # Dynamic parameter updates
+        
+    def get_debug_info(self):
+        # Debug information compilation
+        
+    def add_debug_info(self, key, value):
+        # Debug information addition
+```
+
+#### Inter-Plugin Communication
+- **Feeder → Generator**: Latent sequences and conditioning features
+- **Generator → Evaluator**: Synthetic data for metrics computation  
+- **Trainer → Generator**: Model improvements through adversarial training
+- **All Plugins ← Configuration**: Unified parameter distribution
+
+#### Error Handling and Validation
+- **Parameter Validation**: Type checking and range validation for all parameters
+- **Model Compatibility**: Automatic shape inference and compatibility checking
+- **Data Validation**: Feature consistency and data availability checking
+- **Graceful Degradation**: Fallback mechanisms for missing components
+
+This comprehensive architecture provides a robust, maintainable, and extensible platform for synthetic time series data generation with extreme modularity and clear separation of concerns.
