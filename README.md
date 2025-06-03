@@ -13,30 +13,101 @@ All configuration defaults reside in `app/config.py`. Command-line arguments acc
 
 ## Architecture & Modules
 
-The project is organized into the following high-level components:
+The project follows a **highly modular architecture** with **extreme separation of concerns**, where the main data processing pipeline has been refactored into focused modules under 200 lines each. The system is organized into the following components:
 
 ```
-app/                   # Core orchestrator and config
-core/                  # Shared utilities, model builders, pipelines
-tsg_plugins/           # Plugin implementations (feeder, generator, Z-Gen, trainer, discriminator, evaluator, optimizer)
-docs/                  # Sphinx documentation sources
+app/                   # Core orchestrator, config, and modular pipeline
+├── main.py           # High-level orchestration (CLI parsing, plugin loading, config merging)
+├── data_processor.py # Main pipeline orchestrator with operation mode dispatching
+├── config.py         # Default configuration values
+├── cli.py            # CLI argument parsing
+├── plugin_loader.py  # Plugin loading and initialization
+├── config_merger.py  # Configuration merging logic
+├── pipeline/         # Operation mode pipelines (focused modules)
+│   ├── train_pipeline.py     # GAN training workflow (~180 lines)
+│   ├── optimize_pipeline.py  # Hyperparameter optimization workflow (~190 lines)
+│   └── generate_pipeline.py  # Data generation and evaluation workflow (~190 lines)
+├── data_generation/  # Synthetic and real data processing modules
+│   ├── synthetic_generator.py   # Synthetic data generation logic (~200 lines)
+│   └── real_data_processor.py  # Real data segment processing (~130 lines)
+├── evaluation/       # Evaluation and metrics modules
+│   └── metrics_evaluator.py    # Comprehensive evaluation metrics (~140 lines)
+└── utils/            # Utility modules
+    ├── latent_shape_inference.py # Latent shape inference (~190 lines)
+    └── output_manager.py         # Output file management (~180 lines)
+
+core/                  # Shared utilities, model builders (legacy structure)
+tsg_plugins/           # Plugin implementations
+docs/                  # Sphinx documentation sources  
 tests/                 # Unit and integration tests
 ```
 
-### app/
+### app/ - Refactored Modular Pipeline
 
-- **main.py**: Entry point. Loads configuration, initializes plugins, and dispatches to training or generation pipelines.
+#### Core Orchestration
+- **main.py**: High-level orchestration that handles CLI argument parsing, configuration loading/merging, plugin initialization, and dispatching to `run_pipeline()`. Maintains the exact plugin loading and configuration merging approach.
+- **data_processor.py**: Main pipeline orchestrator (~170 lines) that handles operation mode dispatching ("train", "optimize", "generate"), latent shape inference, and delegates to specialized pipeline modules.
 - **config.py**: Defines `DEFAULT_VALUES` for every CLI parameter.
 - **cli.py**: Argparse definitions for all config keys (no defaults).
 - **plugin_loader.py**: Dynamic loading based on setuptools entry points.
 - **config_merger.py**: Merges defaults, file-based configs, remote configs, and CLI overrides.
 
-### core/
+#### Pipeline Modules (app/pipeline/)
+Each pipeline module follows single responsibility principle and handles one specific operation mode:
 
-- **data_io.py**: CSV loading/saving, window slicing, datetime utilities.
-- **models/**: Keras model builders for Z-Generator (LSTM-based), VAE Decoder loader, Discriminator builder.
-- **technical_indicators/**: Optional calculators for TIs (pandas-ta wrapper, TensorFlow layer).
-- **pipelines/**: `TrainingPipeline` and `GenerationPipeline` orchestrating end-to-end flows.
+- **train_pipeline.py** (~180 lines): Handles GAN training workflow including:
+  - Training configuration validation and data availability checks
+  - Training data loading and preprocessing
+  - GAN training execution using trainer plugin
+  - Post-training tasks (model saving, logging)
+
+- **optimize_pipeline.py** (~190 lines): Handles hyperparameter optimization workflow including:
+  - Optimization setup validation and plugin availability checks
+  - Genetic algorithm parameter configuration
+  - Optimization execution with fitness evaluation
+  - Results handling and persistence
+
+- **generate_pipeline.py** (~190 lines): Handles data generation and evaluation workflow including:
+  - Generation configuration validation
+  - Synthetic data generation using feeder and generator plugins
+  - Real data segment processing and integration
+  - Data combination and output management
+  - Optional evaluation using evaluator plugin
+
+#### Data Processing Modules (app/data_generation/)
+- **synthetic_generator.py** (~200 lines): Encapsulates synthetic data generation logic including:
+  - Target datetime sequence generation
+  - Noise generation and conditioning using feeder plugin
+  - Synthetic data generation using generator plugin
+  - Initial window preparation for conditional generation
+  - Data format conversion and validation
+
+- **real_data_processor.py** (~130 lines): Handles real data processing including:
+  - Real data segment loading and validation
+  - Data preprocessing and format standardization
+  - Integration preparation for combination with synthetic data
+
+#### Evaluation Module (app/evaluation/)
+- **metrics_evaluator.py** (~140 lines): Comprehensive evaluation metrics computation including:
+  - Statistical metrics (MMD, Wasserstein distance, KS tests)
+  - Temporal analysis (ACF, autocorrelation functions)
+  - Machine learning based evaluation (discriminative score using RandomForest)
+  - Predictive score evaluation
+  - Results persistence and reporting
+  - **Note**: Uses sklearn only for evaluation metrics, NOT for generator/discriminator models (which remain pure Keras with Conv1D, attention, LSTM, dense layers)
+
+#### Utility Modules (app/utils/)
+- **latent_shape_inference.py** (~190 lines): Focused utility for latent shape compatibility including:
+  - Automatic latent shape detection from generator models
+  - Plugin configuration updates for shape compatibility
+  - Generator-feeder latent space coordination
+  - Error handling and fallback mechanisms
+
+- **output_manager.py** (~180 lines): Output file management and data operations including:
+  - Output directory management and path resolution
+  - Data combination (synthetic + real data segments)
+  - File saving with proper formatting and validation
+  - Output path updates based on evaluation stages
 
 ### tsg_plugins/
 
@@ -169,33 +240,89 @@ sdg --run_hyperparameter_optimization True --population_size 20 --n_generations 
 
 All other parameters are available as CLI flags. Run `sdg --help` to list all arguments (no defaults shown).
 
+## Modular Architecture Benefits
+
+### Extreme Separation of Concerns
+The recent refactoring has transformed the architecture from a monolithic approach to a highly modular design with extreme separation of concerns:
+
+**Before**: Single monolithic `data_processor.py` file with 1400+ lines handling all operations.
+
+**After**: Modular architecture with 9 focused modules, each under 200 lines:
+
+1. **`data_processor.py`** (~170 lines) - Clean orchestrator with operation mode dispatching
+2. **`train_pipeline.py`** (~180 lines) - GAN training workflow  
+3. **`optimize_pipeline.py`** (~190 lines) - Hyperparameter optimization workflow
+4. **`generate_pipeline.py`** (~190 lines) - Data generation and evaluation workflow
+5. **`synthetic_generator.py`** (~200 lines) - Synthetic data generation logic
+6. **`real_data_processor.py`** (~130 lines) - Real data segment processing
+7. **`metrics_evaluator.py`** (~140 lines) - Comprehensive evaluation metrics
+8. **`latent_shape_inference.py`** (~190 lines) - Latent shape compatibility
+9. **`output_manager.py`** (~180 lines) - Output file management
+
+### Key Benefits
+
+**Maintainability**: Each module has a single, well-defined responsibility making the codebase easier to understand, debug, and modify.
+
+**Testability**: Smaller, focused modules are easier to unit test and validate independently.
+
+**Extensibility**: New functionality can be added by creating new focused modules without affecting existing code.
+
+**Operation Mode Dispatching**: Clear separation of "train", "optimize", and "generate" modes with dedicated pipeline modules.
+
+**Plugin Compatibility**: The refactoring maintains 100% backward compatibility with existing plugins while improving the internal architecture.
+
+**Code Reusability**: Focused modules can be reused across different operation modes and contexts.
+
+**Reduced Complexity**: Breaking down complex workflows into smaller, manageable pieces reduces cognitive load for developers.
+
 ## Directory Structure
 
 ```
 timeseries-gan/
-├── app/
-│   ├── main.py               # Entry point: loads config, plugins, dispatches pipelines
-│   ├── cli.py                # Defines all CLI flags (no defaults), mapping to config keys
-│   ├── config.py             # DEFAULT_VALUES for every parameter
-│   ├── plugin_loader.py      # Discovers and loads plugins via setuptools entry points
-│   └── config_merger.py      # Merges CLI args, config file, remote config, DEFAULT_VALUES, plugin params
+├── app/                      # Refactored modular pipeline with extreme separation of concerns
+│   ├── main.py              # Entry point: high-level orchestration (CLI, config, plugins)
+│   ├── data_processor.py    # Main pipeline orchestrator with operation mode dispatching (~170 lines)
+│   ├── cli.py               # CLI argument definitions (no defaults)
+│   ├── config.py            # DEFAULT_VALUES for every parameter
+│   ├── plugin_loader.py     # Plugin discovery and loading via setuptools entry points  
+│   ├── config_merger.py     # Hierarchical configuration merging
+│   │
+│   ├── pipeline/            # Operation mode pipelines (focused modules under 200 lines)
+│   │   ├── __init__.py
+│   │   ├── train_pipeline.py     # GAN training workflow (~180 lines)
+│   │   ├── optimize_pipeline.py  # Hyperparameter optimization workflow (~190 lines)
+│   │   └── generate_pipeline.py  # Data generation and evaluation workflow (~190 lines)
+│   │
+│   ├── data_generation/     # Data processing modules (focused on single responsibilities)
+│   │   ├── __init__.py
+│   │   ├── synthetic_generator.py   # Synthetic data generation logic (~200 lines)
+│   │   └── real_data_processor.py  # Real data segment processing (~130 lines)
+│   │
+│   ├── evaluation/          # Evaluation and metrics modules
+│   │   ├── __init__.py
+│   │   └── metrics_evaluator.py    # Comprehensive evaluation metrics (~140 lines)
+│   │
+│   └── utils/               # Utility modules (focused functionality)
+│       ├── __init__.py
+│       ├── latent_shape_inference.py # Latent shape inference (~190 lines)
+│       └── output_manager.py         # Output file management (~180 lines)
 │
-├── core/
-│   ├── data_io.py            # CSV read/write, sliding-window slicing, datetime utilities
-│   ├── datetime_utils.py     # Generate synthetic datetimes, extract cyclical date features
-│   ├── models/               # Builders for Keras architectures
-│   │   ├── z_generator_builder.py   # Builds LSTM (or other) model that generates latent sequences Z_seq
-│   │   ├── vae_decoder_loader.py    # Loads pre-trained VAE decoder model for generation
+├── core/                     # Shared utilities, model builders (legacy structure)
+│   ├── data_io.py           # CSV read/write, sliding-window slicing, datetime utilities
+│   ├── datetime_utils.py    # Generate synthetic datetimes, extract cyclical date features
+│   ├── models/              # Builders for Keras architectures
+│   │   ├── z_generator_builder.py   # Builds LSTM model for latent sequences Z_seq
+│   │   ├── vae_decoder_loader.py    # Loads pre-trained VAE decoder model
 │   │   └── discriminator_builder.py # Builds window-based Discriminator (Conv1D/LSTM)
-│   ├── technical_indicators/ # Optional calculators for indicators if not in decoder output
+│   ├── technical_indicators/ # Optional calculators for indicators
 │   │   ├── calculator.py         # pandas-ta wrapper functions
-│   │   └── tf_layer_calculator.py# TensorFlowTALayer for on-the-fly TI calculation in GAN
-│   └── pipelines/            # Orchestrates end-to-end workflows
+│   │   └── tf_layer_calculator.py# TensorFlowTALayer for on-the-fly TI calculation
+│   └── pipelines/           # Legacy pipeline structure (being phased out)
 │       ├── base_pipeline.py      # Abstract base class for pipelines
-│       ├── training_pipeline.py  # Implements GAN training flow (Z-Gen + VAE-Dec vs. Disc)
-│       └── generation_pipeline.py# Implements synthetic data generation flow
+│       ├── training_pipeline.py  # Legacy GAN training flow
+│       └── generation_pipeline.py# Legacy synthetic data generation flow
 │
-├── tsg_plugins/              # Plugin implementations (each as one Python file)
+├── tsg_plugins/             # Plugin implementations (each as focused modules)
 │   ├── feeder_plugin.py           # FeederPlugin: noise & conditional input provider
 │   ├── generator_wrapper_plugin.py# GeneratorPlugin: wraps pre-trained VAE decoder
 │   ├── z_generator_plugin.py      # ZGeneratorPlugin: trainable latent sequence generator
@@ -204,36 +331,32 @@ timeseries-gan/
 │   ├── evaluator_plugin.py        # EvaluatorPlugin: computes metrics on synthetic vs. real data
 │   └── optimizer_plugin.py        # OptimizerPlugin: genetic-algorithm hyperparameter tuner
 │
-├── docs/                     # Sphinx documentation source (reStructuredText or Markdown)
-├── tests/                    # Unit and integration tests for core modules and plugins
-└── setup.py                  # Defines package metadata, dependencies, and plugin entry points
+├── docs/                    # Sphinx documentation source
+├── tests/                   # Unit and integration tests for core modules and plugins
+└── setup.py                # Package metadata, dependencies, and plugin entry points
 ```
 
-**File Responsibilities**:
+### Key Architectural Improvements
 
-- **app/main.py**: Bootstraps application; reads CLI args; loads or fetches config; initializes plugins; invokes `TrainingPipeline` or `GenerationPipeline` based on `gan_training_mode`.
-- **app/cli.py**: Uses `argparse` to define one argument per config key; flags have no defaults so values always load from `config.py` unless overridden.
-- **app/config.py**: Central dictionary `DEFAULT_VALUES` containing defaults for all parameters in hierarchical order.
-- **app/config_merger.py**: Combines sources in priority: CLI args > loaded config (file/remote) > `DEFAULT_VALUES` > plugin-specific defaults.
-- **app/plugin_loader.py**: Scans entry points (feeder.plugins, generator.plugins, etc.) and imports classes by name.
+**Extreme Separation of Concerns**: The original monolithic `data_processor.py` (1400+ lines) has been completely refactored into focused modules:
 
-- **core/data_io.py**: `load_csv()`, `write_csv()`, and functions to slice time-series windows.
-- **core/datetime_utils.py**: `generate_preceding_datetimes()`, functions to compute cyclical features like sin/cos of day, hour.
-- **core/models/z_generator_builder.py**: Constructs Keras model generating latent sequence `Z_seq` from noise/context.
-- **core/models/vae_decoder_loader.py**: Loads pre-trained VAE decoder; ensures correct input/output signature.
-- **core/models/discriminator_builder.py**: Builds Discriminator network combining Conv1D and/or LSTM layers.
-- **core/technical_indicators/calculator.py**: Wraps `pandas-ta` for post-hoc TI calculation when needed.
-- **core/technical_indicators/tf_layer_calculator.py**: Defines `TensorFlowTALayer` that computes TIs inside a Keras graph during GAN training.
-- **core/pipelines/base_pipeline.py**: Abstracts common logic (config, plugin access, logging).
-- **core/pipelines/training_pipeline.py**: Implements the adversarial loop: sample noise via Feeder, generate `Z_seq`, produce synthetic windows, compute discriminator loss, update Z-Gen, occasionally fine-tune VAE decoder, save models.
-- **core/pipelines/generation_pipeline.py**: Given trained Z-Gen and VAE decoder, generates `n_samples` synthetic ticks, prepends `max_steps_train` real rows, writes output CSV.
+1. **Operation Mode Dispatching**: `data_processor.py` now serves as a clean orchestrator (~170 lines) that dispatches to specialized pipeline modules based on operation mode ("train", "optimize", "generate").
 
-- **tsg_plugins/feeder_plugin.py**: `FeederPlugin` class with `plugin_params` dictionary, methods `set_params()`, `generate_z_noise()` and `build_conditionals()`.
-- **tsg_plugins/generator_wrapper_plugin.py**: `GeneratorPlugin` class wrapping VAE decoder; methods `load_model()`, `set_params()`, `generate_sequence(z_seq, cond, context)`, `post_process()` (optional TIs).
-- **tsg_plugins/z_generator_plugin.py**: `ZGeneratorPlugin` class with `plugin_params` for latent_dim; methods `build_model()`, `set_params()`, `sample_z_seq()` during training and generation.
-- **tsg_plugins/discriminator_plugin.py**: `DiscriminatorPlugin` class; methods `build_model()`, `set_params()`, `compute_loss()`.
-- **tsg_plugins/trainer_plugin.py**: `GANTrainerPlugin` class orchestrating one epoch: calls feeder for noise/conditionals, z-generator to get `Z_seq`, generator_wrapper to produce synth, discriminator loss, optimizer steps, callbacks.
-- **tsg_plugins/evaluator_plugin.py**: `EvaluatorPlugin` class computing metrics (MMD, ACF, Wasserstein, KS, discriminative and predictive scores, visual plots) after generation.
-- **tsg_plugins/optimizer_plugin.py**: `OptimizerPlugin` class configuring DEAP; methods `set_params()`, `optimize()` that iteratively evaluate synthetic data quality.
+2. **Focused Pipeline Modules**: Each operation mode has its own dedicated pipeline module under `app/pipeline/`:
+   - `TrainPipeline`: Handles complete GAN training workflow
+   - `OptimizePipeline`: Manages hyperparameter optimization using genetic algorithms  
+   - `GeneratePipeline`: Coordinates synthetic data generation and evaluation
 
-This structure ensures each file is under 200 lines, each module has a single responsibility, and core application logic remains centralized under `app/`. The plugin system continues to merge parameters hierarchically using `config_merger.py` before invoking each plugin's own defaults.
+3. **Specialized Data Processing**: Data generation logic is separated into focused modules under `app/data_generation/`:
+   - `SyntheticDataGenerator`: Handles synthetic data generation workflow
+   - `RealDataProcessor`: Manages real data segment processing
+
+4. **Dedicated Evaluation**: Evaluation logic is isolated in `app/evaluation/metrics_evaluator.py` with comprehensive metrics computation.
+
+5. **Utility Modules**: Common utilities are organized under `app/utils/`:
+   - `latent_shape_inference.py`: Automatic compatibility between generator and feeder plugins
+   - `output_manager.py`: File management and data combination operations
+
+**Plugin Compatibility Maintained**: The refactoring preserves the exact plugin loading and configuration merging approach, ensuring full backward compatibility with existing plugins.
+
+**Single Responsibility Principle**: Each module now has a clear, focused responsibility and is kept under 200 lines for maintainability.
