@@ -191,7 +191,7 @@ DEFAULT_VALUES = {
     "target_column_order": [],
     "num_base_features_generated": 6, # Example, adjust if necessary
     "preprocessor_plugin": "stl_preprocessor", # Example, adjust if necessary
-    "gan_training_mode": True, # Example, adjust if necessary
+    "operation_mode": "train", # train, optimize or generate
 
     # --- Parameters for GANTrainerPlugin ---
     "trainer": "gan_trainer", # Default trainer plugin
