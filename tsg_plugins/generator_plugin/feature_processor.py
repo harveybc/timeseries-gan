@@ -9,7 +9,7 @@ providing focused functionality for feature engineering and data transformation.
 import logging
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+from .pandas_ta_compat import ta, pandas_ta_available
 from typing import Dict, Any, List, Optional
 
 
