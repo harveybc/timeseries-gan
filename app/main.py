@@ -138,17 +138,6 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
         traceback.print_exc()
         sys.exit(1)
     
-    # Load Preprocessor Plugin
-    plugin_name_preprocessor = config.get('preprocessor_plugin', 'stl_preprocessor')
-    print(f"Loading Preprocessor Plugin: {plugin_name_preprocessor}")
-    try:
-        preprocessor_class, _ = load_plugin('preprocessor.plugins', plugin_name_preprocessor)
-        plugins['preprocessor_plugin'] = preprocessor_class()
-    except Exception as e:
-        print(f"Failed to load Preprocessor Plugin '{plugin_name_preprocessor}': {e}")
-        traceback.print_exc()
-        sys.exit(1)
-    
     # Load Trainer Plugin
     plugin_name_trainer = config.get('trainer', 'gan_trainer')
     print(f"Loading Trainer Plugin: {plugin_name_trainer}")

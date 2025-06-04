@@ -29,7 +29,7 @@ class DataPreprocessor:
     Handles data preprocessing tasks like STL decomposition,
     wavelet transforms, and multi-taper spectrum analysis.
     """
-    plugin_params = plugin_params # Class attribute for plugin parameters
+    plugin_params = plugin_params  # Class attribute for plugin parameters
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         """Initialize data preprocessor."""

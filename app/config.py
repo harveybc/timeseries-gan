@@ -201,7 +201,6 @@ DEFAULT_VALUES = {
     "datetime_col_name": "DATE_TIME",
     "target_column_order": [],
     "num_base_features_generated": 6, # Example, adjust if necessary
-    "preprocessor_plugin": "stl_preprocessor", # Example, adjust if necessary
     "operation_mode": "train", # train, optimize or generate
 
     # --- Parameters for GANTrainerPlugin ---
