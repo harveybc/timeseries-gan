@@ -264,118 +264,225 @@ class GeneratorPlugin:
             # --- 3. Build the internal Z-sequence generator sub-model ---
             # This sub-model takes feeder_noise_input and generates decoder_input_z_seq
             
-            # Example: Simple Z-generator (can be made more complex)
-            # Reshape noise to be sequential for LSTMs/Conv1D
-            x = Dense(self.params["internal_z_sequence_length"] * self.params["internal_z_latent_dim"] // 2, activation='relu')(feeder_noise_input)
-            x = Reshape((self.params["internal_z_sequence_length"], self.params["internal_z_latent_dim"] // 2))(x)
+            x = Dense(self.params["internal_z_sequence_length"] * self.params["internal_z_latent_dim"], activation='relu')(feeder_noise_input) # Increased units for better representation
+            x = Reshape((self.params["internal_z_sequence_length"], self.params["internal_z_latent_dim"]))(x) # Reshape to (batch, 18, 32) directly if Dense output matches
             
             # Bidirectional LSTM layer
-            # Ensure return_sequences=True to get (batch, 18, features_from_bilstm)
-            x = Bidirectional(LSTM(self.params["internal_z_latent_dim"] // 2, return_sequences=True))(x) 
+            x = Bidirectional(LSTM(self.params["internal_z_latent_dim"] * 2, return_sequences=True))(x) # More units in LSTM
             
-            # Conv1D layer to get the final latent_dim for z_seq
-            # Using TimeDistributed Dense or a Conv1D with kernel_size=1 can achieve this
-            # For (batch, 18, 32)
+            # Conv1D layer to refine features per timestep and ensure correct output dimension
             internal_z_seq_output = Conv1D(
                 filters=self.params["internal_z_latent_dim"], 
-                kernel_size=1, 
+                kernel_size=1, # Pointwise convolution to adjust feature dimension
                 padding="same", 
-                activation='linear', # Or another suitable activation
+                activation='tanh', # tanh is common for latent vectors
                 name="internal_z_seq_output"
             )(x)
             
             # --- 4. Prepare inputs for the loaded VAE Decoder ---
-            # decoder_input_z_seq comes from our internal_z_seq_output
             vae_decoder_input_z_seq = internal_z_seq_output 
+            vae_decoder_input_h_context = previous_step_output_input
+            vae_decoder_input_conditions = current_step_conditions_input
 
-            # decoder_input_h_context comes from previous_step_output_input
-            # The VAE decoder expects (batch_size, 64)
-            vae_decoder_input_h_context = previous_step_output_input # Shape (batch, 64)
+            # Log the names of the input layers of the loaded VAE decoder
+            vae_decoder_actual_input_names = [inp.name for inp in loaded_vae_decoder.inputs]
+            self.logger.info(f"Loaded VAE Decoder actual input layer names: {vae_decoder_actual_input_names}")
 
-            # decoder_input_conditions comes from current_step_conditions_input
-            # The VAE decoder expects (batch_size, 10)
-            vae_decoder_input_conditions = current_step_conditions_input # Shape (batch, 10)
-
-            # The VAE decoder also has 'input_x_window'. 
-            # Based on your description, we are generating z_seq internally,
-            # so 'input_x_window' might not be directly fed from an external input to our *composite* model.
-            # The VAE decoder itself might use it if it's part of its architecture,
-            # but our composite model's job is to provide z_seq, h_context, and conditions_t.
-            # We need to check the VAE decoder's actual inputs.
-            # For now, let's assume the VAE decoder's inputs are:
-            # [decoder_input_z_seq, decoder_input_conditions, decoder_input_h_context]
-            # The order and names must match exactly how loaded_vae_decoder expects them.
+            # Prepare the dictionary of inputs for the VAE decoder
+            # The keys in this dictionary MUST match the names of the input layers of the loaded_vae_decoder
+            # or the names provided when the VAE decoder model was originally defined.
             
-            # Let's get the VAE decoder's input names to be sure
-            vae_decoder_input_names = [inp.name.split(':')[0] for inp in loaded_vae_decoder.inputs]
-            self.logger.info(f"Loaded VAE Decoder input names: {vae_decoder_input_names}")
+            # Expected names from params:
+            # self.params[\"decoder_input_name_latent\"] -> 'decoder_input_z_seq'
+            # self.params[\"decoder_input_name_conditions\"] -> 'decoder_input_conditions'
+            # self.params[\"decoder_input_name_context\"] -> 'decoder_input_h_context'
+            # self.params[\"decoder_input_name_window\"] -> 'input_x_window' (potentially)
 
-            # Prepare the list of inputs for the VAE decoder in the correct order
-            vae_decoder_inputs_map = {
+            vae_inputs_for_loaded_decoder = {}
+            
+            # Map our generated/provided tensors to the VAE decoder's *actual* input layers
+            # This requires knowing the exact names the VAE decoder expects.
+            # We assume the names in plugin_params are the target names for the VAE decoder's inputs.
+
+            # Attempt to map by the names defined in params
+            # This is crucial: the names must match what the loaded_vae_decoder expects.
+            # For example, if loaded_vae_decoder.inputs[0] is named 'z_input_for_vae', then
+            # self.params[\"decoder_input_name_latent\"] should be 'z_input_for_vae'.
+            
+            # Let's iterate through the VAE decoder's actual inputs and try to map them
+            # from our prepared tensors using the names stored in self.params.
+            
+            param_to_tensor_map = {
                 self.params["decoder_input_name_latent"]: vae_decoder_input_z_seq,
                 self.params["decoder_input_name_conditions"]: vae_decoder_input_conditions,
-                self.params["decoder_input_name_context"]: vae_decoder_input_h_context
+                self.params["decoder_input_name_context"]: vae_decoder_input_h_context,
+                # How to handle self.params[\"decoder_input_name_window\"] ('input_x_window')?
+                # If the VAE decoder requires 'input_x_window', we need to provide it.
+                # For a GAN generating from noise, this input might not be directly available
+                # from the composite generator's external inputs.
+                # It might need to be a learned constant, zeros, or derived differently.
             }
+
+            # Check if 'input_x_window' is one of the VAE decoder's inputs
+            input_x_window_name = self.params["decoder_input_name_window"] # Default: "input_x_window"
             
-            # If 'input_x_window' is also an input to the VAE decoder, we need to decide how to feed it.
-            # For a GAN setup where we generate from noise, 'input_x_window' might be tricky.
-            # Often, for GANs using a VAE decoder, the 'input_x_window' (if it was for conditioning the VAE during its own training)
-            # might be replaced or handled differently.
-            # Let's assume for now it's not a primary input to our *composite generator's external interface*.
-            # If the VAE decoder *requires* it, we might need to pass zeros or a learned constant.
-            # For now, we only prepare the 3 inputs you detailed.
-            
-            # Ensure all expected inputs of loaded_vae_decoder are provided.
-            # This is a simplified way; a more robust way would be to map by name.
+            # Placeholder for input_x_window if needed.
+            # This input is (batch_size, sequence_length, num_features_for_x_window)
+            # The VAE decoder was trained with 144 timesteps, 57 features.
+            # If this input is strictly required and not internally handled by the VAE decoder
+            # when z_seq is provided, we might need to create a dummy input or a learnable one.
+            # For now, we will only pass the three main inputs (z, h_context, conditions)
+            # and rely on the VAE decoder to handle the absence of input_x_window if it can,
+            # or error out if it's mandatory. The error handling below will catch this.
+
+            # Construct the input list/dict for the VAE decoder based on its actual input layers
+            # This is the most robust way: use the VAE decoder's .inputs attribute
             final_vae_decoder_inputs = []
-            missing_inputs = []
-            # We need to map our generated/provided tensors to the VAE decoder's *actual* input layers
-            # based on their names.
-            
-            # Example: if loaded_vae_decoder.inputs are [input_z, input_cond, input_h_ctx, input_x_win]
-            # We need to provide all of them.
-            
-            # For now, let's assume the VAE decoder primarily uses the 3 inputs we are constructing.
-            # This part needs to be robust based on the actual VAE decoder architecture.
-            # A common pattern is to pass inputs as a list if the model was built with inputs=[...]
-            # or as a dict if the model's call function expects a dict.
-            
-            # Let's try to call the VAE decoder with the inputs we've prepared
-            # This assumes the VAE decoder takes a list of inputs in a specific order or a dict.
-            # If it's a list, the order matters.
-            # If loaded_vae_decoder.inputs = [z_input_layer, h_context_input_layer, conditions_input_layer, ...]
-            
-            # Simplification: Assuming the VAE decoder's inputs are named as in params and are the primary ones.
-            # This is a critical point: the call to loaded_vae_decoder must match its definition.
-            try:
-                # If the VAE decoder was defined as Model(inputs=[z, h, c], outputs=...)
-                vae_decoder_output = loaded_vae_decoder([
-                    vae_decoder_inputs_map[self.params["decoder_input_name_latent"]], 
-                    vae_decoder_inputs_map[self.params["decoder_input_name_context"]], 
-                    vae_decoder_inputs_map[self.params["decoder_input_name_conditions"]]
-                ])
-                # The above line is a guess. The actual way to pass inputs depends on how
-                # the VAE decoder model was originally constructed (e.g., list of inputs vs dict).
-                # A more robust way for a model with named inputs:
-                # vae_decoder_output = loaded_vae_decoder(vae_decoder_inputs_map)
-            except Exception as e:
-                self.logger.error(f"Error when trying to connect VAE decoder inputs: {e}")
-                self.logger.error(f"VAE Decoder expected input names: {[inp.name for inp in loaded_vae_decoder.inputs]}")
-                self.logger.error(f"Provided input map keys: {list(vae_decoder_inputs_map.keys())}")
-                # This often happens if input_x_window is missing or names don't match.
-                # If 'input_x_window' is required by the VAE decoder, we need to provide it.
-                # For GAN generation, it might be zeros or a learned embedding.
-                # Let's assume for now it's not used or we need to add it.
-                # If input_x_window is needed:
-                # vae_decoder_input_x_window = Input(shape=(self.params["decoder_input_window_size"], some_feature_dim), name="input_x_window_for_composite")
-                # And add it to the composite model inputs and vae_decoder_inputs_map
-                raise e
+            if len(vae_decoder_actual_input_names) == 3: # Assuming order: z, h_context, conditions
+                 self.logger.info("Attempting to connect VAE decoder with 3 inputs in assumed order: z_seq, h_context, conditions.")
+                 # This order needs to match how the VAE decoder was defined.
+                 # A safer bet is to map by name if possible, or ensure the order is known.
+                 # For now, using the map created earlier, and then ordering them.
+                 # This part is highly dependent on the VAE model's construction.
+                 # If the VAE model was created as `Model(inputs=[z_input, context_input, cond_input], ...)`
+                 # then the list order must match.
+                 
+                 # Let's try to build the list based on the names in self.params, assuming they are correct
+                 # and in the order the VAE expects if it takes a list.
+                 # This is still a bit risky if the internal names of VAE inputs differ from these param names.
+                 
+                 # A more robust approach if the VAE model expects a dictionary for its inputs:
+                 # vae_inputs_for_loaded_decoder_dict = {
+                 #    self.params[\"decoder_input_name_latent\"]: vae_decoder_input_z_seq,
+                 #    self.params[\"decoder_input_name_context\"]: vae_decoder_input_h_context,
+                 #    self.params[\"decoder_input_name_conditions\"]: vae_decoder_input_conditions
+                 # }
+                 # If input_x_window is required, it must be added here.
+                 # For example, if vae_decoder_actual_input_names includes input_x_window_name:
+                 #    # Create a dummy input for input_x_window for the composite model
+                 #    dummy_x_window_input_shape = (self.params[\"decoder_input_window_size\"], self.params.get(\"num_features_for_x_window\", 57)) # Assuming 57 features
+                 #    composite_input_x_window = Input(shape=dummy_x_window_input_shape, name=\"composite_input_x_window_for_vae\")
+                 #    # Add this to the composite model's main inputs
+                 #    # And map it:
+                 #    vae_inputs_for_loaded_decoder_dict[input_x_window_name] = composite_input_x_window
+                 #    # The main composite model inputs list would then include composite_input_x_window.
+
+                 # For now, sticking to the 3 inputs as per the primary task description.
+                 # The order in the list matters if the model expects a list.
+                 # The VAE decoder's `loaded_vae_decoder.inputs` gives the Keras Input *layers*.
+                 # Their names are in `vae_decoder_actual_input_names`.
+                 
+                 # Let's try to pass inputs as a dictionary, which is safer if the model supports it.
+                 # The keys of the dictionary should be the *names of the input layers* of the VAE decoder.
+                 
+                 input_mapping_for_vae = {}
+                 # Try to map based on the names in params, assuming they match VAE's input layer names
+                 if self.params["decoder_input_name_latent"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_latent"]] = vae_decoder_input_z_seq
+                 if self.params["decoder_input_name_context"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_context"]] = vae_decoder_input_h_context
+                 if self.params["decoder_input_name_conditions"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_conditions"]] = vae_decoder_input_conditions
+                 
+                 # Check if all VAE inputs are covered (excluding input_x_window for now unless explicitly handled)
+                 # This is a simplified check. A more robust check would ensure all `vae_decoder_actual_input_names`
+                 # (perhaps excluding 'input_x_window' if we are intentionally omitting it) are keys in `input_mapping_for_vae`.
+
+                 self.logger.info(f"Constructed VAE input map: {input_mapping_for_vae.keys()}")
+
+                 if not input_mapping_for_vae: # If the map is empty, names probably didn't match
+                     raise ValueError("Could not map any prepared inputs to the VAE decoder's input layers. Check names in params.")
+
+                 # Call the VAE decoder. If it was created with named inputs, a dict should work.
+                 # If it was created with a list of inputs, Keras might still map a dict if names are unique.
+                 vae_decoder_output = loaded_vae_decoder(input_mapping_for_vae)
+
+            elif input_x_window_name in vae_decoder_actual_input_names and len(vae_decoder_actual_input_names) > 3 :
+                 # This case suggests input_x_window is also expected.
+                 # For the composite GAN generator, we are *not* taking input_x_window as a direct external input.
+                 # If the VAE decoder *must* have it, we need to provide a placeholder or a learned tensor.
+                 # This is a common challenge when repurposing a VAE decoder.
+                 self.logger.warning(f"VAE Decoder expects input '{input_x_window_name}' which is not directly provided by the composite generator's current inputs. This might lead to errors if not handled by the VAE decoder internally or if a placeholder is not supplied.")
+                 # For now, we'll proceed without it and see if Keras/TF can handle it (e.g., if it's optional or has a default).
+                 # If an error occurs, this is the likely cause.
+                 # To properly handle this, we would need to:
+                 # 1. Add an Input layer for 'input_x_window' to the *composite model's* inputs.
+                 # 2. Pass this new Input layer to the `loaded_vae_decoder`.
+                 # However, the task is to generate z_seq internally.
+                 # A possible solution is to use a ZeroPadding or a similar layer if the VAE expects it but we don't provide meaningful data.
+                 # This is an advanced topic. For now, we assume the VAE can operate with z, h_ctx, cond.
+                 
+                 # Fallback to previous attempt if above logic is too complex for now
+                 input_mapping_for_vae = {}
+                 if self.params["decoder_input_name_latent"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_latent"]] = vae_decoder_input_z_seq
+                 if self.params["decoder_input_name_context"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_context"]] = vae_decoder_input_h_context
+                 if self.params["decoder_input_name_conditions"] in vae_decoder_actual_input_names:
+                     input_mapping_for_vae[self.params["decoder_input_name_conditions"]] = vae_decoder_input_conditions
+                 
+                 self.logger.info(f"Constructed VAE input map (with potential missing '{input_x_window_name}'): {input_mapping_for_vae.keys()}")
+                 if not input_mapping_for_vae:
+                     raise ValueError("Could not map any prepared inputs to the VAE decoder's input layers (case with input_x_window). Check names in params.")
+                 vae_decoder_output = loaded_vae_decoder(input_mapping_for_vae)
+            else:
+                # If the number of inputs is different, or names don't match, this will likely fail.
+                # Defaulting to the original list-based attempt, hoping the order in params is correct.
+                self.logger.warning(f"VAE Decoder has an unexpected number of inputs ({len(vae_decoder_actual_input_names)}) or names do not match expected pattern. Attempting connection with primary inputs.")
+                # This is the risky part from before.
+                # The VAE decoder must be called with inputs that match its definition.
+                # If it expects a list: loaded_vae_decoder([input1, input2, ...])
+                # If it expects a dict: loaded_vae_decoder({'name1': input1, 'name2': input2, ...})
+                
+                # Try to build the input list in the order of VAE's own input layers,
+                # fetching tensors from our param_to_tensor_map using the VAE's layer names.
+                ordered_inputs_for_vae = []
+                successfully_mapped_inputs = True
+                for name in vae_decoder_actual_input_names:
+                    if name == self.params["decoder_input_name_latent"]:
+                        ordered_inputs_for_vae.append(vae_decoder_input_z_seq)
+                    elif name == self.params["decoder_input_name_context"]:
+                        ordered_inputs_for_vae.append(vae_decoder_input_h_context)
+                    elif name == self.params["decoder_input_name_conditions"]:
+                        ordered_inputs_for_vae.append(vae_decoder_input_conditions)
+                    elif name == input_x_window_name:
+                        # This is where we'd need to provide input_x_window if it's mandatory.
+                        # For now, if it's encountered and we haven't prepared it, this will be an issue.
+                        self.logger.error(f"VAE Decoder expects '{input_x_window_name}' but it's not explicitly prepared by the composite generator in this path.")
+                        # To make this runnable, one might add a dummy input here, but it's better to define it for the composite model.
+                        # For example:
+                        # dummy_x_shape = (self.params["decoder_input_window_size"], 1) # Minimal dummy
+                        # dummy_x_tensor = tf.zeros((1, *dummy_x_shape)) # This is not a Keras symbolic tensor
+                        # This part needs a Keras Input tensor if it's to be part of the model graph.
+                        # For now, let this path likely lead to an error if input_x_window is required.
+                        successfully_mapped_inputs = False 
+                        break 
+                    else:
+                        self.logger.error(f"Unknown VAE input layer name encountered: {name}. Cannot map.")
+                        successfully_mapped_inputs = False
+                        break
+                
+                if not successfully_mapped_inputs or len(ordered_inputs_for_vae) != len(vae_decoder_actual_input_names):
+                    raise ValueError(f"Mismatch when trying to order inputs for VAE decoder. Expected {len(vae_decoder_actual_input_names)} inputs, got {len(ordered_inputs_for_vae)}. Check VAE input names and param configurations.")
+
+                self.logger.info(f"Attempting to call VAE decoder with an ordered list of {len(ordered_inputs_for_vae)} inputs.")
+                vae_decoder_output = loaded_vae_decoder(ordered_inputs_for_vae)
 
 
             # --- 5. Create the new Composite Generator Model ---
+            # The inputs to the composite model are those defined in step 2.
+            composite_model_inputs = [feeder_noise_input, previous_step_output_input, current_step_conditions_input]
+            
+            # If input_x_window was added as an input to the composite model (e.g., composite_input_x_window),
+            # it should be included in composite_model_inputs here.
+            # For example:
+            # if 'composite_input_x_window' in locals():
+            #    composite_model_inputs.append(composite_input_x_window)
+
+
             self.sequential_model = Model(
-                inputs=[feeder_noise_input, previous_step_output_input, current_step_conditions_input],
-                outputs=vae_decoder_output,
+                inputs=composite_model_inputs,
+                outputs=vae_decoder_output, # This should be the output from the VAE decoder's 'reconstruction_out' layer
                 name="composite_sc_vae_gan_generator"
             )
             self.model = self.sequential_model # Maintain alias
@@ -385,10 +492,9 @@ class GeneratorPlugin:
 
         except Exception as e:
             self.logger.error(f"Error building composite generator model: {e}")
-            traceback.print_exc(file=sys.stderr) # Print traceback to stderr for visibility
+            self.logger.error(traceback.format_exc()) # Log the full traceback
             self.sequential_model = None
             self.model = None
-            # Re-raise as IOError or a custom exception for clarity
             raise IOError(f"Failed to build composite generator model: {e}")
 
     def _initialize_modules(self) -> None:
