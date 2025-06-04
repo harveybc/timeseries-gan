@@ -69,22 +69,16 @@ def test_generator_plugin_integration():
         # Import generator plugin
         from tsg_plugins.generator_plugin.generator_plugin import GeneratorPlugin
         
-        # Create configuration
+        # Import the default configuration
+        from app.config import DEFAULT_VALUES
+        
+        # Create configuration using the complete feature lists from config
         config = {
-            # Basic config
-            "sequential_model_file": None,  # We'll use mock instead
+            # Basic config - use the default VAE decoder path from config
+            "sequential_model_file": DEFAULT_VALUES["generator_sequential_model_file"],
             "decoder_input_window_size": 144,
-            "full_feature_names_ordered": [
-                "DATE_TIME", "OPEN", "HIGH", "LOW", "CLOSE", "RSI", "MACD", 
-                "BC-BO", "BH-BL", "S&P500_Close", "vix_close"
-            ],
-            "decoder_output_feature_names": [
-                "OPEN", "LOW", "HIGH", "vix_close", "BC-BO", "BH-BL", "S&P500_Close",
-                "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
-                "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
-                "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-                "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
-            ],
+            "full_feature_names_ordered": DEFAULT_VALUES["generator_full_feature_names_ordered"],
+            "decoder_output_feature_names": DEFAULT_VALUES["generator_decoder_output_feature_names"],
             
             # Z-generator parameters
             "internal_z_sequence_length": 18,

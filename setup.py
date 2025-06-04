@@ -68,14 +68,14 @@ setup(
             "tsg=app.main:main",
         ],
         "feeder.plugins": [
-            "default_feeder=tsg_plugins.feeder_plugin:FeederPlugin",
+            "default_feeder=tsg_plugins.feeder_plugin.feeder_plugin:FeederPlugin",
         ],
         "generator.plugins": [
-            "vae_generator = tsg_plugins.generator_plugin:GeneratorPlugin",
-            "default_generator = tsg_plugins.generator_plugin:GeneratorPlugin"
+            "vae_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin",
+            "default_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin"
         ],
-        "evaluator.plugins": [ # Assuming you have an evaluator entry, based on logs
-            "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin", # Ensure this points to your evaluator
+        "evaluator.plugins": [
+            "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin",
         ],
         "optimizer.plugins": [
             "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
