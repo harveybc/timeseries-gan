@@ -6,6 +6,8 @@ Main plugin interface that orchestrates specialized modules for synthetic data g
 Maintains mandatory plugin structure while delegating to focused modules.
 """
 
+import sys
+import traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
