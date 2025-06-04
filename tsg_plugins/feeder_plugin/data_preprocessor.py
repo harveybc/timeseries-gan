@@ -8,7 +8,7 @@ Manages data normalization, validation, and preparation for encoding.
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # Default parameters for the DataPreprocessor plugin
@@ -66,7 +66,7 @@ class DataPreprocessor:
             'outlier_count': 0
         }
         
-        logger.info("DataPreprocessor initialized")
+        self.logger.info("DataPreprocessor initialized")
     
     def fit(self, data: Union[np.ndarray, pd.DataFrame]) -> bool:
         """
@@ -97,7 +97,7 @@ class DataPreprocessor:
             elif self.normalization_method == 'none':
                 self.scaler = None
             else:
-                logger.warning(f"Unknown normalization method: {self.normalization_method}, using standard")
+                self.logger.warning(f"Unknown normalization method: {self.normalization_method}, using standard")
                 self.scaler = StandardScaler()
             
             if self.scaler is not None:
@@ -107,12 +107,12 @@ class DataPreprocessor:
             self._calculate_statistics(clean_data)
             
             self.is_fitted = True
-            logger.info(f"DataPreprocessor fitted on data shape: {self.original_shape}")
+            self.logger.info(f"DataPreprocessor fitted on data shape: {self.original_shape}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Failed to fit preprocessor: {str(e)}")
+            self.logger.error(f"Failed to fit preprocessor: {str(e)}")
             return False
     
     def transform(self, data: Union[np.ndarray, pd.DataFrame]) -> Optional[np.ndarray]:
@@ -126,7 +126,7 @@ class DataPreprocessor:
             Optional[np.ndarray]: Transformed data or None if failed
         """
         if not self.is_fitted:
-            logger.error("Preprocessor not fitted. Call fit() first.")
+            self.logger.error("Preprocessor not fitted. Call fit() first.")
             return None
         
         try:
@@ -146,11 +146,11 @@ class DataPreprocessor:
             else:
                 normalized_data = clean_data
             
-            logger.debug(f"Transformed data shape: {data.shape} -> {normalized_data.shape}")
+            self.logger.debug(f"Transformed data shape: {data.shape} -> {normalized_data.shape}")
             return normalized_data
             
         except Exception as e:
-            logger.error(f"Failed to transform data: {str(e)}")
+            self.logger.error(f"Failed to transform data: {str(e)}")
             return None
     
     def fit_transform(self, data: Union[np.ndarray, pd.DataFrame]) -> Optional[np.ndarray]:
@@ -179,7 +179,7 @@ class DataPreprocessor:
             Optional[np.ndarray]: Original scale data or None if failed
         """
         if not self.is_fitted:
-            logger.error("Preprocessor not fitted. Cannot inverse transform.")
+            self.logger.error("Preprocessor not fitted. Cannot inverse transform.")
             return None
         
         try:
@@ -189,7 +189,7 @@ class DataPreprocessor:
                 return data
                 
         except Exception as e:
-            logger.error(f"Failed to inverse transform data: {str(e)}")
+            self.logger.error(f"Failed to inverse transform data: {str(e)}")
             return None
     
     def _handle_missing_values(self, data: np.ndarray, is_fitting: bool = False) -> np.ndarray:
@@ -201,7 +201,7 @@ class DataPreprocessor:
         if is_fitting:
             self.data_stats['missing_count'] = missing_count
         
-        logger.debug(f"Handling {missing_count} missing values using method: {self.handle_missing}")
+        self.logger.debug(f"Handling {missing_count} missing values using method: {self.handle_missing}")
         
         if self.handle_missing == 'interpolate':
             # Linear interpolation
@@ -273,7 +273,7 @@ class DataPreprocessor:
         self.data_stats['outlier_count'] = outlier_count
         
         if outlier_count > 0:
-            logger.debug(f"Handled {outlier_count} outliers using method: {self.outlier_method}")
+            self.logger.debug(f"Handled {outlier_count} outliers using method: {self.outlier_method}")
         
         return data
     
@@ -287,7 +287,7 @@ class DataPreprocessor:
                 'max': np.max(data, axis=0)
             })
         except Exception as e:
-            logger.warning(f"Failed to calculate statistics: {str(e)}")
+            self.logger.warning(f"Failed to calculate statistics: {str(e)}")
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get data preprocessing statistics."""
@@ -308,27 +308,27 @@ class DataPreprocessor:
                 data = data.values
             
             if data is None or len(data) == 0:
-                logger.error("Data is empty")
+                self.logger.error("Data is empty")
                 return False
             
             if not isinstance(data, np.ndarray):
-                logger.error("Data must be numpy array or pandas DataFrame")
+                self.logger.error("Data must be numpy array or pandas DataFrame")
                 return False
             
             if data.ndim != 2:
-                logger.error(f"Data must be 2D, got {data.ndim}D")
+                self.logger.error(f"Data must be 2D, got {data.ndim}D")
                 return False
             
             # Check for infinite values
             if np.isinf(data).any():
-                logger.warning("Data contains infinite values")
+                self.logger.warning("Data contains infinite values")
             
             # Check data types
             if not np.issubdtype(data.dtype, np.number):
-                logger.error("Data must be numeric")
+                self.logger.error("Data must be numeric")
                 return False
             
-            logger.debug(f"Data validation passed for shape: {data.shape}")
+            self.logger.debug(f"Data validation passed for shape: {data.shape}")
             return True
             
         except Exception as e:
