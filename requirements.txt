@@ -1,5 +1,5 @@
 tensorflow
-nvidia-cudnn-cu11
+nvidia-cudnn-cu12
 numpy
 pandas
 h5py
