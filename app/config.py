@@ -76,6 +76,7 @@ DEFAULT_VALUES = {
         "wav_approx_L2", "wav_detail_L1", "wav_detail_L2",
         "mtm_band_0", "mtm_band_1", "mtm_band_2", "mtm_band_3",
         "BC-BO", "BH-BL", "BH-BO", "BO-BL",
+        # Add all CLOSE tick features that are used by VAE decoder
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
@@ -83,16 +84,14 @@ DEFAULT_VALUES = {
         "day_of_month", "hour_of_day", "day_of_week" 
     ], 
     "generator_decoder_output_feature_names": [
-        # Based on cvae_target_feature_names from phase_4_3_cnn_small_debug_out.json
-        "OPEN", "LOW", "HIGH", # "vix_close", "S&P500_Close" are removed from this list
+        # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
+        "OPEN", "LOW", "HIGH", "vix_close", 
         "BC-BO", "BH-BL", 
-        # "S&P500_Close", # REMOVED
-        # "vix_close", # REMOVED
+        "S&P500_Close",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
-        # "log_return" REMOVED - It's NOT in the cvae_target_feature_names of the trained model
     ], 
     "generator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
     "generator_ti_feature_names": [ 
@@ -112,6 +111,18 @@ DEFAULT_VALUES = {
         "bb_length": 20, "bb_std": 2.0 # Added for Bollinger Bands
     },
     "generator_normalization_params_file": "examples/data/phase_3/phase_3_debug_out.json",
+    
+    # --- VAE Decoder Configuration ---
+    "cvae_target_feature_names": [
+        # Exact 23 features that the pre-trained VAE decoder outputs
+        "OPEN", "LOW", "HIGH", "vix_close", 
+        "BC-BO", "BH-BL", 
+        "S&P500_Close",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
+    ],
     "generator_decoder_input_name_latent": "decoder_input_z_seq",       
     "generator_decoder_input_name_window": "input_x_window",          
     "generator_decoder_input_name_conditions": "decoder_input_conditions", 
