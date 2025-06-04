@@ -8,25 +8,43 @@ Manages data normalization, validation, and preparation for encoding.
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# Default parameters for the DataPreprocessor plugin
+plugin_params: Dict[str, Any] = {
+    "stl_period": 24,
+    "use_stl": True,
+    "use_wavelets": False,  # Assuming default, adjust if needed
+    "use_multi_tapper": False, # Assuming default, adjust if needed
+    "target_column": "CLOSE" # Assuming default, adjust if needed
+    # Add other relevant default parameters for DataPreprocessor here
+}
 
 logger = logging.getLogger(__name__)
 
 
 class DataPreprocessor:
     """
-    Handles data preprocessing operations for the feeder plugin.
-    
-    Provides data cleaning, normalization, validation, and preparation
-    services for feeding data to the encoder.
+    Handles data preprocessing tasks like STL decomposition,
+    wavelet transforms, and multi-taper spectrum analysis.
     """
-    
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize the data preprocessor."""
-        self.config = config
-        
-        # Preprocessing parameters
+    plugin_params = plugin_params # Class attribute for plugin parameters
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+        """Initialize data preprocessor."""
+        self.params = self.plugin_params.copy()
+        if config:
+            self.params.update(config)
+
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger(__name__)
+            self.logger.addHandler(logging.NullHandler()) # Default to no-op handler
+
+        self.stl_period = self.params.get("stl_period")
+        self.use_stl = self.params.get("use_stl")
         self.normalization_method = config.get('normalization_method', 'standard')
         self.handle_missing = config.get('handle_missing', 'interpolate')
         self.outlier_method = config.get('outlier_method', 'clip')
@@ -347,3 +365,23 @@ class DataPreprocessor:
         }
         
         logger.info("DataPreprocessor reset to unfitted state")
+    
+    # Ensure these mandatory methods are present or add them
+    def set_params(self, **kwargs):
+        """Update plugin parameters with provided configuration."""
+        for key, value in kwargs.items():
+            self.params[key] = value
+        # Re-initialize attributes that depend on params if necessary
+        self.stl_period = self.params.get("stl_period")
+        self.use_stl = self.params.get("use_stl")
+        # ... any other param-dependent attributes
+
+    def get_debug_info(self):
+        """Return debug information for the plugin."""
+        # Define plugin_debug_vars or list specific params
+        # For example, if you want to expose all current params:
+        return self.params 
+
+    def add_debug_info(self, debug_info: Dict[str, Any]):
+        """Add plugin debug information to the given dictionary."""
+        debug_info.update(self.get_debug_info())
