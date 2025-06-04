@@ -332,7 +332,7 @@ class DataPreprocessor:
             return True
             
         except Exception as e:
-            logger.error(f"Data validation failed: {str(e)}")
+            self.logger.error(f"Data validation failed: {str(e)}")
             return False
     
     def get_config(self) -> Dict[str, Any]:
