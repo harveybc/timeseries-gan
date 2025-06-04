@@ -8,3 +8,4 @@ build
 pytest
 pdoc3
 keras-multi-head
+pandas_ta
