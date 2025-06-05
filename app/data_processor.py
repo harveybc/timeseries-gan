@@ -48,11 +48,9 @@ def run_pipeline(config: Dict[str, Any],
         if not trainer_plugin:
             logger.error("Trainer plugin is required for 'train' mode but was not provided.")
             raise ValueError("Trainer plugin instance not available for training mode.")
-        # TrainPipeline might also need feeder_plugin directly for data loading.
-        # The trainer_plugin itself should have references to generator, discriminator, feeder.
+        # TrainPipeline only needs trainer_plugin (which has references to other plugins)
         pipeline = TrainPipeline(config=config, 
-                                 trainer_plugin=trainer_plugin,
-                                 feeder_plugin=feeder_plugin) # Pass feeder if TrainPipeline uses it directly
+                                 trainer_plugin=trainer_plugin)
     elif operation_mode == "generate":
         if not generator_plugin or not feeder_plugin:
             logger.error("Generator and Feeder plugins are required for 'generate' mode.")
