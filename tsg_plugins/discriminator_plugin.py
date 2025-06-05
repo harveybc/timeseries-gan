@@ -99,11 +99,12 @@ class DiscriminatorPlugin:
         
         # Initialize model
         self.model: Optional[Model] = None
-        self.compiled = False
         
-        # Build model if parameters are sufficient
-        if self.params.get("sequence_length") and self.params.get("num_features"):
-            self._build_model()
+        # Initialize model if configured
+        if not self.params.get("load_pretrained_model", False):
+            self.build_model()
+        else:
+            self.load_model()
     
     def set_params(self, **kwargs) -> None:
         """
@@ -335,7 +336,15 @@ class DiscriminatorPlugin:
         }
     
     def get_model(self) -> Optional[Model]:
-        """Get the discriminator model."""
+        """
+        Get the discriminator model.
+        
+        Returns:
+            Optional[Model]: The discriminator model if available, None otherwise
+        """
+        if self.model is None:
+            self.logger.warning("Discriminator model not built. Building model now...")
+            self.build_model()
         return self.model
     
     def save_model(self, filepath: str) -> None:
@@ -355,15 +364,6 @@ class DiscriminatorPlugin:
         except Exception as e:
             self.logger.error(f"Error loading model from {filepath}: {e}")
             raise
-    
-    def get_model(self) -> Optional[Model]:
-        """
-        Get the discriminator model.
-        
-        Returns:
-            The discriminator Keras model, or None if not built
-        """
-        return self.model
     
     def get_debug_info(self) -> Dict[str, Any]:
         """Get debug information about the discriminator."""
