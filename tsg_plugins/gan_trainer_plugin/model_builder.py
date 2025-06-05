@@ -7,6 +7,9 @@ providing focused functionality for model architecture building.
 """
 
 import tensorflow as tf
+import logging
+
+import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Dense, LSTM, Conv1D, Dropout, LeakyReLU, 
@@ -37,14 +40,103 @@ class ModelBuilder:
         Build discriminator model.
         
         Args:
-            generator: Generator model for reference
-            seq_len: Sequence length
+            generator: Generator model for reference  
+            seq_len: Sequence length (not used if generator outputs point-wise features)
             num_features: Number of input features
         
         Returns:
             Compiled discriminator model
         """
+        # Check generator output shape to determine discriminator input shape
+        if hasattr(generator, 'output_shape'):
+            gen_output_shape = generator.output_shape
+            self.logger.info(f"Generator output shape: {gen_output_shape}")
+            
+            # If generator outputs point-wise features (e.g., (None, 23)), 
+            # discriminator should handle point-wise input
+            if len(gen_output_shape) == 2:  # (batch_size, features)
+                actual_num_features = gen_output_shape[1]
+                self.logger.info(f"Building discriminator for point-wise input: ({actual_num_features} features)")
+                return self._build_pointwise_discriminator(actual_num_features)
+            # If generator outputs sequences (e.g., (None, seq_len, features)),
+            # discriminator should handle sequence input  
+            elif len(gen_output_shape) == 3:  # (batch_size, seq_len, features)
+                actual_seq_len = gen_output_shape[1]
+                actual_num_features = gen_output_shape[2]
+                self.logger.info(f"Building discriminator for sequence input: ({actual_seq_len}, {actual_num_features})")
+                return self._build_sequence_discriminator(actual_seq_len, actual_num_features)
+        
+        # Fallback to original sequence-based discriminator
         self.logger.info(f"Building discriminator with seq_len={seq_len}, num_features={num_features}")
+        return self._build_sequence_discriminator(seq_len, num_features)
+    
+    def _build_pointwise_discriminator(self, num_features: int) -> tf.keras.Model:
+        """
+        Build discriminator for point-wise input (e.g., (None, 23)).
+        
+        Args:
+            num_features: Number of input features
+            
+        Returns:
+            Compiled discriminator model
+        """
+        self.logger.info(f"Building point-wise discriminator with {num_features} features")
+        
+        try:
+            # Input layer for point-wise features
+            input_layer = Input(shape=(num_features,), name="discriminator_input")
+            
+            # Dense layers for point-wise classification
+            dropout_rate = self.params.get("discriminator_dropout_rate", 0.3)
+            
+            x = Dense(128, activation='relu', name="dense_1")(input_layer)
+            x = Dropout(dropout_rate, name="dropout_1")(x)
+            x = BatchNormalization(name="batch_norm_1")(x)
+            
+            x = Dense(64, activation='relu', name="dense_2")(x)
+            x = Dropout(dropout_rate, name="dropout_2")(x)
+            x = BatchNormalization(name="batch_norm_2")(x)
+            
+            x = Dense(32, activation='relu', name="dense_3")(x)
+            x = Dropout(dropout_rate, name="dropout_3")(x)
+            
+            # Output layer - binary classification (real/fake)
+            output = Dense(1, activation='sigmoid', name="discriminator_output")(x)
+            
+            # Create model
+            discriminator = Model(inputs=input_layer, outputs=output, name="discriminator")
+            
+            # Compile model
+            discriminator.compile(
+                optimizer=Adam(
+                    learning_rate=self.params.get("discriminator_lr", 1e-4),
+                    beta_1=self.params.get("discriminator_beta1", 0.5)
+                ),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            self.discriminator = discriminator
+            self.logger.info(f"Point-wise discriminator built successfully with {discriminator.count_params()} parameters")
+            
+            return discriminator
+            
+        except Exception as e:
+            self.logger.error(f"Error building point-wise discriminator: {e}")
+            raise
+    
+    def _build_sequence_discriminator(self, seq_len: int, num_features: int) -> tf.keras.Model:
+        """
+        Build discriminator for sequence input (e.g., (None, seq_len, features)).
+        
+        Args:
+            seq_len: Sequence length
+            num_features: Number of input features
+            
+        Returns:
+            Compiled discriminator model
+        """
+        self.logger.info(f"Building sequence discriminator with seq_len={seq_len}, num_features={num_features}")
         
         try:
             # Input layer
