@@ -87,7 +87,8 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     plugins = {
         'feeder_plugin': None,
-        'generator_plugin': None, 
+        'generator_plugin': None,
+        'discriminator_plugin': None, # Ensure key exists
         'evaluator_plugin': None,
         'optimizer_plugin': None,
         'preprocessor_plugin': None,
@@ -103,8 +104,8 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         print(f"Failed to load Feeder Plugin '{plugin_name_feeder}': {e}")
         traceback.print_exc()
-        sys.exit(1)
-    
+        # sys.exit(1) # Decide if critical
+
     # Load Generator Plugin
     plugin_name_generator = config.get('generator', 'default_generator')
     print(f"Loading Generator Plugin: {plugin_name_generator}")
@@ -114,8 +115,20 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         print(f"Failed to load Generator Plugin '{plugin_name_generator}': {e}")
         traceback.print_exc()
-        sys.exit(1)
-    
+        # sys.exit(1) # Decide if critical
+
+    # Load Discriminator Plugin (BEFORE Trainer)
+    # Ensure 'discriminator' is in DEFAULT_VALUES and 'default_discriminator' is in setup.py
+    plugin_name_discriminator = config.get('discriminator', 'default_discriminator') 
+    print(f"Loading Discriminator Plugin: {plugin_name_discriminator}")
+    try:
+        discriminator_class, _ = load_plugin('discriminator.plugins', plugin_name_discriminator)
+        plugins['discriminator_plugin'] = discriminator_class(config)
+    except Exception as e:
+        print(f"Failed to load Discriminator Plugin '{plugin_name_discriminator}': {e}")
+        traceback.print_exc()
+        # sys.exit(1) # Decide if critical
+
     # Load Evaluator Plugin
     plugin_name_evaluator = config.get('evaluator', 'default_evaluator')
     print(f"Loading Evaluator Plugin: {plugin_name_evaluator}")
@@ -125,7 +138,7 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         print(f"Failed to load Evaluator Plugin '{plugin_name_evaluator}': {e}")
         traceback.print_exc()
-        sys.exit(1)
+        # sys.exit(1) # Decide if critical
     
     # Load Optimizer Plugin
     plugin_name_optimizer = config.get('optimizer', 'default_optimizer')
@@ -136,23 +149,23 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         print(f"Failed to load Optimizer Plugin '{plugin_name_optimizer}': {e}")
         traceback.print_exc()
-        sys.exit(1)
+        # sys.exit(1) # Decide if critical
     
-    # Load Trainer Plugin
+    # Load Trainer Plugin (AFTER Generator and Discriminator)
     plugin_name_trainer = config.get('trainer', 'gan_trainer')
     print(f"Loading Trainer Plugin: {plugin_name_trainer}")
     try:
         trainer_class, _ = load_plugin('trainer.plugins', plugin_name_trainer)
-        # GANTrainerPlugin expects other plugin instances at construction
         plugins['trainer_plugin'] = trainer_class(
             config=config,
-            generator_plugin_instance=plugins['generator_plugin'],
-            feeder_plugin_instance=plugins['feeder_plugin']
+            generator_plugin_instance=plugins.get('generator_plugin'),
+            feeder_plugin_instance=plugins.get('feeder_plugin'),
+            discriminator_plugin_instance=plugins.get('discriminator_plugin') # Pass discriminator
         )
     except Exception as e:
         print(f"Failed to load Trainer Plugin '{plugin_name_trainer}': {e}")
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(1) # Trainer is critical for train mode
     
     return plugins
 
