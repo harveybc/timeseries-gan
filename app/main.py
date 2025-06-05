@@ -147,8 +147,7 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
         plugins['trainer_plugin'] = trainer_class(
             config=config,
             generator_plugin_instance=plugins['generator_plugin'],
-            feeder_plugin_instance=plugins['feeder_plugin'],
-            preprocessor_plugin_instance=plugins['preprocessor_plugin']
+            feeder_plugin_instance=plugins['feeder_plugin']
         )
     except Exception as e:
         print(f"Failed to load Trainer Plugin '{plugin_name_trainer}': {e}")
