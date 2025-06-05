@@ -12,19 +12,14 @@ Author: TimeSeries-GAN Team
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+# Assuming Keras Model type
+from tensorflow.keras.models import Model
 
 
 class PluginInterface:
-    """
-    Manages interactions with other plugins for GAN training.
-    
-    Handles:
-    - Generator plugin model extraction and validation
-    - Feeder plugin data access and configuration
-    - Preprocessor plugin integration
-    - Parameter extraction from plugins
-    """
+    """Handles interactions with other plugins (Generator, Feeder, Discriminator)."""
     
     def __init__(self, params: Dict[str, Any], logger: logging.Logger):
         """
@@ -36,228 +31,114 @@ class PluginInterface:
         """
         self.params = params
         self.logger = logger
-        
-        # Plugin instances
-        self.generator_plugin = None
-        self.feeder_plugin = None
-        self.preprocessor_plugin = None
-        
-        # Extracted models and parameters
-        self.generator = None
-        self.seq_len = None
-        self.latent_dim = None
-        self.num_discriminator_features = None
-    
-    def set_plugin_instances(self, generator_plugin: Optional[Any] = None,
-                           feeder_plugin: Optional[Any] = None,
-                           preprocessor_plugin: Optional[Any] = None):
+        self.generator_plugin: Optional[Any] = None
+        self.feeder_plugin: Optional[Any] = None
+        self.discriminator_plugin: Optional[Any] = None # ADDED
+        self.preprocessor_plugin: Optional[Any] = None
+        self.logger.info("PluginInterface initialized")
+
+    def set_plugin_instances(self, generator_plugin, feeder_plugin, 
+                             discriminator_plugin, # ADDED
+                             preprocessor_plugin):
         """
         Set plugin instances for interaction.
         
         Args:
             generator_plugin: Generator plugin instance
             feeder_plugin: Feeder plugin instance
+            discriminator_plugin: Discriminator plugin instance # ADDED
             preprocessor_plugin: Preprocessor plugin instance
         """
         self.generator_plugin = generator_plugin
         self.feeder_plugin = feeder_plugin
+        self.discriminator_plugin = discriminator_plugin # STORE IT
         self.preprocessor_plugin = preprocessor_plugin
-        
-        self.logger.info("Plugin instances set for interface")
-        
-        # Extract generator model if available
-        if self.generator_plugin:
-            self._extract_generator_model()
-    
-    def _extract_generator_model(self):
-        """Extract generator model from generator plugin."""
-        self.generator = None
-        
+        self.logger.info("Plugin instances set in PluginInterface.")
         if not self.generator_plugin:
-            self.logger.warning("Generator plugin instance not provided")
-            return
-        
-        # Try different attribute names for generator model
-        if hasattr(self.generator_plugin, 'generator_model') and self.generator_plugin.generator_model:
-            self.generator = self.generator_plugin.generator_model
-            self.logger.info("Generator model retrieved from generator_plugin.generator_model")
-        elif hasattr(self.generator_plugin, 'model') and self.generator_plugin.model:
-            self.generator = self.generator_plugin.model
-            self.logger.info("Generator model retrieved from generator_plugin.model")
-        elif hasattr(self.generator_plugin, 'get_model') and callable(self.generator_plugin.get_model):
-            try:
-                self.generator = self.generator_plugin.get_model()
-                self.logger.info("Generator model retrieved from generator_plugin.get_model()")
-            except Exception as e:
-                self.logger.error(f"Failed to call generator_plugin.get_model(): {e}")
-        else:
-            self.logger.error("Generator plugin does not have accessible model")
-            
-        # Extract parameters from generator if successful
-        if self.generator:
-            self._extract_parameters_from_generator()
-    
-    def _extract_parameters_from_generator(self):
-        """Extract core parameters from generator model."""
-        # Set default values
-        self.seq_len = self.params.get("seq_len", 144)
-        self.latent_dim = self.params.get("latent_dim", 128)
-        
-        # Use the full feature list for discriminator as per REFERENCE.md
-        # The discriminator processes the complete 57-feature output from GeneratorPlugin
-        feature_names_for_discriminator = self.params.get("feature_names_for_discriminator_ordered", [])
-        if feature_names_for_discriminator:
-            self.num_discriminator_features = len(feature_names_for_discriminator)
-        else:
-            # Fallback to default if not configured
-            self.num_discriminator_features = len(
-                self.params.get("discriminator_input_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"])
-            )
-        
-        # Try to extract from generator input shape
-        if not hasattr(self.generator, 'input_shape'):
-            self.logger.warning("Generator model has no input_shape attribute")
-            return
-        
-        try:
-            generator_input_shape = self.generator.input_shape
-            
-            if isinstance(generator_input_shape, list) and len(generator_input_shape) > 0:
-                # Handle multiple inputs - find latent input
-                for input_shape in generator_input_shape:
-                    if len(input_shape) == 3:  # (batch, seq, features)
-                        if input_shape[1]:  # seq_len
-                            self.seq_len = input_shape[1]
-                        if input_shape[2]:  # features/latent_dim
-                            self.latent_dim = input_shape[2]
-                        break
-            elif len(generator_input_shape) == 3:
-                # Single input with shape (batch, seq, features)
-                if generator_input_shape[1]:
-                    self.seq_len = generator_input_shape[1]
-                if generator_input_shape[2]:
-                    self.latent_dim = generator_input_shape[2]
-            
-            self.logger.info(f"Extracted from generator - seq_len: {self.seq_len}, latent_dim: {self.latent_dim}")
-            
-        except Exception as e:
-            self.logger.warning(f"Could not extract parameters from generator: {e}")
-    
-    def get_generator_model(self):
-        """Get the extracted generator model."""
-        return self.generator
-    
-    def get_extracted_parameters(self) -> Tuple[int, int, int]:
-        """
-        Get extracted parameters from generator.
-        
-        Returns:
-            Tuple of (seq_len, latent_dim, num_discriminator_features)
-        """
-        return self.seq_len, self.latent_dim, self.num_discriminator_features
-    
-    def validate_generator_plugin(self) -> bool:
-        """
-        Validate that generator plugin is properly configured.
-        
-        Returns:
-            True if generator plugin is valid, False otherwise
-        """
-        if not self.generator_plugin:
-            self.logger.error("Generator plugin not provided")
-            return False
-        
-        if not self.generator:
-            self.logger.error("Generator model not accessible from plugin")
-            return False
-        
-        # Check if generator has expected methods/attributes
-        required_attributes = ['input_shape', 'output_shape']
-        missing_attributes = []
-        
-        for attr in required_attributes:
-            if not hasattr(self.generator, attr):
-                missing_attributes.append(attr)
-        
-        if missing_attributes:
-            self.logger.warning(f"Generator model missing attributes: {missing_attributes}")
-        
-        self.logger.info("Generator plugin validation passed")
-        return True
-    
-    def validate_feeder_plugin(self) -> bool:
-        """
-        Validate that feeder plugin is properly configured.
-        
-        Returns:
-            True if feeder plugin is valid, False otherwise
-        """
+            self.logger.warning("GeneratorPlugin instance not provided to PluginInterface.")
         if not self.feeder_plugin:
-            self.logger.warning("Feeder plugin not provided")
-            return False
-        
-        # Check for expected methods in feeder plugin
-        expected_methods = ['generate_batch']
-        missing_methods = []
-        
-        for method in expected_methods:
-            if not hasattr(self.feeder_plugin, method) or not callable(getattr(self.feeder_plugin, method)):
-                missing_methods.append(method)
-        
-        if missing_methods:
-            self.logger.error(f"Feeder plugin missing methods: {missing_methods}")
-            return False
-        
-        self.logger.info("Feeder plugin validation passed")
-        return True
-    
-    def get_feeder_plugin(self):
-        """Get the feeder plugin instance."""
-        return self.feeder_plugin
-    
-    def get_preprocessor_plugin(self):
-        """Get the preprocessor plugin instance."""
-        return self.preprocessor_plugin
-    
-    def extract_feeder_parameters(self) -> Dict[str, Any]:
+            self.logger.warning("FeederPlugin instance not provided to PluginInterface.")
+        if not self.discriminator_plugin:
+            self.logger.warning("DiscriminatorPlugin instance not provided to PluginInterface.")
+
+
+    def get_generator_model(self) -> Optional[Model]:
         """
-        Extract relevant parameters from feeder plugin configuration.
-        
-        Returns:
-            Dict containing feeder-related parameters
+        Get the extracted generator model.
         """
-        feeder_params = {}
-        
-        # Extract feeder-specific parameters from config
-        feeder_keys = [
-            'feeder_date_feature_names_for_conditioning',
-            'feeder_max_day_of_month',
-            'feeder_max_hour_of_day', 
-            'feeder_max_day_of_week',
-            'conditional_fundamental_feature_names',
-            'num_conditional_prev_tick_features',
-            'datetime_col_name_in_x_real_df'
-        ]
-        
-        for key in feeder_keys:
-            if key in self.params:
-                feeder_params[key] = self.params[key]
-        
-        return feeder_params
-    
-    def get_discriminator_feature_config(self) -> Dict[str, Any]:
+        if self.generator_plugin and hasattr(self.generator_plugin, 'get_model'):
+            model = self.generator_plugin.get_model()
+            if model:
+                self.logger.info("Retrieved generator model from GeneratorPlugin.")
+                return model
+            else:
+                self.logger.warning("GeneratorPlugin's get_model() returned None.")
+                return None
+        self.logger.warning("GeneratorPlugin not set or has no get_model method in PluginInterface.")
+        return None
+
+    def get_discriminator_model(self) -> Optional[Model]: # ADDED METHOD
         """
-        Get discriminator feature configuration.
-        
-        Returns:
-            Dict containing discriminator feature settings
+        Get the extracted discriminator model.
         """
-        return {
-            'input_feature_names': self.params.get("discriminator_input_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"]),
-            'num_features': self.num_discriminator_features,
-            'seq_len': self.seq_len
-        }
-    
+        if self.discriminator_plugin and hasattr(self.discriminator_plugin, 'get_model'):
+            model = self.discriminator_plugin.get_model()
+            if model:
+                self.logger.info("Retrieved discriminator model from DiscriminatorPlugin.")
+                return model
+            else:
+                self.logger.warning("DiscriminatorPlugin's get_model() returned None.")
+                return None
+        self.logger.warning("DiscriminatorPlugin not set or has no get_model method in PluginInterface.")
+        return None
+
+    def get_feeder_plugin(self) -> Optional[Any]:
+        """
+        Get the feeder plugin instance.
+        """
+        if self.feeder_plugin:
+            return self.feeder_plugin
+        self.logger.warning("FeederPlugin not set in PluginInterface.")
+        return None
+
+    def get_extracted_parameters(self) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        """
+        Extracts sequence length, latent dim, and num features from generator/config.
+        """
+        seq_len = self.params.get("seq_len", self.params.get("generator_decoder_input_window_size"))
+        
+        # Latent dim for Z-generator output, or a general latent_dim if defined
+        latent_dim = self.params.get("internal_z_latent_dim", self.params.get("latent_dim")) 
+        if isinstance(self.params.get("latent_shape"), list) and len(self.params["latent_shape"]) == 2:
+             # If latent_shape is [seq, dim], prefer its dim part
+            latent_dim = self.params["latent_shape"][1]
+
+        # Num features should be the output of the generator (e.g., 57)
+        # This is what the discriminator will see.
+        num_features = None
+        generator_model = self.get_generator_model()
+        if generator_model and hasattr(generator_model, 'output_shape'):
+            if isinstance(generator_model.output_shape, tuple) and len(generator_model.output_shape) > 0 :
+                 # For (None, 57) output -> 57
+                 # For (None, seq_len, 57) output -> 57
+                num_features = generator_model.output_shape[-1]
+            else: # Try from config if model output shape is not as expected
+                num_features = len(self.params.get("generator_full_feature_names_ordered", [])) \
+                               if self.params.get("generator_full_feature_names_ordered") else \
+                               len(self.params.get("feature_names_for_discriminator_ordered", []))
+        else: # Fallback to config
+            num_features = len(self.params.get("generator_full_feature_names_ordered", [])) \
+                           if self.params.get("generator_full_feature_names_ordered") else \
+                           len(self.params.get("feature_names_for_discriminator_ordered", []))
+
+
+        if not num_features and self.params.get("num_features"): # Discriminator's own num_features param
+            num_features = self.params.get("num_features")
+
+
+        self.logger.info(f"Extracted parameters for model building: seq_len={seq_len}, latent_dim={latent_dim}, num_features={num_features}")
+        return seq_len, latent_dim, num_features
+
     def get_debug_info(self) -> Dict[str, Any]:
         """
         Get debug information for this module.
@@ -266,13 +147,12 @@ class PluginInterface:
             Dict containing debug information
         """
         return {
-            'generator_plugin_available': self.generator_plugin is not None,
-            'feeder_plugin_available': self.feeder_plugin is not None,
-            'preprocessor_plugin_available': self.preprocessor_plugin is not None,
-            'generator_model_extracted': self.generator is not None,
-            'extracted_seq_len': self.seq_len,
-            'extracted_latent_dim': self.latent_dim,
-            'num_discriminator_features': self.num_discriminator_features,
-            'generator_valid': self.validate_generator_plugin() if self.generator_plugin else False,
-            'feeder_valid': self.validate_feeder_plugin() if self.feeder_plugin else False
+            "generator_plugin_available": self.generator_plugin is not None,
+            "feeder_plugin_available": self.feeder_plugin is not None,
+            "discriminator_plugin_available": self.discriminator_plugin is not None,
+            "preprocessor_plugin_available": self.preprocessor_plugin is not None,
         }
+
+# Ensure you create this file if it doesn't exist, or integrate its logic.
+# If `plugin_interface.py` is new, add `from .plugin_interface import PluginInterface`
+# to the top of `tsg_plugins/gan_trainer_plugin/gan_trainer_plugin.py`.

@@ -102,8 +102,10 @@ class GANTrainerPlugin:
         'discriminator_lstm_units', 'gan_save_interval', 'results_base_dir'
     ]
     
-    def __init__(self, config: Dict[str, Any], generator_plugin_instance: Optional[Any] = None, 
+    def __init__(self, config: Dict[str, Any], 
+                 generator_plugin_instance: Optional[Any] = None, 
                  feeder_plugin_instance: Optional[Any] = None, 
+                 discriminator_plugin_instance: Optional[Any] = None, # ADDED discriminator_plugin_instance
                  preprocessor_plugin_instance: Optional[Any] = None):
         """Initialize GAN trainer plugin with configuration and other plugin instances."""
         # Mandatory: Copy plugin_params to self.params and update with config
@@ -120,7 +122,7 @@ class GANTrainerPlugin:
         # Initialize specialized modules
         self.parameter_manager = ParameterManager(self.params, self.logger)
         self.directory_manager = DirectoryManager(self.params, self.logger)
-        self.plugin_interface = PluginInterface(self.params, self.logger)
+        self.plugin_interface = PluginInterface(self.params, self.logger) # Initialize first
         self.training_coordinator = TrainingCoordinator(self.params, self.logger)
         self.model_builder = ModelBuilder(self.params, self.logger)
         self.model_persistence = ModelPersistence(self.params, self.logger)
@@ -128,7 +130,10 @@ class GANTrainerPlugin:
         
         # Setup plugin interfaces and extract models
         self.plugin_interface.set_plugin_instances(
-            generator_plugin_instance, feeder_plugin_instance, preprocessor_plugin_instance
+            generator_plugin_instance, 
+            feeder_plugin_instance, 
+            discriminator_plugin_instance, # PASS discriminator_plugin_instance
+            preprocessor_plugin_instance
         )
         
         # Build models if generator is available
@@ -389,36 +394,30 @@ class GANTrainerPlugin:
 
     def _ensure_models_are_built(self) -> bool:
         """Ensures generator, discriminator, and GAN models are built."""
-        if self.generator_plugin and hasattr(self.generator_plugin, 'get_model'):
-            self.generator_model = self.generator_plugin.get_model()
-        else:
-            self.logger.warning("GANTrainer: Generator plugin not available or no get_model method.")
-            self.generator_model = None
+        # Models are now primarily sourced via plugin_interface
+        self.generator_model = self.plugin_interface.get_generator_model()
+        self.discriminator_model = self.plugin_interface.get_discriminator_model() # Get from interface
 
-        if self.discriminator_plugin and hasattr(self.discriminator_plugin, 'get_model'):
-            self.discriminator_model = self.discriminator_plugin.get_model()
-        else:
-            self.logger.warning("GANTrainer: Discriminator plugin not available or no get_model method.")
-            self.discriminator_model = None
+        if not self.generator_model:
+            self.logger.warning("GANTrainer: Generator model not available via PluginInterface.")
+        if not self.discriminator_model:
+            self.logger.warning("GANTrainer: Discriminator model not available via PluginInterface.")
 
         if self.generator_model and self.discriminator_model:
-            # Only rebuild GAN model if it's not there or if key components might have changed
-            # For simplicity, we can rebuild if it's None. More complex logic could check for changes.
-            if not self.gan_model:
+            if not self.gan_model: # Build GAN model if not already built
                 self.logger.info("GANTrainer: Building combined GAN model.")
                 self._build_gan_model(self.generator_model, self.discriminator_model)
         else:
-            self.logger.warning("GANTrainer: Generator or Discriminator model is not available. GAN model not built.")
-            self.gan_model = None
+            self.logger.warning("GANTrainer: Generator or Discriminator model is not available. GAN model not built/cleared.")
+            self.gan_model = None # Clear GAN model if components are missing
         
         if self.generator_model and self.discriminator_model and self.gan_model:
             self.logger.info("GANTrainer: All required models (Generator, Discriminator, GAN) are available.")
             return True
         else:
-            # Log which model is missing
             if not self.generator_model: self.logger.warning("GANTrainer: Generator model is MISSING.")
             if not self.discriminator_model: self.logger.warning("GANTrainer: Discriminator model is MISSING.")
-            if not self.gan_model: self.logger.warning("GANTrainer: Combined GAN model is MISSING (likely due to missing G or D).")
+            if not self.gan_model: self.logger.warning("GANTrainer: Combined GAN model is MISSING.")
             return False
 
     def _build_gan_model(self, generator: Model, discriminator: Model) -> None:
