@@ -127,13 +127,14 @@ class ModelBuilder:
             # 2. decoder_input_h_context: (batch_size, 64) - context vector  
             # 3. decoder_input_conditions: (batch_size, 10) - condition vector
             
-            seq_len = self.params.get("seq_len", 18)
-            latent_dim = self.params.get("latent_dim", 32)
-            context_dim = self.params.get("context_dim", 64)
-            condition_dim = self.params.get("condition_dim", 10)
+            # Use exact dimensions from REFERENCE.md for VAE decoder inputs
+            latent_seq_len = 18  # Fixed latent sequence length from REFERENCE.md
+            latent_dim = 32      # Fixed latent dimension from REFERENCE.md
+            context_dim = 64     # Fixed context dimension from REFERENCE.md
+            condition_dim = 10   # Fixed condition dimension from REFERENCE.md
             
-            # Create the 3 GAN inputs
-            gan_input_z_seq = Input(shape=(seq_len, latent_dim), name="gan_input_z_seq")
+            # Create the 3 GAN inputs with exact shapes from REFERENCE.md
+            gan_input_z_seq = Input(shape=(latent_seq_len, latent_dim), name="gan_input_z_seq")
             gan_input_h_context = Input(shape=(context_dim,), name="gan_input_h_context")
             gan_input_conditions = Input(shape=(condition_dim,), name="gan_input_conditions")
             
