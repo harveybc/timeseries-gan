@@ -164,6 +164,7 @@ class GeneratorPlugin:
         old_model_file = self.params.get("sequential_model_file")
         old_norm_file = self.params.get("generator_normalization_params_file")
         old_full_feature_names = self.params.get("full_feature_names_ordered")
+        old_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
         
         # Update main config
         if hasattr(self, 'main_config') and self.main_config is not None:
@@ -209,9 +210,32 @@ class GeneratorPlugin:
                 if self.feature_validator:
                     self.feature_validator.validate_feature_name_consistency(self.params)
         
-        # Handle initial close anchor reload
-        self._handle_initial_close_anchor_reload()
+        # Handle initial close anchor reload if the relevant file path changed
+        new_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
+        if new_initial_close_file_path != old_initial_close_file_path and new_initial_close_file_path:
+            self.logger.info(f"Initial close anchor file path changed. Reloading from: {new_initial_close_file_path}")
+            self.initial_data_handler.load_initial_close_anchor(new_initial_close_file_path)
     
+    def _features_config_changed(self, kwargs: Dict[str, Any]) -> bool:
+        """Check if any feature-related configuration parameters have changed."""
+        feature_keys = [
+            "full_feature_names_ordered", "decoder_output_feature_names",
+            "ohlc_feature_names", "ti_feature_names",
+            "date_conditional_feature_names", "feeder_conditional_feature_names"
+        ]
+        for key in feature_keys:
+            if self.params.get(key) != self.plugin_params.get(key): # Compare with initial defaults or previous state
+                if key in kwargs or f"generator_{key}" in kwargs: # Check if it was in the update
+                    return True
+        return False
+
+    def _validate_plugin_configuration(self) -> None:
+        """Validate essential plugin configurations."""
+        if not self.params.get("full_feature_names_ordered"):
+            self.logger.warning("GeneratorPlugin: 'full_feature_names_ordered' is not configured.")
+        if not self.params.get("decoder_output_feature_names"):
+            self.logger.warning("GeneratorPlugin: 'decoder_output_feature_names' is not configured.")
+
     def _load_model(self, vae_decoder_model_path: str) -> None:
         """
         Load the pre-trained VAE decoder and build the composite generator model.
@@ -342,7 +366,6 @@ class GeneratorPlugin:
         # as that block contains 'return composite_generator'.
         # If the 'try' block fails and the 'except' block is executed (as modified above to return None),
         # this code is also not reached.
-        # If the 'except' block does not return, then this code would be reached after an error in the 'try' block.
         # This section also references 'feeder_noise_input' and 'loaded_vae_decoder'
         # which might not be in scope here, potentially leading to NameErrors.
         # Please review the logical structure of this method.
