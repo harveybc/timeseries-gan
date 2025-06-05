@@ -16,145 +16,68 @@ Operation Modes:
 Author: TimeSeries-GAN Team
 """
 
+import logging
 import sys
 import traceback
 from typing import Dict, Any, Optional
 
+# Import specific pipeline classes
 from app.pipeline.train_pipeline import TrainPipeline
-from app.pipeline.optimize_pipeline import OptimizePipeline  
 from app.pipeline.generate_pipeline import GeneratePipeline
-from app.utils.latent_shape_inference import infer_and_set_latent_shape
+from app.pipeline.optimize_pipeline import OptimizePipeline
 
+logger = logging.getLogger(__name__)
 
-def run_pipeline(config: Dict[str, Any], feeder_plugin=None, generator_plugin=None, 
-                evaluator_plugin=None, optimizer_plugin=None, preprocessor_plugin=None, 
-                trainer_plugin=None) -> None:
+def run_pipeline(config: Dict[str, Any],
+                 feeder_plugin: Optional[Any] = None,
+                 generator_plugin: Optional[Any] = None,
+                 discriminator_plugin: Optional[Any] = None,
+                 evaluator_plugin: Optional[Any] = None,
+                 optimizer_plugin: Optional[Any] = None,
+                 trainer_plugin: Optional[Any] = None,
+                 preprocessor_plugin: Optional[Any] = None,
+                 **kwargs) -> None: # Use **kwargs to catch any other plugins not explicitly listed
     """
-    Main entry point for TimeSeries-GAN data processing pipeline.
-    
-    Orchestrates the complete workflow based on the configured operation mode:
-    - Handles latent shape inference for generator/feeder compatibility
-    - Dispatches to appropriate operation pipeline (train/optimize/generate)
-    - Provides unified error handling and logging
-    
-    Args:
-        config: Configuration dictionary containing all pipeline parameters
-        feeder_plugin: Plugin for generating initial noise and conditional inputs
-        generator_plugin: Plugin wrapping the VAE decoder for data generation
-        evaluator_plugin: Plugin for computing evaluation metrics on generated data
-        optimizer_plugin: Plugin for hyperparameter optimization using genetic algorithms
-        preprocessor_plugin: Plugin for optional data preprocessing transformations
-        trainer_plugin: Plugin coordinating GAN training (Z-Generator + Discriminator)
-        
-    Raises:
-        SystemExit: On pipeline execution failure or invalid operation mode
+    Run the appropriate pipeline based on the operation mode.
+    Passes necessary plugin instances to the specific pipeline constructors.
     """
-    print("Starting TimeSeries-GAN data processing pipeline...")
-    
-    # Extract operation mode from configuration
-    operation_mode = config.get("operation_mode", "generate").lower()
-    print(f"▶ Operation mode: {operation_mode}")
-    
-    # Validate operation mode
-    valid_modes = ["train", "optimize", "generate"]
-    if operation_mode not in valid_modes:
-        print(f"❌ Invalid operation mode '{operation_mode}'. Valid modes: {valid_modes}")
-        sys.exit(1)
-    
-    try:
-        # Perform latent shape inference if generator and feeder plugins are available
-        if generator_plugin and feeder_plugin:
-            print("Performing latent shape inference...")
-            infer_and_set_latent_shape(config, generator_plugin, feeder_plugin, trainer_plugin)
-        
-        # Dispatch to appropriate operation pipeline
-        if operation_mode == "train":
-            _execute_train_mode(config, trainer_plugin)
-            
-        elif operation_mode == "optimize":
-            _execute_optimize_mode(config, optimizer_plugin, feeder_plugin, 
-                                 generator_plugin, evaluator_plugin)
-            
-        elif operation_mode == "generate":
-            _execute_generate_mode(config, feeder_plugin, generator_plugin, 
-                                 evaluator_plugin, preprocessor_plugin)
-        
-        print("✔ Pipeline execution completed successfully.")
-        
-    except Exception as e:
-        print(f"❌ Pipeline execution failed: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    operation_mode = config.get("operation_mode", "generate") # Default to generate if not specified
+    logger.info(f"DataProcessor: Dispatching to pipeline for operation mode: {operation_mode}")
 
+    if operation_mode == "train":
+        if not trainer_plugin:
+            logger.error("Trainer plugin is required for 'train' mode but was not provided.")
+            raise ValueError("Trainer plugin instance not available for training mode.")
+        # TrainPipeline might also need feeder_plugin directly for data loading.
+        # The trainer_plugin itself should have references to generator, discriminator, feeder.
+        pipeline = TrainPipeline(config=config, 
+                                 trainer_plugin=trainer_plugin,
+                                 feeder_plugin=feeder_plugin) # Pass feeder if TrainPipeline uses it directly
+    elif operation_mode == "generate":
+        if not generator_plugin or not feeder_plugin:
+            logger.error("Generator and Feeder plugins are required for 'generate' mode.")
+            raise ValueError("Generator or Feeder plugin instance not available for generate mode.")
+        pipeline = GeneratePipeline(config=config,
+                                    feeder_plugin=feeder_plugin,
+                                    generator_plugin=generator_plugin,
+                                    evaluator_plugin=evaluator_plugin,
+                                    preprocessor_plugin=preprocessor_plugin)
+    elif operation_mode == "optimize":
+        if not optimizer_plugin or not feeder_plugin or not generator_plugin or not evaluator_plugin:
+            logger.error("Optimizer, Feeder, Generator, and Evaluator plugins are required for 'optimize' mode.")
+            raise ValueError("One or more required plugin instances not available for optimize mode.")
+        pipeline = OptimizePipeline(config=config,
+                                    optimizer_plugin=optimizer_plugin,
+                                    feeder_plugin=feeder_plugin,
+                                    generator_plugin=generator_plugin,
+                                    evaluator_plugin=evaluator_plugin)
+    else:
+        logger.error(f"Unsupported operation mode: {operation_mode}")
+        raise ValueError(f"Unsupported operation mode specified: {operation_mode}")
 
-def _execute_train_mode(config: Dict[str, Any], trainer_plugin) -> None:
-    """
-    Execute training mode pipeline.
-    
-    Args:
-        config: Configuration dictionary
-        trainer_plugin: Plugin instance for GAN training coordination
-        
-    Raises:
-        SystemExit: If trainer plugin is unavailable or training fails
-    """
-    if not trainer_plugin:
-        print("❌ Trainer plugin not available for training mode.")
-        sys.exit(1)
-        
-    print("▶ Executing training pipeline...")
-    pipeline = TrainPipeline(config, trainer_plugin)
+    logger.info(f"Executing {operation_mode} pipeline...")
     pipeline.execute()
-
-
-def _execute_optimize_mode(config: Dict[str, Any], optimizer_plugin, feeder_plugin, 
-                          generator_plugin, evaluator_plugin) -> None:
-    """
-    Execute hyperparameter optimization mode pipeline.
-    
-    Args:
-        config: Configuration dictionary
-        optimizer_plugin: Plugin instance for genetic algorithm optimization
-        feeder_plugin: Plugin instance for noise generation
-        generator_plugin: Plugin instance for data generation
-        evaluator_plugin: Plugin instance for fitness evaluation
-        
-    Raises:
-        SystemExit: If required plugins are unavailable or optimization fails
-    """
-    if not optimizer_plugin:
-        print("❌ Optimizer plugin not available for optimization mode.")
-        sys.exit(1)
-        
-    print("▶ Executing optimization pipeline...")
-    pipeline = OptimizePipeline(config, optimizer_plugin, feeder_plugin, 
-                               generator_plugin, evaluator_plugin)
-    pipeline.execute()
-
-
-def _execute_generate_mode(config: Dict[str, Any], feeder_plugin, generator_plugin, 
-                          evaluator_plugin, preprocessor_plugin) -> None:
-    """
-    Execute data generation and evaluation mode pipeline.
-    
-    Args:
-        config: Configuration dictionary
-        feeder_plugin: Plugin instance for noise generation
-        generator_plugin: Plugin instance for data generation
-        evaluator_plugin: Plugin instance for evaluation metrics
-        preprocessor_plugin: Plugin instance for data preprocessing
-        
-    Raises:
-        SystemExit: If required plugins are unavailable or generation fails
-    """
-    if not feeder_plugin or not generator_plugin:
-        print("❌ Feeder and Generator plugins required for generation mode.")
-        sys.exit(1)
-        
-    print("▶ Executing generation pipeline...")
-    pipeline = GeneratePipeline(config, feeder_plugin, generator_plugin, 
-                               evaluator_plugin, preprocessor_plugin)
-    pipeline.execute()
+    logger.info(f"Finished executing {operation_mode} pipeline.")
 
 
 # Legacy function maintained for backward compatibility

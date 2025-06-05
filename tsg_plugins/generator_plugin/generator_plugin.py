@@ -11,7 +11,7 @@ import traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, LSTM, Bidirectional, Conv1D, Dense, Reshape, Concatenate, ZeroPadding1D, TimeDistributed
+from tensorflow.keras.layers import Input, LSTM, Bidirectional, Conv1D, Dense, Reshape, Concatenate, ZeroPadding1D, TimeDistributed # Ensure TimeDistributed is imported
 from tensorflow.keras.models import Model
 from typing import Dict, Any, List, Optional
 import logging
@@ -285,168 +285,81 @@ class GeneratorPlugin:
     def _build_composite_generator(self, vae_decoder: Model) -> Model:
         """
         Build composite generator model combining BiLSTM Z-generator + VAE decoder.
+        This version is modified to output sequences of length `decoder_input_window_size`.
         
-        According to REFERENCE.md architecture (and runtime error correction):
-        1. BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
-        2. VAE decoder inputs: decoder_input_z_seq (18,32), decoder_input_h_context (64), and decoder_input_conditions (10)
-        3. VAE decoder outputs: 23 features from reconstruction_out layer
-        4. Post-processing: Expand to 57 features (23 base + 34 technical indicators/other features)
+        Inputs:
+        - noise_input_sequence: (batch_size, seq_len, feeder_noise_dim)
+        - conditions_input_sequence: (batch_size, seq_len, conditional_features_dim)
+        - context_input_sequence: (batch_size, seq_len, context_vector_dim)
         
-        Args:
-            vae_decoder: Pre-trained VAE decoder model
-            
-        Returns:
-            Composite generator model that outputs 57 features
+        Output:
+        - expanded_feature_sequences: (batch_size, seq_len, 57)
         """
         try:
-            self.logger.info("Building composite generator model...")
-
-            # Input layers for the composite generator
-            noise_input = Input(shape=(self.params["feeder_noise_dim"],), name="noise_input")
-            conditions_input = Input(shape=(self.params["conditional_features_dim"],), name="conditions_input")
-            context_input = Input(shape=(self.params["context_vector_dim"],), name=self.params.get("decoder_input_name_context", "context_input"))
-
-            # BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
-            z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
-            z_reshaped = Reshape((18, 32), name="z_reshape")(z_dense)
-            z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshaped)
-            z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
-
-            # Get VAE decoder output (23 features)
-            # VAE decoder expects: decoder_input_z_seq, decoder_input_h_context, and decoder_input_conditions
-            # IMPORTANT: The order of inputs must match the order expected by the loaded_vae_decoder model.
-            # Corrected order based on runtime error: latent sequence, context, conditions.
-            # Logging `[inp.name for inp in vae_decoder.inputs]` in _load_model can confirm names and expected order.
+            self.logger.info("Building composite generator model (sequence output)...")
             
-            # Option 1: Corrected list-based input (addresses the immediate error)
-            self.logger.info(f"Passing inputs to VAE decoder in order: z_latent_seq, context_input, conditions_input")
-            decoder_output = vae_decoder([z_latent_seq, context_input, conditions_input])
+            seq_len = self.params["decoder_input_window_size"] # Should be 144
 
-            # Option 2: More robust dictionary-based input (recommended for clarity and safety)
-            # Ensure self.params["decoder_input_name_latent"], self.params["decoder_input_name_context"],
-            # and self.params["decoder_input_name_conditions"] match the actual input layer names of vae_decoder.
-            # vae_decoder_inputs = {
-            #     self.params["decoder_input_name_latent"]: z_latent_seq,
-            #     self.params["decoder_input_name_context"]: context_input,
-            #     self.params["decoder_input_name_conditions"]: conditions_input
-            # }
-            # self.logger.info(f"Passing inputs to VAE decoder by name: {list(vae_decoder_inputs.keys())}")
-            # decoder_output = vae_decoder(vae_decoder_inputs)
+            # Input layers for the composite generator (now sequences)
+            noise_input_sequence = Input(shape=(seq_len, self.params["feeder_noise_dim"],), name="noise_input_sequence")
+            conditions_input_sequence = Input(shape=(seq_len, self.params["conditional_features_dim"],), name="conditions_input_sequence")
+            context_input_sequence = Input(shape=(seq_len, self.params["context_vector_dim"],), name="context_input_sequence")
 
+            # --- Define the BiLSTM Z-generator as a sub-model ---
+            # This sub-model takes a single noise vector and produces a (18, 32) latent sequence
+            single_noise_input_for_z = Input(shape=(self.params["feeder_noise_dim"],), name="single_noise_input_for_z")
+            z_dense_layer = Dense(576, activation='relu', name="z_dense_sub")(single_noise_input_for_z)
+            z_reshape_layer = Reshape((self.params["internal_z_sequence_length"], self.params["internal_z_latent_dim"]), name="z_reshape_sub")(z_dense_layer)
+            z_bilstm_layer = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm_sub")(z_reshape_layer)
+            z_latent_seq_output = Conv1D(self.params["internal_z_latent_dim"], kernel_size=3, padding='same', activation='relu', name="z_conv_sub")(z_bilstm_layer)
+            
+            z_generator_submodel = Model(inputs=single_noise_input_for_z, outputs=z_latent_seq_output, name="z_generator_submodel")
+            
+            # Apply the Z-generator sub-model to each step of the noise_input_sequence
+            # Input: (batch, seq_len, feeder_noise_dim) -> Output: (batch, seq_len, 18, 32)
+            all_z_latent_sequences = TimeDistributed(z_generator_submodel, name="td_z_generator")(noise_input_sequence)
 
-            # Expand from 23 features to 57 features
-            # This simulates the post-processing that adds technical indicators and other features
-            expanded_features = Dense(57, activation='linear', name="feature_expansion")(decoder_output)
+            # Apply VAE decoder to each time step
+            # VAE decoder inputs per step: z_latent_seq (18,32), context (64), conditions (10)
+            # TimeDistributed inputs: 
+            #   all_z_latent_sequences (batch, seq_len, 18, 32)
+            #   context_input_sequence (batch, seq_len, 64)
+            #   conditions_input_sequence (batch, seq_len, 10)
+            # Output: (batch, seq_len, 23)
+            self.logger.info(f"Passing inputs to TimeDistributed VAE decoder in order: all_z_latent_sequences, context_input_sequence, conditions_input_sequence")
+            
+            # Ensure vae_decoder is set to trainable if not already done (it is done in _load_model)
+            # vae_decoder.trainable = True 
+            
+            decoder_output_sequences = TimeDistributed(vae_decoder, name="td_vae_decoder")([all_z_latent_sequences, context_input_sequence, conditions_input_sequence])
+
+            # Expand from 23 features to 57 features for each time step
+            # Input: (batch, seq_len, 23) -> Output: (batch, seq_len, 57)
+            feature_expansion_layer = Dense(57, activation='linear', name="feature_expansion_dense")
+            expanded_feature_sequences = TimeDistributed(feature_expansion_layer, name="td_feature_expansion")(decoder_output_sequences)
 
             # Create the composite model
             composite_generator = Model(
-                inputs=[noise_input, conditions_input, context_input],
-                outputs=expanded_features,
-                name="composite_generator"
+                inputs=[noise_input_sequence, conditions_input_sequence, context_input_sequence],
+                outputs=expanded_feature_sequences,
+                name="composite_sequence_generator"
             )
 
-            # Compile the model
-            composite_generator.compile(
-                optimizer='adam',
-                loss='mse'
-            )
+            # Compile the model (optional here, as GANTrainerPlugin will compile the combined GAN)
+            # composite_generator.compile(
+            #     optimizer='adam',
+            #     loss='mse' # Placeholder loss
+            # )
 
-            self.logger.info(f"Composite generator built with {composite_generator.count_params()} parameters")
+            self.logger.info(f"Composite sequence generator built with {composite_generator.count_params()} parameters.")
+            # composite_generator.summary(print_fn=self.logger.info)
             return composite_generator
 
         except Exception as e:
-            self.logger.error(f"Error building composite generator: {e}")
-            # Consider re-raising the exception or returning a specific error indicator.
-            # If this path is taken, the function will implicitly return None.
-            # This might conflict with the type hint '-> Model'.
-            # Adding an explicit return None for clarity if an error is caught and not re-raised.
+            self.logger.error(f"Error building composite sequence generator: {e}")
+            self.logger.error(traceback.format_exc())
             return None 
 
-        # NOTE: The following block of code appears to be unreachable if the 'try' block above succeeds,
-        # as that block contains 'return composite_generator'.
-        # If the 'try' block fails and the 'except' block is executed (as modified above to return None),
-        # this code is also not reached.
-        # This section also references 'feeder_noise_input' and 'loaded_vae_decoder'
-        # which might not be in scope here, potentially leading to NameErrors.
-        # Please review the logical structure of this method.
-
-        # Assuming 'feeder_noise_input' should be defined for this path if it were reachable.
-        # For example:
-        # feeder_noise_input = Input(shape=(self.params["feeder_noise_dim"],), name="feeder_noise_input_alternate_path")
-
-
-        # For simplicity, let's assume its dimensionality is fixed or derived from decoder_output_feature_names
-        # For now, let's use context_vector_dim directly, assuming it's prepared correctly.
-        previous_step_output_input = Input(
-            shape=(self.params["context_vector_dim"],), # This will feed h_context
-            name="composite_generator_previous_step_output_input"
-        )
-        # These are the date/time conditions for the current step
-        current_step_conditions_input = Input(
-            shape=(self.params["conditional_features_dim"],), # This will feed decoder_input_conditions
-            name="composite_generator_current_step_conditions_input"
-        )
-
-        # --- 3. Build the internal Z-sequence generator sub-model ---
-        # This sub-model takes feeder_noise_input and generates decoder_input_z_seq
-        
-        # The 'feeder_noise_input' used below would need to be defined in this execution path.
-        # If this code block is intended to be functional, ensure 'feeder_noise_input' is correctly sourced.
-        # x = Dense(self.params["internal_z_sequence_length"] * self.params["internal_z_latent_dim"], activation='relu')(feeder_noise_input) # Increased units for better representation
-        # x = Reshape((self.params["internal_z_sequence_length"], self.params["internal_z_latent_dim"]))(x) # Reshape to (batch, 18, 32) directly if Dense output matches
-        
-        # # Bidirectional LSTM layer
-        # x = Bidirectional(LSTM(self.params["internal_z_latent_dim"] * 2, return_sequences=True))(x) # More units in LSTM
-        
-        # # Conv1D layer to refine features per timestep and ensure correct output dimension
-        # internal_z_seq_output = Conv1D(
-        #     filters=self.params["internal_z_latent_dim"], 
-        #     kernel_size=1, # Pointwise convolution to adjust feature dimension
-        #     padding="same", 
-        #     activation='tanh', # tanh is common for latent vectors
-        #     name="internal_z_seq_output"
-        # )(x)
-        
-        # # --- 4. Prepare inputs for the loaded VAE Decoder ---
-        # # 'loaded_vae_decoder' is not in scope here. This would cause a NameError.
-        # vae_decoder_input_z_seq = internal_z_seq_output 
-        # vae_decoder_input_h_context = previous_step_output_input
-        # vae_decoder_input_conditions = current_step_conditions_input
-
-        # # Log the names of the input layers of the loaded VAE decoder
-        # vae_decoder_actual_input_names = [inp.name for inp in loaded_vae_decoder.inputs]
-        # self.logger.info(f"Loaded VAE Decoder actual input layer names: {vae_decoder_actual_input_names}")
-
-        # # Prepare the dictionary of inputs for the VAE decoder
-        # # The keys in this dictionary MUST match the names of the input layers of the loaded_vae_decoder
-        # # or the names provided when the VAE decoder model was originally defined.
-        
-        # # Expected names from params:
-        # # self.params[\"decoder_input_name_latent\"] -> 'decoder_input_z_seq'
-        # # self.params[\"decoder_input_name_conditions\"] -> 'decoder_input_conditions'
-        # # self.params[\"decoder_input_name_context\"] -> 'decoder_input_h_context'
-        # # self.params[\"decoder_input_name_window\"] -> 'input_x_window' (potentially)
-
-        # vae_inputs_for_loaded_decoder = {}
-        
-        # # Map our generated/provided tensors to the VAE decoder's *actual* input layers
-        # # This requires knowing the exact names the VAE decoder expects.
-
-        # # Attempt to map by the names defined in params
-        # # This is crucial: the names must match what the loaded_vae_decoder expects.
-        # # For example, if loaded_vae_decoder.inputs[0] is named 'z_input_for_vae', then
-        # # self.params[\"decoder_input_name_latent\"] should be 'z_input_for_vae'.
-        
-        # # Let's iterate through the VAE decoder's actual inputs and try to map them
-        # # from our prepared tensors using the names stored in self.params.
-        
-        # param_to_tensor_map = {
-        #     self.params["decoder_input_name_latent"]: vae_decoder_input_z_seq,
-        #     self.params["decoder_input_name_conditions"]: vae_decoder_input_conditions,
-        #     self.params["decoder_input_name_context"]: vae_decoder_input_h_context,
-        #     # How to handle self.params[\"decoder_input_name_window\"] ('input_x_window')?
-        #     # If the VAE decoder requires 'input_x_window', we need to provide it.
-        #     # For a GAN generating from noise, this input might not be directly available
-        #     # from the composite generator's external inputs.
-        #     # It might need to be a learned constant, zeros, or derived differently.
-        # }
+    def get_model(self) -> Optional[Model]:
+        """Returns the built generator model."""
+        return self.sequential_model # Or self.model, whichever holds the final composite generator
