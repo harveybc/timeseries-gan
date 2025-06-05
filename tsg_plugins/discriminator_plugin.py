@@ -99,10 +99,11 @@ class DiscriminatorPlugin:
         
         # Initialize model
         self.model: Optional[Model] = None
+        self.compiled = False
         
         # Initialize model if configured
         if not self.params.get("load_pretrained_model", False):
-            self.build_model()
+            self._build_model()
         else:
             self.load_model()
     
@@ -355,15 +356,26 @@ class DiscriminatorPlugin:
         self.model.save(filepath)
         self.logger.info(f"Discriminator model saved to {filepath}")
     
-    def load_model(self, filepath: str) -> None:
+    def load_model(self) -> None:
         """Load a pre-trained discriminator model."""
         try:
-            self.model = tf.keras.models.load_model(filepath)
+            model_path = self.params.get("pretrained_model_path")
+            if not model_path:
+                raise ValueError("pretrained_model_path not specified in parameters")
+            
+            self.logger.info(f"Loading pre-trained discriminator model from: {model_path}")
+            self.model = tf.keras.models.load_model(model_path)
             self.compiled = True
-            self.logger.info(f"Discriminator model loaded from {filepath}")
+            self.logger.info("Pre-trained discriminator model loaded successfully")
+            
         except Exception as e:
-            self.logger.error(f"Error loading model from {filepath}: {e}")
+            self.logger.error(f"Error loading pre-trained model: {e}")
+            self.model = None
             raise
+    
+    def build_model(self) -> None:
+        """Public interface for building the discriminator model."""
+        self._build_model()
     
     def get_debug_info(self) -> Dict[str, Any]:
         """Get debug information about the discriminator."""
