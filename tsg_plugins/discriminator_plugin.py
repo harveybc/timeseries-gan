@@ -356,6 +356,15 @@ class DiscriminatorPlugin:
             self.logger.error(f"Error loading model from {filepath}: {e}")
             raise
     
+    def get_model(self) -> Optional[Model]:
+        """
+        Get the discriminator model.
+        
+        Returns:
+            The discriminator Keras model, or None if not built
+        """
+        return self.model
+    
     def get_debug_info(self) -> Dict[str, Any]:
         """Get debug information about the discriminator."""
         debug_info = {}
