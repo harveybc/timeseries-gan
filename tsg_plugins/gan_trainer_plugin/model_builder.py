@@ -122,30 +122,33 @@ class ModelBuilder:
             # Freeze discriminator weights for GAN training
             discriminator.trainable = False
             
-            # Get generator input shape
-            if hasattr(generator, 'input_shape'):
-                if isinstance(generator.input_shape, list):
-                    # Multiple inputs - use the first one (latent input)
-                    input_shape = generator.input_shape[0][1:]  # Remove batch dimension
-                else:
-                    input_shape = generator.input_shape[1:]  # Remove batch dimension
-            else:
-                # Default input shape
-                seq_len = self.params.get("seq_len", 18)
-                latent_dim = self.params.get("latent_dim", 32)
-                input_shape = (seq_len, latent_dim)
+            # Create the 3 inputs required by VAE decoder as per REFERENCE.md:
+            # 1. decoder_input_z_seq: (batch_size, 18, 32) - latent sequence
+            # 2. decoder_input_h_context: (batch_size, 64) - context vector  
+            # 3. decoder_input_conditions: (batch_size, 10) - condition vector
             
-            # Create GAN input
-            gan_input = Input(shape=input_shape, name="gan_input")
+            seq_len = self.params.get("seq_len", 18)
+            latent_dim = self.params.get("latent_dim", 32)
+            context_dim = self.params.get("context_dim", 64)
+            condition_dim = self.params.get("condition_dim", 10)
             
-            # Generate fake data
-            generated_data = generator(gan_input)
+            # Create the 3 GAN inputs
+            gan_input_z_seq = Input(shape=(seq_len, latent_dim), name="gan_input_z_seq")
+            gan_input_h_context = Input(shape=(context_dim,), name="gan_input_h_context")
+            gan_input_conditions = Input(shape=(condition_dim,), name="gan_input_conditions")
+            
+            # Generate fake data using all 3 inputs
+            generated_data = generator([gan_input_z_seq, gan_input_h_context, gan_input_conditions])
             
             # Get discriminator prediction on generated data
             gan_output = discriminator(generated_data)
             
-            # Create combined model
-            gan_model = Model(inputs=gan_input, outputs=gan_output, name="gan")
+            # Create combined model with 3 inputs
+            gan_model = Model(
+                inputs=[gan_input_z_seq, gan_input_h_context, gan_input_conditions], 
+                outputs=gan_output, 
+                name="gan"
+            )
             
             # Compile GAN model
             gan_model.compile(
