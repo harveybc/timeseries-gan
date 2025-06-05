@@ -102,9 +102,17 @@ class PluginInterface:
         # Set default values
         self.seq_len = self.params.get("seq_len", 144)
         self.latent_dim = self.params.get("latent_dim", 128)
-        self.num_discriminator_features = len(
-            self.params.get("discriminator_input_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"])
-        )
+        
+        # Use the full feature list for discriminator as per REFERENCE.md
+        # The discriminator processes the complete 57-feature output from GeneratorPlugin
+        feature_names_for_discriminator = self.params.get("feature_names_for_discriminator_ordered", [])
+        if feature_names_for_discriminator:
+            self.num_discriminator_features = len(feature_names_for_discriminator)
+        else:
+            # Fallback to default if not configured
+            self.num_discriminator_features = len(
+                self.params.get("discriminator_input_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"])
+            )
         
         # Try to extract from generator input shape
         if not hasattr(self.generator, 'input_shape'):
