@@ -10,8 +10,10 @@ DEFAULT_VALUES = {
     # Plugin selection
     "feeder": "default_feeder",
     "generator": "default_generator",
+    "discriminator": "default_discriminator", # Ensure this line exists
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
+    "trainer": "gan_trainer", # Ensure this line exists
 
     # Data for evaluation and base for generation
     # "real_data_file": "examples/data/phase_3/normalized_d4.csv", # REMOVED - Redundant, use x_train_file

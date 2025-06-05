@@ -74,6 +74,9 @@ setup(
             "vae_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin",
             "default_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin"
         ],
+        "discriminator.plugins": [
+            "default_discriminator = tsg_plugins.discriminator_plugin:DiscriminatorPlugin",
+        ],
         "evaluator.plugins": [
             "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin",
         ],

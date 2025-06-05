@@ -431,7 +431,6 @@ class GeneratorPlugin:
         
         # # Map our generated/provided tensors to the VAE decoder's *actual* input layers
         # # This requires knowing the exact names the VAE decoder expects.
-        # # We assume the names in plugin_params are the target names for the VAE decoder's inputs.
 
         # # Attempt to map by the names defined in params
         # # This is crucial: the names must match what the loaded_vae_decoder expects.

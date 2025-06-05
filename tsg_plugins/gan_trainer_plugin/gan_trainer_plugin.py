@@ -16,7 +16,12 @@ Author: TimeSeries-GAN Team
 """
 
 import logging
-import traceback
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import Progbar
 from typing import Dict, Any, Optional
 from copy import deepcopy
 
@@ -195,7 +200,6 @@ class GANTrainerPlugin:
             
         except Exception as e:
             self.logger.error(f"GAN training failed: {e}")
-            traceback.print_exc()
             raise
     
     def save_models(self, path_prefix: str = "gan_model_"):
@@ -344,7 +348,6 @@ class GANTrainerPlugin:
             
         except Exception as e:
             self.logger.error(f"GAN training process failed: {e}")
-            traceback.print_exc()
             raise
     
     def get_debug_info(self):
@@ -383,3 +386,145 @@ class GANTrainerPlugin:
         if not hasattr(self, '_debug_info'):
             self._debug_info = {}
         self._debug_info[key] = value
+
+    def _ensure_models_are_built(self) -> bool:
+        """Ensures generator, discriminator, and GAN models are built."""
+        if self.generator_plugin and hasattr(self.generator_plugin, 'get_model'):
+            self.generator_model = self.generator_plugin.get_model()
+        else:
+            self.logger.warning("GANTrainer: Generator plugin not available or no get_model method.")
+            self.generator_model = None
+
+        if self.discriminator_plugin and hasattr(self.discriminator_plugin, 'get_model'):
+            self.discriminator_model = self.discriminator_plugin.get_model()
+        else:
+            self.logger.warning("GANTrainer: Discriminator plugin not available or no get_model method.")
+            self.discriminator_model = None
+
+        if self.generator_model and self.discriminator_model:
+            # Only rebuild GAN model if it's not there or if key components might have changed
+            # For simplicity, we can rebuild if it's None. More complex logic could check for changes.
+            if not self.gan_model:
+                self.logger.info("GANTrainer: Building combined GAN model.")
+                self._build_gan_model(self.generator_model, self.discriminator_model)
+        else:
+            self.logger.warning("GANTrainer: Generator or Discriminator model is not available. GAN model not built.")
+            self.gan_model = None
+        
+        if self.generator_model and self.discriminator_model and self.gan_model:
+            self.logger.info("GANTrainer: All required models (Generator, Discriminator, GAN) are available.")
+            return True
+        else:
+            # Log which model is missing
+            if not self.generator_model: self.logger.warning("GANTrainer: Generator model is MISSING.")
+            if not self.discriminator_model: self.logger.warning("GANTrainer: Discriminator model is MISSING.")
+            if not self.gan_model: self.logger.warning("GANTrainer: Combined GAN model is MISSING (likely due to missing G or D).")
+            return False
+
+    def _build_gan_model(self, generator: Model, discriminator: Model) -> None:
+        """Builds the combined GAN model."""
+        if not generator or not discriminator:
+            self.logger.error("Cannot build GAN model: Generator or Discriminator is None.")
+            self.gan_model = None
+            return
+
+        discriminator.trainable = False
+        
+        gan_inputs = generator.inputs # Generator model's inputs
+        generator_output = generator(gan_inputs)
+        gan_output = discriminator(generator_output)
+        
+        self.gan_model = Model(inputs=gan_inputs, outputs=gan_output, name="combined_gan")
+        
+        gan_optimizer = Adam(
+            learning_rate=self.params.get("generator_lr", 1e-4), 
+            beta_1=self.params.get("generator_beta1", 0.5) # Ensure these params are in plugin_params
+        )
+        self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+        self.logger.info("Combined GAN model built and compiled.")
+        # self.gan_model.summary(print_fn=self.logger.info)
+
+    def train(self, x_real_df: pd.DataFrame, epochs: int, batch_size: int) -> None:
+        self.logger.info(f"Starting GAN training for {epochs} epochs with batch size {batch_size}.")
+
+        if not self._ensure_models_are_built():
+            self.logger.error("GAN Training prerequisites not met: Models are not built or became unavailable.")
+            raise ValueError("Generator, discriminator, or GAN model not available for training. Check plugin configurations and model building logs.")
+
+        # Ensure plugins are available
+        if not self.feeder_plugin:
+            raise ValueError("Feeder plugin is not available for training.")
+
+        # Example training loop structure (adapt to your specific needs)
+        num_batches = len(x_real_df) // batch_size
+        
+        # Discriminator optimizer (if not already compiled in DiscriminatorPlugin with these params)
+        # Or, ensure DiscriminatorPlugin's compile method uses these params
+        # For this example, we assume DiscriminatorPlugin handles its own compilation.
+        
+        for epoch in range(epochs):
+            self.logger.info(f"Epoch {epoch+1}/{epochs}")
+            progbar = Progbar(num_batches)
+            
+            for batch_idx in range(num_batches):
+                # 1. Train Discriminator
+                # Get real samples
+                real_samples_df = x_real_df.sample(n=batch_size) 
+                # Convert real_samples_df to numpy array matching discriminator input shape
+                # This step is highly dependent on your data structure and preprocessing
+                # Example: real_sequences = self.feeder_plugin.preprocess_real_data(real_samples_df, batch_size)
+                # For now, let's assume a placeholder if feeder doesn't directly provide this:
+                if not hasattr(self.feeder_plugin, 'get_real_data_batch'):
+                     self.logger.warning("Feeder plugin does not have 'get_real_data_batch'. Using placeholder for real data.")
+                     # This needs proper implementation based on how real data is fed.
+                     # Assuming real_sequences are (batch_size, seq_len, num_features)
+                     # real_sequences = np.random.rand(batch_size, self.discriminator_plugin.params['sequence_length'], self.discriminator_plugin.params['num_features'])
+                     # This is a critical part: how do you get correctly shaped real data?
+                     # For now, skipping direct real data processing to focus on model availability.
+                     # This part needs to be correctly implemented based on your data pipeline.
+                     # Let's assume x_real_df is already preprocessed and we can slice it.
+                     idx = np.random.choice(len(x_real_df), batch_size)
+                     # This is a simplification. You need to ensure x_real_df is in the correct format
+                     # or use feeder_plugin to prepare it.
+                     # real_sequences = x_real_df.iloc[idx].values # This is likely NOT the right shape.
+                     # Placeholder:
+                     real_sequences_shape = (batch_size, self.discriminator_model.input_shape[1], self.discriminator_model.input_shape[2])
+                     real_sequences = np.random.rand(*real_sequences_shape)
+
+
+                # Generate fake samples
+                # The feeder provides inputs for the generator_model
+                noise, conditions, context = self.feeder_plugin.get_input_for_batch(batch_size)
+                fake_sequences = self.generator_model.predict([noise, conditions, context])
+
+                # Train discriminator
+                # Ensure discriminator_plugin.train_on_batch uses its configured label smoothing
+                d_loss_real = self.discriminator_model.train_on_batch(real_sequences, np.ones((batch_size, 1)) * (1.0 - self.params.get("label_smoothing_discriminator", 0.1)))
+                d_loss_fake = self.discriminator_model.train_on_batch(fake_sequences, np.zeros((batch_size, 1)) + self.params.get("label_smoothing_discriminator", 0.1))
+                d_loss = 0.5 * np.add(d_loss_real, d_loss_fake) # d_loss is [loss, accuracy]
+
+                # 2. Train Generator (via combined GAN model)
+                # The feeder provides inputs for the gan_model (which are generator_model's inputs)
+                noise, conditions, context = self.feeder_plugin.get_input_for_batch(batch_size)
+                # Target for generator is to make discriminator think fake samples are real
+                g_loss = self.gan_model.train_on_batch([noise, conditions, context], np.ones((batch_size, 1))) # g_loss is [loss, accuracy]
+
+                progbar.update(batch_idx + 1, values=[("D Loss", d_loss[0]), ("D Acc", d_loss[1]), ("G Loss", g_loss[0]), ("G Acc", g_loss[1])])
+
+            self.logger.info(f"End of Epoch {epoch+1}: D_loss={d_loss[0]:.4f}, D_acc={d_loss[1]:.4f}, G_loss={g_loss[0]:.4f}, G_acc={g_loss[1]:.4f}")
+
+            if (epoch + 1) % self.params.get("gan_save_interval", 100) == 0:
+                self._save_models(epoch + 1)
+        
+        self._save_models(epochs) # Save final models
+        self.logger.info("GAN training process finished.")
+
+    def _save_models(self, epoch: int) -> None:
+        """Saves the generator and discriminator models."""
+        model_dir = self.params.get("gan_model_dir", "models/gan_trained")
+        os.makedirs(model_dir, exist_ok=True)
+        if self.generator_model:
+            self.generator_model.save(os.path.join(model_dir, f"generator_epoch_{epoch}.keras"))
+        if self.discriminator_model:
+            self.discriminator_model.save(os.path.join(model_dir, f"discriminator_epoch_{epoch}.keras"))
+        self.logger.info(f"Models saved at epoch {epoch} to {model_dir}")
