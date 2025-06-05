@@ -11,7 +11,7 @@ import traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, LSTM, Bidirectional, Conv1D, Dense, Reshape, Concatenate, ZeroPadding1D, TimeDistributed # Ensure TimeDistributed is imported
+from tensorflow.keras.layers import Input, LSTM, Bidirectional, Conv1D, Dense, Reshape, Concatenate, ZeroPadding1D, TimeDistributed, Lambda # Ensure TimeDistributed and Lambda are imported
 from tensorflow.keras.models import Model
 from typing import Dict, Any, List, Optional
 import logging
