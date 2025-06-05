@@ -83,9 +83,6 @@ setup(
         "trainer.plugins": [
             "gan_trainer = tsg_plugins.gan_trainer_plugin.gan_trainer_plugin:GANTrainerPlugin",
         ],
-        "preprocessor.plugins": [
-            "stl_preprocessor = tsg_plugins.feeder_plugin.data_preprocessor:DataPreprocessor",
-        ],
     },
 
     include_package_data=True,

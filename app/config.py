@@ -22,11 +22,7 @@ DEFAULT_VALUES = {
     "x_test_file": "examples/data/phase_3/normalized_d6.csv",
     "y_test_file": "examples/data/phase_3/normalized_d6.csv",
     "target_column": "CLOSE", 
-    "stl_period":24,
     "predicted_horizons": [24,48,72,96,120,144],
-    "use_stl": True,
-    "use_wavelets": True,
-    "use_multi_tapper": True,
 
     "dataset_periodicity": "1h", 
 
@@ -71,11 +67,7 @@ DEFAULT_VALUES = {
         "day_of_week_sin", "day_of_week_cos",
         "day_of_year_sin", "day_of_year_cos",
         "S&P500_Close", "vix_close",
-        "log_return", # log_return is now expected from decoder
-        "stl_trend", "stl_seasonal", "stl_resid",
-        "wav_approx_L2", "wav_detail_L1", "wav_detail_L2",
-        "mtm_band_0", "mtm_band_1", "mtm_band_2", "mtm_band_3",
-        "BC-BO", "BH-BL", "BH-BO", "BO-BL",
+        "BC-BO", "BH-BL",
         # Add all CLOSE tick features that are used by VAE decoder
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
