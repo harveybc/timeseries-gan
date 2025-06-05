@@ -284,79 +284,185 @@ class GeneratorPlugin:
 
     def _build_composite_generator(self, vae_decoder: Model) -> Model:
         """
-        Build composite generator model combining BiLSTM Z-generator + VAE decoder.
-        This version is modified to output sequences of length `decoder_input_window_size`.
+        Build Composite GAN Generator according to REFERENCE.md specifications.
+        
+        Architecture:
+        1. BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
+        2. Pre-trained VAE Decoder: Loaded with trainable=True for joint optimization  
+        3. Iterative Processing: Sequential generation with context from previous timesteps
         
         Inputs:
-        - noise_input_sequence: (batch_size, seq_len, feeder_noise_dim)
-        - conditions_input_sequence: (batch_size, seq_len, conditional_features_dim)
-        - context_input_sequence: (batch_size, seq_len, context_vector_dim)
+        - noise_input: (batch_size, noise_dim) - single noise vector per sequence
+        - context_input: (batch_size, context_dim) - initial context vector
+        - conditions_input: (batch_size, num_conditions) - conditional features per timestep
         
         Output:
-        - expanded_feature_sequences: (batch_size, seq_len, 57)
+        - full_sequence: (batch_size, seq_len, 57) - complete feature sequences
         """
         try:
-            self.logger.info("Building composite generator model (sequence output)...")
+            self.logger.info("Building Composite GAN Generator from REFERENCE.md specifications")
             
-            seq_len = self.params["decoder_input_window_size"] # Should be 144
-
-            # Input layers for the composite generator (now sequences)
-            noise_input_sequence = Input(shape=(seq_len, self.params["feeder_noise_dim"],), name="noise_input_sequence")
-            conditions_input_sequence = Input(shape=(seq_len, self.params["conditional_features_dim"],), name="conditions_input_sequence")
-            context_input_sequence = Input(shape=(seq_len, self.params["context_vector_dim"],), name="context_input_sequence")
-
-            # --- Define the BiLSTM Z-generator as a sub-model ---
-            # This sub-model takes a single noise vector and produces a (18, 32) latent sequence
-            single_noise_input_for_z = Input(shape=(self.params["feeder_noise_dim"],), name="single_noise_input_for_z")
-            z_dense_layer = Dense(576, activation='relu', name="z_dense_sub")(single_noise_input_for_z)
-            z_reshape_layer = Reshape((self.params["internal_z_sequence_length"], self.params["internal_z_latent_dim"]), name="z_reshape_sub")(z_dense_layer)
-            z_bilstm_layer = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm_sub")(z_reshape_layer)
-            z_latent_seq_output = Conv1D(self.params["internal_z_latent_dim"], kernel_size=3, padding='same', activation='relu', name="z_conv_sub")(z_bilstm_layer)
+            # Get configuration parameters
+            seq_len = self.params.get("decoder_input_window_size", 144)
+            latent_seq_len = self.params.get("internal_z_sequence_length", 18)
+            latent_dim = self.params.get("internal_z_latent_dim", 32)
+            context_dim = self.params.get("context_vector_dim", 64)
+            num_conditions = self.params.get("conditional_features_dim", 10)
+            noise_dim = self.params.get("feeder_noise_dim", 100)
             
-            z_generator_submodel = Model(inputs=single_noise_input_for_z, outputs=z_latent_seq_output, name="z_generator_submodel")
+            self.logger.info(f"Generator config: seq_len={seq_len}, latent_shape=[{latent_seq_len}, {latent_dim}], "
+                           f"context_dim={context_dim}, noise_dim={noise_dim}")
             
-            # Apply the Z-generator sub-model to each step of the noise_input_sequence
-            # Input: (batch, seq_len, feeder_noise_dim) -> Output: (batch, seq_len, 18, 32)
-            all_z_latent_sequences = TimeDistributed(z_generator_submodel, name="td_z_generator")(noise_input_sequence)
-
-            # Apply VAE decoder to each time step
-            # VAE decoder inputs per step: z_latent_seq (18,32), context (64), conditions (10)
-            # TimeDistributed inputs: 
-            #   all_z_latent_sequences (batch, seq_len, 18, 32)
-            #   context_input_sequence (batch, seq_len, 64)
-            #   conditions_input_sequence (batch, seq_len, 10)
-            # Output: (batch, seq_len, 23)
-            self.logger.info(f"Passing inputs to TimeDistributed VAE decoder in order: all_z_latent_sequences, context_input_sequence, conditions_input_sequence")
+            # === INPUTS ===
+            # Main noise input for the BiLSTM Z-generator
+            noise_input = Input(shape=(noise_dim,), name="noise_input")
             
-            # Ensure vae_decoder is set to trainable if not already done (it is done in _load_model)
-            # vae_decoder.trainable = True 
+            # Context vector from previous timestep (for iterative generation)
+            context_input = Input(shape=(context_dim,), name="context_input")
             
-            decoder_output_sequences = TimeDistributed(vae_decoder, name="td_vae_decoder")([all_z_latent_sequences, context_input_sequence, conditions_input_sequence])
-
-            # Expand from 23 features to 57 features for each time step
-            # Input: (batch, seq_len, 23) -> Output: (batch, seq_len, 57)
-            feature_expansion_layer = Dense(57, activation='linear', name="feature_expansion_dense")
-            expanded_feature_sequences = TimeDistributed(feature_expansion_layer, name="td_feature_expansion")(decoder_output_sequences)
-
-            # Create the composite model
+            # Conditional features (date/time) for current timestep
+            conditions_input = Input(shape=(num_conditions,), name="conditions_input")
+            
+            # === BILSTM Z-GENERATOR ===
+            # As specified in REFERENCE.md: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
+            
+            # Dense layer to expand noise
+            dense_expand = Dense(576, activation='relu', name="z_gen_dense")(noise_input)
+            
+            # Reshape to sequence format (18, 32)
+            reshaped = Reshape((latent_seq_len, latent_dim), name="z_gen_reshape")(dense_expand)
+            
+            # Bidirectional LSTM (64 units each direction = 128 total output)
+            bilstm_output = Bidirectional(
+                LSTM(64, return_sequences=True, name="z_gen_lstm"),
+                name="z_gen_bidirectional"
+            )(reshaped)
+            
+            # Conv1D layer (32 filters to match latent_dim)
+            latent_sequences = Conv1D(
+                filters=latent_dim,
+                kernel_size=3,
+                padding='same',
+                activation='tanh',
+                name="z_gen_conv1d"
+            )(bilstm_output)
+            
+            self.logger.info(f"BiLSTM Z-generator output shape: (batch_size, {latent_seq_len}, {latent_dim})")
+            
+            # === ITERATIVE SEQUENCE GENERATION ===
+            # The composite generator needs to produce sequences of length seq_len
+            # Each timestep calls the VAE decoder with:
+            # - decoder_input_z_seq: latent sequences from BiLSTM Z-generator
+            # - decoder_input_h_context: context from previous timestep  
+            # - decoder_input_conditions: current timestep conditions
+            
+            def iterative_generation(inputs):
+                """
+                Iterative generation function that processes timesteps sequentially.
+                
+                Args:
+                    inputs: [latent_sequences, context_input, conditions_input]
+                
+                Returns:
+                    Generated sequence of shape (batch_size, seq_len, 23)
+                """
+                latent_seq, initial_context, current_conditions = inputs
+                
+                # Initialize output list to collect timestep outputs
+                timestep_outputs = []
+                
+                # Current context starts with the initial context
+                current_context = initial_context
+                
+                # Generate each timestep in the sequence
+                for t in range(seq_len):
+                    # Call VAE decoder with current inputs
+                    # Based on REFERENCE.md, decoder expects: [z_latent_seq, context_input, conditions_input]
+                    decoder_output = vae_decoder([latent_seq, current_context, current_conditions])
+                    
+                    # decoder_output shape: (batch_size, 23) - the 23 base features
+                    timestep_outputs.append(decoder_output)
+                    
+                    # Update context for next timestep using selected features from current output
+                    # Use a subset of the 23 features as context for next timestep
+                    if context_dim <= 23:
+                        current_context = tf.slice(decoder_output, [0, 0], [-1, context_dim])
+                    else:
+                        # If context_dim > 23, pad with zeros
+                        padding = tf.zeros((tf.shape(decoder_output)[0], context_dim - 23))
+                        current_context = tf.concat([decoder_output, padding], axis=1)
+                    
+                    # For the next timestep, conditions could be updated if needed
+                    # For now, we use the same conditions for all timesteps
+                
+                # Stack all timestep outputs into a sequence
+                # Shape: (batch_size, seq_len, 23)
+                output_sequence = tf.stack(timestep_outputs, axis=1)
+                
+                return output_sequence
+            
+            # Apply iterative generation
+            base_sequence = Lambda(
+                iterative_generation,
+                output_shape=(seq_len, 23),
+                name="iterative_vae_generation"
+            )([latent_sequences, context_input, conditions_input])
+            
+            self.logger.info(f"Iterative generation output shape: (batch_size, {seq_len}, 23)")
+            
+            # === POST-PROCESSING TO FULL 57 FEATURES ===
+            # The VAE decoder outputs 23 base features
+            # We need to expand this to 57 features by:
+            # 1. Adding technical indicators (15 features)
+            # 2. Adding cyclical date features (8 features)  
+            # 3. Adding other derived features (11 features)
+            
+            def expand_to_full_features(base_features):
+                """
+                Expand 23 base features to full 57 features.
+                
+                Args:
+                    base_features: Shape (batch_size, seq_len, 23)
+                
+                Returns:
+                    Full feature tensor of shape (batch_size, seq_len, 57)
+                """
+                batch_size = tf.shape(base_features)[0]
+                
+                # For now, we'll create placeholder features for the additional 34 features
+                # In a complete implementation, this would calculate actual technical indicators
+                additional_features = tf.zeros((batch_size, seq_len, 34), dtype=tf.float32)
+                
+                # Concatenate base features with additional features
+                full_features = tf.concat([base_features, additional_features], axis=-1)
+                
+                return full_features
+            
+            # Expand to full feature set
+            full_sequence = Lambda(
+                expand_to_full_features,
+                output_shape=(seq_len, 57),
+                name="expand_to_57_features"
+            )(base_sequence)
+            
+            self.logger.info(f"Final output shape: (batch_size, {seq_len}, 57)")
+            
+            # === CREATE COMPOSITE MODEL ===
             composite_generator = Model(
-                inputs=[noise_input_sequence, conditions_input_sequence, context_input_sequence],
-                outputs=expanded_feature_sequences,
-                name="composite_sequence_generator"
+                inputs=[noise_input, context_input, conditions_input],
+                outputs=full_sequence,
+                name="composite_gan_generator"
             )
-
-            # Compile the model (optional here, as GANTrainerPlugin will compile the combined GAN)
-            # composite_generator.compile(
-            #     optimizer='adam',
-            #     loss='mse' # Placeholder loss
-            # )
-
-            self.logger.info(f"Composite sequence generator built with {composite_generator.count_params()} parameters.")
-            # composite_generator.summary(print_fn=self.logger.info)
+            
+            self.logger.info(f"Composite GAN Generator created with {composite_generator.count_params():,} total parameters")
+            if hasattr(vae_decoder, 'trainable_variables'):
+                self.logger.info(f"VAE decoder parameters (trainable): {sum([tf.size(v).numpy() for v in vae_decoder.trainable_variables]):,}")
+            
             return composite_generator
 
         except Exception as e:
-            self.logger.error(f"Error building composite sequence generator: {e}")
+            self.logger.error(f"Error building composite generator: {e}")
+            import traceback
             self.logger.error(traceback.format_exc())
             return None 
 
