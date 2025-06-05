@@ -110,43 +110,37 @@ class ModelBuilder:
         Build combined GAN model.
         
         Args:
-            generator: Pre-trained generator model
+            generator: Pre-trained generator model (GeneratorPlugin output)
             discriminator: Discriminator model
         
         Returns:
             Combined GAN model
         """
         self.logger.info("Building combined GAN model")
+        self.logger.info(f"Generator input spec: {[input.shape for input in generator.inputs] if generator.inputs else 'No inputs'}")
+        self.logger.info(f"Generator output spec: {generator.output.shape if hasattr(generator, 'output') else 'No output'}")
+        self.logger.info(f"Discriminator input spec: {discriminator.input.shape if hasattr(discriminator, 'input') else 'No input'}")
         
         try:
             # Freeze discriminator weights for GAN training
             discriminator.trainable = False
             
-            # Create the 3 inputs required by VAE decoder as per REFERENCE.md:
-            # 1. decoder_input_z_seq: (batch_size, 18, 32) - latent sequence
-            # 2. decoder_input_h_context: (batch_size, 64) - context vector  
-            # 3. decoder_input_conditions: (batch_size, 10) - condition vector
+            # The generator (GeneratorPlugin) should output sequences that match discriminator input
+            # According to REFERENCE.md, the final output should be 57-feature sequences
+            # The generator already has the correct inputs/outputs structure
             
-            # Use exact dimensions from REFERENCE.md for VAE decoder inputs
-            latent_seq_len = 18  # Fixed latent sequence length from REFERENCE.md
-            latent_dim = 32      # Fixed latent dimension from REFERENCE.md
-            context_dim = 64     # Fixed context dimension from REFERENCE.md
-            condition_dim = 10   # Fixed condition dimension from REFERENCE.md
+            # Use generator's actual input structure
+            gan_inputs = generator.inputs
             
-            # Create the 3 GAN inputs with exact shapes from REFERENCE.md
-            gan_input_z_seq = Input(shape=(latent_seq_len, latent_dim), name="gan_input_z_seq")
-            gan_input_h_context = Input(shape=(context_dim,), name="gan_input_h_context")
-            gan_input_conditions = Input(shape=(condition_dim,), name="gan_input_conditions")
-            
-            # Generate fake data using all 3 inputs
-            generated_data = generator([gan_input_z_seq, gan_input_h_context, gan_input_conditions])
+            # Generate fake data using generator
+            generated_data = generator(gan_inputs)
             
             # Get discriminator prediction on generated data
             gan_output = discriminator(generated_data)
             
-            # Create combined model with 3 inputs
+            # Create combined model with generator's inputs
             gan_model = Model(
-                inputs=[gan_input_z_seq, gan_input_h_context, gan_input_conditions], 
+                inputs=gan_inputs, 
                 outputs=gan_output, 
                 name="gan"
             )
