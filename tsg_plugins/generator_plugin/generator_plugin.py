@@ -264,7 +264,7 @@ class GeneratorPlugin:
         
         According to REFERENCE.md architecture:
         1. BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
-        2. VAE decoder inputs: decoder_input_z_seq (18,32), decoder_input_conditions (10)
+        2. VAE decoder inputs: decoder_input_z_seq (18,32), decoder_input_conditions (10), and decoder_input_h_context (64)
         3. VAE decoder outputs: 23 features from reconstruction_out layer
         4. Post-processing: Expand to 57 features (23 base + 34 technical indicators/other features)
         
@@ -280,6 +280,8 @@ class GeneratorPlugin:
             # Input layers for the composite generator
             noise_input = Input(shape=(self.params["feeder_noise_dim"],), name="noise_input")
             conditions_input = Input(shape=(self.params["conditional_features_dim"],), name="conditions_input")
+            # Add context_input, which is expected by the VAE decoder
+            context_input = Input(shape=(self.params["context_vector_dim"],), name=self.params.get("decoder_input_name_context", "context_input"))
 
             # BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
             z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
@@ -288,8 +290,21 @@ class GeneratorPlugin:
             z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
 
             # Get VAE decoder output (23 features)
-            # VAE decoder expects: decoder_input_z_seq and decoder_input_conditions
-            decoder_output = vae_decoder([z_latent_seq, conditions_input])
+            # VAE decoder expects: decoder_input_z_seq, decoder_input_conditions, and decoder_input_h_context
+            # IMPORTANT: The order of inputs [z_latent_seq, conditions_input, context_input]
+            # must match the order expected by the loaded_vae_decoder model.
+            # You can verify this order by checking the names/order in `loaded_vae_decoder.inputs`
+            # (e.g., by logging `[inp.name for inp in vae_decoder.inputs]`).
+            # Assuming the order: latent sequence, conditions, context.
+            # If the VAE decoder's inputs are named, passing a dictionary is safer, e.g.:
+            # vae_decoder_inputs = {
+            #     self.params["decoder_input_name_latent"]: z_latent_seq,
+            #     self.params["decoder_input_name_conditions"]: conditions_input,
+            #     self.params["decoder_input_name_context"]: context_input
+            # }
+            # decoder_output = vae_decoder(vae_decoder_inputs)
+            # For now, continuing with list-based input based on existing style:
+            decoder_output = vae_decoder([z_latent_seq, conditions_input, context_input])
 
             # Expand from 23 features to 57 features
             # This simulates the post-processing that adds technical indicators and other features
@@ -297,7 +312,7 @@ class GeneratorPlugin:
 
             # Create the composite model
             composite_generator = Model(
-                inputs=[noise_input, conditions_input],
+                inputs=[noise_input, conditions_input, context_input],
                 outputs=expanded_features,
                 name="composite_generator"
             )
