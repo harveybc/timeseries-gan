@@ -138,20 +138,37 @@ class TrainingCoordinator:
             Prepared real data tensor
         """
         try:
-            # Convert DataFrame to numpy array
+            # Convert DataFrame to numpy array, excluding non-numeric columns
             if isinstance(training_data, pd.DataFrame):
-                real_data_np = training_data.values
+                # Exclude datetime/string columns (like DATE_TIME)
+                numeric_columns = training_data.select_dtypes(include=[np.number]).columns
+                
+                if len(numeric_columns) == 0:
+                    raise ValueError("No numeric columns found in training data")
+                
+                # Log which columns are being used/excluded
+                excluded_columns = set(training_data.columns) - set(numeric_columns)
+                if excluded_columns:
+                    self.logger.info(f"Excluding non-numeric columns: {list(excluded_columns)}")
+                
+                self.logger.info(f"Using {len(numeric_columns)} numeric columns for training: {list(numeric_columns)[:5]}...")
+                
+                # Convert only numeric columns to numpy array
+                real_data_np = training_data[numeric_columns].values
             else:
                 real_data_np = training_data
             
             # Ensure proper shape for time series data
             if len(real_data_np.shape) == 2:
                 # Add sequence dimension if needed
-                seq_len = self.params.get("seq_len", real_data_np.shape[0])
+                seq_len = self.params.get("seq_len", 144)  # Use default seq_len from REFERENCE.md
                 num_features = real_data_np.shape[1]
                 
                 # Reshape to (num_samples, seq_len, num_features)
                 num_samples = len(real_data_np) // seq_len
+                if num_samples == 0:
+                    raise ValueError(f"Not enough data points. Need at least {seq_len}, got {len(real_data_np)}")
+                
                 real_data_np = real_data_np[:num_samples * seq_len].reshape(num_samples, seq_len, num_features)
             
             # Convert to TensorFlow tensor
