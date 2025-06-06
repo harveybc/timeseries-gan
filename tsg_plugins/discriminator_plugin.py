@@ -345,7 +345,7 @@ class DiscriminatorPlugin:
         """
         if self.model is None:
             self.logger.warning("Discriminator model not built. Building model now...")
-            self.build_model()
+            self._build_model()  # Changed from build_model() to _build_model()
         return self.model
     
     def save_model(self, filepath: str) -> None:
