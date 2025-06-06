@@ -352,8 +352,8 @@ class GeneratorPlugin:
                 z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
                 
                 # Call VAE decoder once to get base features (batch, 23)
-                # VAE decoder expects: [z_latent_seq, context_input, conditions] as per REFERENCE.md  
-                vae_base_features = vae_decoder_model([z_latent_seq, context_input, conditions_input])  # Shape: (batch, 23)
+                # VAE decoder expects: [z_latent_seq, conditions_input, context_input] as per REFERENCE.md  
+                vae_base_features = vae_decoder_model([z_latent_seq, conditions_input, context_input])  # Shape: (batch, 23)
                 
                 # Post-process 23 base features to 57 final features as per REFERENCE.md
                 # This includes technical indicators and cyclical features
