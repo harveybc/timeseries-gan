@@ -194,7 +194,12 @@ class GANTrainerPlugin:
             
             # Delegate to training coordinator
             if hasattr(self, 'training_coordinator'):
+                # Pass required positional arguments first, then keyword arguments
                 return self.training_coordinator.train(
+                    self.generator_model,  # generator (required positional)
+                    self.discriminator_model,  # discriminator (required positional)
+                    self.gan_model,  # gan_model (required positional)
+                    None,  # feeder_plugin (required positional, using None for now)
                     training_data=training_data,
                     epochs=epochs,
                     batch_size=batch_size,

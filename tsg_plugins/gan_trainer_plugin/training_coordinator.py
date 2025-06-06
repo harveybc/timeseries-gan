@@ -188,16 +188,18 @@ class TrainingCoordinator:
             real_batch = tf.gather(real_data, batch_indices)
             
             # Generate fake data with proper input shapes for composite generator
-            # Per REFERENCE.md, generator expects: [noise_input, conditions_input] only
+            # Per REFERENCE.md, generator expects: [noise_input, conditions_input, context_input] - 3 inputs
             noise_dim = self.params.get("feeder_noise_dim", 32)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
+            context_vector_dim = self.params.get("context_vector_dim", 64)
             
-            # Generate inputs for composite generator (only 2 inputs as per REFERENCE.md)
+            # Generate inputs for composite generator (3 inputs as per REFERENCE.md)
             noise = tf.random.normal([batch_size, noise_dim])
             conditions = tf.random.normal([batch_size, conditional_features_dim])
+            context = tf.random.normal([batch_size, context_vector_dim])
             
-            # Generate fake batch with correct 2 inputs
-            fake_batch = generator([noise, conditions], training=False)
+            # Generate fake batch with correct 3 inputs
+            fake_batch = generator([noise, conditions, context], training=False)
             
             # Train discriminator
             with tf.GradientTape() as tape:
@@ -232,18 +234,20 @@ class TrainingCoordinator:
         total_loss = 0.0
         
         for _ in range(n_times):
-            # Generate inputs for composite generator (only 2 inputs as per REFERENCE.md)
+            # Generate inputs for composite generator (3 inputs as per REFERENCE.md)
             noise_dim = self.params.get("feeder_noise_dim", 32)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
+            context_vector_dim = self.params.get("context_vector_dim", 64)
             
             # Generate inputs for composite generator
             noise = tf.random.normal([batch_size, noise_dim])
             conditions = tf.random.normal([batch_size, conditional_features_dim])
+            context = tf.random.normal([batch_size, context_vector_dim])
             
             # Train generator via GAN model
             with tf.GradientTape() as tape:
                 # Generate fake data and get discriminator prediction
-                fake_pred = gan_model([noise, conditions], training=True)
+                fake_pred = gan_model([noise, conditions, context], training=True)
                 
                 # Calculate generator loss
                 g_loss = self._generator_loss(fake_pred)
