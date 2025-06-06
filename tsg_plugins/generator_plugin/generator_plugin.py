@@ -437,7 +437,7 @@ class GeneratorPlugin:
             raise ValueError(f"Missing OHLC columns for TI calculation: {missing_ohlc}. Available: {processed_df.columns.tolist()}")
 
         self.logger.info(f"Calculating TIs using ohlc_features: {ohlc_features}")
-        ti_df = self.ti_calculator.calculate_technical_indicators(processed_df, ohlc_col_names=ohlc_features)
+        ti_df = self.ti_calculator.calculate_technical_indicators(processed_df, ohlc_feature_names=ohlc_features) # Changed ohlc_col_names to ohlc_feature_names
         processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
         self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
 
