@@ -92,4 +92,45 @@ DEFAULT_VALUES = {
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ], 
     "generator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-    "generator_ti_feature_names": 
+    "generator_ti_feature_names": [
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA", 
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", 
+        "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+        # Adding 5 more TIs to reach 20
+        "SMA_20", # Simple Moving Average 20 period
+        "BB_UPPER", # Bollinger Bands Upper
+        "BB_MIDDLE", # Bollinger Bands Middle
+        "BB_LOWER", # Bollinger Bands Lower
+        "OBV" # On-Balance Volume
+    ],
+    # Ensure cvae_target_feature_names has 23 features as per REFERENCE.md
+    "cvae_target_feature_names": [ # Should be 23 features
+        "OPEN", "LOW", "HIGH", "vix_close", "BC-BO", "BH-BL", "S&P500_Close",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
+    ],
+    # ...existing code...
+    # Ensure feeder_date_features_for_conditioning has 4 base parts for 8 cyclical features
+    "feeder_date_features_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week", "day_of_year"],
+    # ...existing code...
+    "generator_full_feature_names_ordered": [
+        "DATE_TIME",
+        # 23 Base Features from cvae_target_feature_names
+        "OPEN", "LOW", "HIGH", "vix_close", "BC-BO", "BH-BL", "S&P500_Close",
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # 8 Cyclical Date Features
+        "day_of_month_sin", "day_of_month_cos", "hour_of_day_sin", "hour_of_day_cos",
+        "day_of_week_sin", "day_of_week_cos", "day_of_year_sin", "day_of_year_cos",
+        # 20 Technical Indicators
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-",
+        "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+        "SMA_20", "BB_UPPER", "BB_MIDDLE", "BB_LOWER", "OBV"
+    ],
+    # ...existing code...
+}
