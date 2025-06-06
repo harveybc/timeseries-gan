@@ -473,13 +473,16 @@ class GeneratorPlugin:
             self.logger.info(f"Columns after cyclical features merge: {processed_df.columns.tolist()}")
 
         # 3. Ensure all features from full_feature_names_ordered are present and in order
-        expected_numeric_features = self.params.get("full_feature_names_ordered", [])
-        if not expected_numeric_features:
+        raw_full_feature_names = self.params.get("full_feature_names_ordered", [])
+        self.logger.info(f"RAW full_feature_names_ordered from params ({len(raw_full_feature_names)}): {raw_full_feature_names}")
+
+        if not raw_full_feature_names:
             raise ValueError("GeneratorPlugin: 'full_feature_names_ordered' is not configured or empty.")
         
         # Filter out the datetime_col_name itself if it's listed but not a numeric feature
-        expected_numeric_features = [f for f in expected_numeric_features if f != datetime_col_name]
-        self.logger.info(f"Expected numeric features after filtering datetime_col ({len(expected_numeric_features)}): {expected_numeric_features}")
+        expected_numeric_features = [f for f in raw_full_feature_names if f != datetime_col_name]
+        self.logger.info(f"Expected numeric features AFTER filtering datetime_col '{datetime_col_name}' ({len(expected_numeric_features)}): {expected_numeric_features}")
+        
         self.logger.info(f"Columns in processed_df before final selection ({len(processed_df.columns.tolist())}): {processed_df.columns.tolist()}")
 
         missing_cols = [col for col in expected_numeric_features if col not in processed_df.columns]
