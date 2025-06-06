@@ -437,9 +437,33 @@ class GeneratorPlugin:
             raise ValueError(f"Missing OHLC columns for TI calculation: {missing_ohlc}. Available: {processed_df.columns.tolist()}")
 
         self.logger.info(f"Calculating TIs using ohlc_features: {ohlc_features}")
-        ti_df = self.ti_calculator.calculate_technical_indicators(processed_df, ohlc_feature_names=ohlc_features) # Changed ohlc_col_names to ohlc_feature_names
+        ti_df = self.ti_calculator.calculate_technical_indicators(
+            processed_df, 
+            ohlc_feature_names=ohlc_features,
+            return_last_row_only=False # Ensure all rows are processed
+        )
+        
+        # Debug: Log shapes and columns before and after merge
+        self.logger.info(f"Shape of processed_df before TI merge: {processed_df.shape}")
+        self.logger.info(f"Columns of processed_df before TI merge: {processed_df.columns.tolist()}")
+        self.logger.info(f"Shape of ti_df: {ti_df.shape}")
+        self.logger.info(f"Columns of ti_df: {ti_df.columns.tolist()}")
+        self.logger.info(f"Index of processed_df: {processed_df.index[:5]}...{processed_df.index[-5:]}")
+        self.logger.info(f"Index of ti_df: {ti_df.index[:5]}...{ti_df.index[-5:]}")
+
+        # Merge TIs. Ensure indices align.
+        # If ti_df has a different index (e.g., RangeIndex if it was reset), this merge might fail or produce NaNs.
+        # The TechnicalIndicatorCalculator should preserve the index of the input ohlc_history_df.
         processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
         self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
+        self.logger.info(f"Shape of processed_df after TI merge: {processed_df.shape}")
+        
+        # Check for NaNs introduced by merge, specifically in TI columns
+        ti_cols_in_processed = [col for col in self.params.get("ti_feature_names", []) if col in processed_df.columns]
+        if ti_cols_in_processed:
+            nan_counts_in_tis = processed_df[ti_cols_in_processed].isnull().sum()
+            self.logger.info(f"NaN counts in TI columns after merge:\\n{nan_counts_in_tis[nan_counts_in_tis > 0]}")
+
 
         # 2. Calculate Cyclical Date/Time Features
         if not hasattr(self, 'data_generator') or self.data_generator is None:

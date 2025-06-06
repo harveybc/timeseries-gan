@@ -27,18 +27,25 @@ class TechnicalIndicatorCalculator:
         self.ti_params = ti_params
     
     def calculate_technical_indicators(self, ohlc_history_df: pd.DataFrame, 
-                                     ohlc_feature_names: List[str]) -> pd.DataFrame:
+                                     ohlc_feature_names: List[str],
+                                     return_last_row_only: bool = True) -> pd.DataFrame: # Added return_last_row_only
         """
         Calculate technical indicators from OHLC history DataFrame.
         
         Args:
             ohlc_history_df: DataFrame with OHLC columns
             ohlc_feature_names: List of OHLC feature names [OPEN, HIGH, LOW, CLOSE]
+            return_last_row_only: If True, returns only the TIs for the last row. 
+                                  If False, returns TIs for all rows.
             
         Returns:
-            DataFrame with TI values for the last row only
+            DataFrame with TI values.
         """
         if ohlc_history_df.empty:
+            # If returning full history and input is empty, placeholder should reflect that
+            # However, current _create_nan_placeholder_df is single row.
+            # For now, this path will yield a single row of NaNs.
+            # If ohlc_history_df is empty, the calling merge will likely result in empty or all NaN TI columns.
             return self._create_nan_placeholder_df()
 
         # Map feature names to standard pandas-ta names
@@ -76,8 +83,8 @@ class TechnicalIndicatorCalculator:
             if ti_name not in ti_df_results.columns:
                 ti_df_results[ti_name] = np.nan
         
-        # Return only the last row with requested TIs
-        return self._extract_last_row_results(ti_df_results)
+        # Return results based on the flag
+        return self._extract_last_row_results(ti_df_results, return_last_row_only=return_last_row_only)
     
     def _create_nan_placeholder_df(self) -> pd.DataFrame:
         """Create DataFrame with NaN values for all TI features."""
@@ -261,22 +268,30 @@ class TechnicalIndicatorCalculator:
             else:
                 ti_df_results['EMA'] = np.nan
     
-    def _extract_last_row_results(self, ti_df_results: pd.DataFrame) -> pd.DataFrame:
-        """Extract and format the last row of TI results."""
+    def _extract_last_row_results(self, ti_df_results: pd.DataFrame, return_last_row_only: bool = True) -> pd.DataFrame: # Added return_last_row_only
+        """Extract and format TI results."""
         if ti_df_results.empty:
             return self._create_nan_placeholder_df()
 
-        # Get columns that were actually calculated
+        # Get columns that were actually calculated (or ensured to exist)
+        # This list should effectively be self.ti_feature_names due to the loop in calculate_technical_indicators
         final_ti_columns_present = [col for col in self.ti_feature_names 
                                    if col in ti_df_results.columns]
         
         if not final_ti_columns_present:
             return self._create_nan_placeholder_df()
 
-        # Return the last row of calculated TIs
-        last_row_tis = ti_df_results[final_ti_columns_present].tail(1).reset_index(drop=True)
+        # Select data based on the flag
+        if return_last_row_only:
+            # Return the last row of calculated TIs
+            processed_tis = ti_df_results[final_ti_columns_present].tail(1).reset_index(drop=True)
+        else:
+            # Return all rows of calculated TIs, preserving index
+            processed_tis = ti_df_results[final_ti_columns_present].copy()
         
-        # Reindex to ensure all originally requested TIs are present
-        last_row_tis_reindexed = last_row_tis.reindex(columns=self.ti_feature_names, fill_value=np.nan)
+        # Reindex to ensure all originally requested TIs are present and in order
+        # This also handles cases where some TIs might not have been calculable and remained all NaN
+        # For multi-row data, this reindex preserves the original index of processed_tis.
+        processed_tis_reindexed = processed_tis.reindex(columns=self.ti_feature_names, fill_value=np.nan)
         
-        return last_row_tis_reindexed.astype(np.float32)
+        return processed_tis_reindexed.astype(np.float32)
