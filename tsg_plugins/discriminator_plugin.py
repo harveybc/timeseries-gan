@@ -8,14 +8,14 @@ The discriminator takes full 57-feature sequences and outputs binary classificat
 Author: TimeSeries-GAN Team
 """
 
+import logging
 import numpy as np
-import pandas as pd
-import tensorflow as tf
+import os
+import traceback
 from tensorflow.keras.layers import Input, Conv1D, LSTM, Dense, Dropout, LeakyReLU, BatchNormalization, Bidirectional
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from typing import Dict, Any, List, Optional, Tuple
-import logging
 
 
 class DiscriminatorPlugin:
@@ -93,6 +93,7 @@ class DiscriminatorPlugin:
         
         # Set up logging
         self.logger = logging.getLogger(__name__)
+        self.logger.info("DEBUG: DiscriminatorPlugin.__init__ called")
         
         # Update parameters from config
         self.set_params(**config)
@@ -103,8 +104,10 @@ class DiscriminatorPlugin:
         
         # Initialize model if configured
         if not self.params.get("load_pretrained_model", False):
+            self.logger.info("DEBUG: DiscriminatorPlugin building model on init")
             self._build_model()
         else:
+            self.logger.info("DEBUG: DiscriminatorPlugin loading pretrained model")
             self.load_model()
     
     def set_params(self, **kwargs) -> None:
@@ -114,6 +117,8 @@ class DiscriminatorPlugin:
         Args:
             **kwargs: Parameter updates
         """
+        self.logger.info(f"DEBUG: DiscriminatorPlugin.set_params called with {len(kwargs)} parameters")
+        
         # Update main config
         self.config.update(kwargs)
         
@@ -123,23 +128,27 @@ class DiscriminatorPlugin:
             
             if prefixed_key in kwargs:
                 self.params[param_key] = kwargs[prefixed_key]
+                self.logger.debug(f"DEBUG: Set {param_key} = {kwargs[prefixed_key]} (from {prefixed_key})")
             elif param_key in kwargs:
                 self.params[param_key] = kwargs[param_key]
+                self.logger.debug(f"DEBUG: Set {param_key} = {kwargs[param_key]}")
         
         # Handle special mappings
         if "generator_full_feature_names_ordered" in kwargs:
             self.params["feature_names"] = kwargs["generator_full_feature_names_ordered"]
             self.params["num_features"] = len(kwargs["generator_full_feature_names_ordered"])
+            self.logger.info(f"DEBUG: Updated feature_names count to {self.params['num_features']}")
         
         # Rebuild model if key parameters changed
         if any(key in kwargs for key in ["sequence_length", "num_features", "conv_filters", "lstm_units"]):
             if self.params.get("sequence_length") and self.params.get("num_features"):
+                self.logger.info("DEBUG: Key parameters changed, rebuilding discriminator model")
                 self._build_model()
     
     def _build_model(self) -> None:
         """Build the discriminator model architecture."""
         try:
-            self.logger.info(f"Building discriminator model with seq_len={self.params['sequence_length']}, "
+            self.logger.info(f"DEBUG: Building discriminator model with seq_len={self.params['sequence_length']}, "
                            f"num_features={self.params['num_features']}")
             
             # Input layer
@@ -174,14 +183,15 @@ class DiscriminatorPlugin:
                     x = BatchNormalization(name=f"batch_norm_{i+1}")(x)
                 
                 x = LeakyReLU(alpha=self.params["leaky_relu_alpha"], name=f"leaky_relu_{i+1}")(x)
-                x = Dropout(self.params["conv_dropout_rate"], name=f"conv_dropout_{i+1}")(x)
+                
+                if self.params["conv_dropout_rate"] > 0:
+                    x = Dropout(self.params["conv_dropout_rate"], name=f"conv_dropout_{i+1}")(x)
             
             # LSTM layer for temporal pattern recognition
             if self.params["use_bidirectional_lstm"]:
                 x = Bidirectional(
                     LSTM(
-                        units=self.params["lstm_units"],
-                        return_sequences=False,  # We want final output for classification
+                        self.params["lstm_units"],
                         dropout=self.params["lstm_dropout"],
                         recurrent_dropout=self.params["lstm_recurrent_dropout"],
                         name="lstm_layer"
@@ -190,25 +200,20 @@ class DiscriminatorPlugin:
                 )(x)
             else:
                 x = LSTM(
-                    units=self.params["lstm_units"],
-                    return_sequences=False,
+                    self.params["lstm_units"],
                     dropout=self.params["lstm_dropout"],
                     recurrent_dropout=self.params["lstm_recurrent_dropout"],
                     name="lstm_layer"
                 )(x)
             
-            # Dense layers
-            dense_units = self.params["dense_units"]
-            for i, units in enumerate(dense_units):
-                x = Dense(units, activation="relu", name=f"dense_{i+1}")(x)
-                x = Dropout(self.params["dense_dropout_rate"], name=f"dense_dropout_{i+1}")(x)
+            # Dense layers for classification
+            for i, units in enumerate(self.params["dense_units"]):
+                x = Dense(units, activation='relu', name=f"dense_{i+1}")(x)
+                if self.params["dense_dropout_rate"] > 0:
+                    x = Dropout(self.params["dense_dropout_rate"], name=f"dense_dropout_{i+1}")(x)
             
-            # Output layer - binary classification
-            output = Dense(
-                1, 
-                activation=self.params["final_activation"], 
-                name="discriminator_output"
-            )(x)
+            # Final output layer
+            output = Dense(1, activation=self.params["final_activation"], name="discriminator_output")(x)
             
             # Create model
             self.model = Model(inputs=input_layer, outputs=output, name="discriminator")
@@ -216,125 +221,38 @@ class DiscriminatorPlugin:
             # Compile model
             self._compile_model()
             
-            self.logger.info(f"Discriminator model built successfully with {self.model.count_params():,} parameters")
+            self.logger.info(f"DEBUG: Discriminator model built successfully with {self.model.count_params()} parameters")
             
-            # Print model summary
-            if self.logger.isEnabledFor(logging.INFO):
-                self.model.summary(print_fn=self.logger.info)
-                
         except Exception as e:
-            self.logger.error(f"Error building discriminator model: {e}")
+            self.logger.error(f"DEBUG: Error building discriminator model: {e}")
+            self.logger.error(traceback.format_exc())
             self.model = None
-            raise
     
     def _compile_model(self) -> None:
         """Compile the discriminator model."""
         if self.model is None:
-            raise RuntimeError("Model must be built before compilation")
+            self.logger.error("DEBUG: Cannot compile model - model is None")
+            return
         
-        optimizer = Adam(
-            learning_rate=self.params["learning_rate"],
-            beta_1=self.params["beta_1"],
-            beta_2=self.params["beta_2"]
-        )
-        
-        self.model.compile(
-            optimizer=optimizer,
-            loss=self.params["loss_function"],
-            metrics=self.params["metrics"]
-        )
-        
-        self.compiled = True
-        self.logger.info("Discriminator model compiled successfully")
-    
-    def predict(self, sequences: np.ndarray) -> np.ndarray:
-        """
-        Predict real/fake probabilities for input sequences.
-        
-        Args:
-            sequences: Input sequences of shape (batch_size, sequence_length, num_features)
-        
-        Returns:
-            Probabilities of being real data, shape (batch_size, 1)
-        """
-        if self.model is None:
-            raise RuntimeError("Discriminator model not built")
-        
-        if sequences.ndim != 3:
-            raise ValueError(f"Expected 3D input (batch_size, seq_len, features), got shape {sequences.shape}")
-        
-        if sequences.shape[1] != self.params["sequence_length"]:
-            raise ValueError(f"Expected sequence length {self.params['sequence_length']}, got {sequences.shape[1]}")
-        
-        if sequences.shape[2] != self.params["num_features"]:
-            raise ValueError(f"Expected {self.params['num_features']} features, got {sequences.shape[2]}")
-        
-        return self.model.predict(sequences)
-    
-    def train_on_batch(self, real_sequences: np.ndarray, fake_sequences: np.ndarray, 
-                       label_smoothing: Optional[float] = None) -> Dict[str, float]:
-        """
-        Train discriminator on a batch of real and fake sequences.
-        
-        Args:
-            real_sequences: Real data sequences (batch_size, seq_len, features)
-            fake_sequences: Synthetic data sequences (batch_size, seq_len, features)
-            label_smoothing: Override default label smoothing
-        
-        Returns:
-            Dictionary containing loss and accuracy metrics
-        """
-        if self.model is None or not self.compiled:
-            raise RuntimeError("Discriminator model not built or compiled")
-        
-        batch_size = real_sequences.shape[0]
-        if fake_sequences.shape[0] != batch_size:
-            raise ValueError("Real and fake sequences must have same batch size")
-        
-        # Prepare training data
-        x_batch = np.concatenate([real_sequences, fake_sequences], axis=0)
-        
-        # Prepare labels with optional smoothing
-        smoothing = label_smoothing if label_smoothing is not None else self.params["label_smoothing"]
-        real_labels = np.ones((batch_size, 1)) - smoothing  # Slightly less than 1
-        fake_labels = np.zeros((batch_size, 1)) + smoothing  # Slightly more than 0
-        y_batch = np.concatenate([real_labels, fake_labels], axis=0)
-        
-        # Train on batch
-        loss, accuracy = self.model.train_on_batch(x_batch, y_batch)
-        
-        return {"loss": float(loss), "accuracy": float(accuracy)}
-    
-    def evaluate_sequences(self, real_sequences: np.ndarray, fake_sequences: np.ndarray) -> Dict[str, float]:
-        """
-        Evaluate discriminator performance on real vs fake sequences.
-        
-        Args:
-            real_sequences: Real data sequences
-            fake_sequences: Fake data sequences
-        
-        Returns:
-            Dictionary with evaluation metrics
-        """
-        real_predictions = self.predict(real_sequences)
-        fake_predictions = self.predict(fake_sequences)
-        
-        # Calculate metrics
-        real_accuracy = np.mean(real_predictions > 0.5)
-        fake_accuracy = np.mean(fake_predictions <= 0.5)
-        overall_accuracy = (real_accuracy + fake_accuracy) / 2
-        
-        # Discriminative score (how well it distinguishes real from fake)
-        discriminative_score = np.abs(np.mean(real_predictions) - np.mean(fake_predictions))
-        
-        return {
-            "real_accuracy": float(real_accuracy),
-            "fake_accuracy": float(fake_accuracy), 
-            "overall_accuracy": float(overall_accuracy),
-            "discriminative_score": float(discriminative_score),
-            "mean_real_prediction": float(np.mean(real_predictions)),
-            "mean_fake_prediction": float(np.mean(fake_predictions))
-        }
+        try:
+            optimizer = Adam(
+                learning_rate=self.params["learning_rate"],
+                beta_1=self.params["beta_1"],
+                beta_2=self.params["beta_2"]
+            )
+            
+            self.model.compile(
+                optimizer=optimizer,
+                loss=self.params["loss_function"],
+                metrics=self.params["metrics"]
+            )
+            
+            self.compiled = True
+            self.logger.info("DEBUG: Discriminator model compiled successfully")
+            
+        except Exception as e:
+            self.logger.error(f"DEBUG: Error compiling discriminator model: {e}")
+            self.compiled = False
     
     def get_model(self) -> Optional[Model]:
         """
@@ -343,54 +261,112 @@ class DiscriminatorPlugin:
         Returns:
             Optional[Model]: The discriminator model if available, None otherwise
         """
+        self.logger.info(f"DEBUG: DiscriminatorPlugin.get_model() called, model exists: {self.model is not None}")
+        
         if self.model is None:
-            self.logger.warning("Discriminator model not built. Building model now...")
-            self._build_model()  # Changed from build_model() to _build_model()
+            self.logger.warning("DEBUG: Discriminator model not built. Building model now...")
+            self._build_model()
+        
+        if self.model is not None:
+            self.logger.info(f"DEBUG: Returning discriminator model with {self.model.count_params()} parameters")
+        else:
+            self.logger.error("DEBUG: Failed to build discriminator model, returning None")
+        
         return self.model
+    
+    def build_model(self) -> None:
+        """Public interface for building the discriminator model."""
+        self.logger.info("DEBUG: DiscriminatorPlugin.build_model() called")
+        self._build_model()
+    
+    def predict(self, sequences: np.ndarray) -> np.ndarray:
+        """Predict real/fake probability for input sequences."""
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model() first.")
+        
+        return self.model.predict(sequences)
+    
+    def train_on_batch(self, real_sequences: np.ndarray, fake_sequences: np.ndarray, 
+                       label_smoothing: Optional[float] = None) -> Dict[str, float]:
+        """Train discriminator on a batch of real and fake sequences."""
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model() first.")
+        
+        # Prepare data
+        batch_size = real_sequences.shape[0]
+        
+        # Combine real and fake data
+        x_batch = np.concatenate([real_sequences, fake_sequences], axis=0)
+        
+        # Create labels (1 for real, 0 for fake)
+        real_labels = np.ones((batch_size, 1))
+        fake_labels = np.zeros((batch_size, 1))
+        
+        # Apply label smoothing if specified
+        if label_smoothing is not None:
+            real_labels -= label_smoothing
+        
+        y_batch = np.concatenate([real_labels, fake_labels], axis=0)
+        
+        # Train on batch
+        loss, accuracy = self.model.train_on_batch(x_batch, y_batch)
+        
+        return {"loss": float(loss), "accuracy": float(accuracy)}
+    
+    def evaluate_sequences(self, real_sequences: np.ndarray, fake_sequences: np.ndarray) -> Dict[str, float]:
+        """Evaluate discriminator performance on real and fake sequences."""
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model() first.")
+        
+        # Prepare data
+        batch_size = real_sequences.shape[0]
+        
+        x_batch = np.concatenate([real_sequences, fake_sequences], axis=0)
+        real_labels = np.ones((batch_size, 1))
+        fake_labels = np.zeros((batch_size, 1))
+        y_batch = np.concatenate([real_labels, fake_labels], axis=0)
+        
+        # Evaluate
+        loss, accuracy = self.model.evaluate(x_batch, y_batch, verbose=0)
+        
+        return {"loss": float(loss), "accuracy": float(accuracy)}
     
     def save_model(self, filepath: str) -> None:
         """Save the discriminator model."""
         if self.model is None:
-            raise RuntimeError("No model to save")
+            raise ValueError("Model not built. Call build_model() first.")
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         self.model.save(filepath)
-        self.logger.info(f"Discriminator model saved to {filepath}")
+        self.logger.info(f"DEBUG: Discriminator model saved to {filepath}")
     
     def load_model(self) -> None:
         """Load a pre-trained discriminator model."""
-        try:
-            model_path = self.params.get("pretrained_model_path")
-            if not model_path:
-                raise ValueError("pretrained_model_path not specified in parameters")
-            
-            self.logger.info(f"Loading pre-trained discriminator model from: {model_path}")
-            self.model = tf.keras.models.load_model(model_path)
-            self.compiled = True
-            self.logger.info("Pre-trained discriminator model loaded successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Error loading pre-trained model: {e}")
-            self.model = None
-            raise
-    
-    def build_model(self) -> None:
-        """Public interface for building the discriminator model."""
-        self._build_model()
+        model_path = self.params.get("pretrained_model_path")
+        if not model_path or not os.path.exists(model_path):
+            raise ValueError(f"Pretrained model path not found: {model_path}")
+        
+        from tensorflow.keras.models import load_model
+        self.model = load_model(model_path)
+        self.compiled = True
+        self.logger.info(f"DEBUG: Discriminator model loaded from {model_path}")
     
     def get_debug_info(self) -> Dict[str, Any]:
-        """Get debug information about the discriminator."""
+        """Get debug information about the discriminator plugin."""
         debug_info = {}
+        for var in self.plugin_debug_vars:
+            debug_info[f"discriminator_{var}"] = self.params.get(var)
         
-        for var_name in self.plugin_debug_vars:
-            if var_name in self.params:
-                debug_info[f"discriminator_{var_name}"] = self.params[var_name]
+        debug_info["discriminator_model_built"] = self.model is not None
+        debug_info["discriminator_model_compiled"] = self.compiled
         
         if self.model is not None:
             debug_info["discriminator_model_params"] = self.model.count_params()
-            debug_info["discriminator_compiled"] = self.compiled
         
         return debug_info
     
     def add_debug_info(self, debug_dict: Dict[str, Any]) -> None:
-        """Add discriminator debug information to existing dictionary."""
+        """Add discriminator debug information to existing debug dictionary."""
         debug_dict.update(self.get_debug_info())

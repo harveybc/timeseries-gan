@@ -306,21 +306,18 @@ class GeneratorPlugin:
         try:
             self.logger.info("Building composite generator model...")
             
-            # Load the pre-trained VAE decoder first
-            if not hasattr(self, 'sequential_model') or self.sequential_model is None:
-                if hasattr(self, 'model_loader'):
-                    self.model_loader._load_model()
-                    self.sequential_model = getattr(self.model_loader, 'sequential_model', None)
+            # Check if we have a pre-trained VAE decoder to load
+            vae_decoder_model = None
+            if self.params.get("sequential_model_file"):
+                self.logger.info(f"Loading pre-trained VAE decoder from: {self.params['sequential_model_file']}")
+                vae_decoder_model = self.model_loader.load_model_from_path(self.params["sequential_model_file"])
+                if vae_decoder_model:
+                    self.logger.info("Pre-trained VAE decoder loaded successfully")
+                    vae_decoder_model.trainable = True
                 else:
-                    self.logger.error("Model loader not available")
-                    return
-            
-            if self.sequential_model is None:
-                self.logger.error("VAE decoder model not loaded")
-                return
-            
-            # Set VAE decoder to trainable for joint optimization
-            self.sequential_model.trainable = True
+                    self.logger.warning("Failed to load pre-trained VAE decoder, building from scratch")
+            else:
+                self.logger.info("No pre-trained VAE decoder specified, building complete generator from scratch")
             
             # Get configuration parameters
             seq_len = self.params.get("decoder_input_window_size", 144)
@@ -340,16 +337,38 @@ class GeneratorPlugin:
             z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
             z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
             
-            # Prepare inputs for VAE decoder
-            # VAE decoder expects: [z_latent_seq, context, conditions]
-            vae_inputs = [z_latent_seq, context_input, conditions_input]
-            
-            # Pass through VAE decoder (23 features output)
-            vae_output = self.sequential_model(vae_inputs)
-            
-            # Expand from 23 features to 57 features
-            # This is a placeholder - in full implementation, this would include TI calculation
-            expanded_output = Dense(57, activation='linear', name="feature_expansion")(vae_output)
+            if vae_decoder_model:
+                # Use pre-trained VAE decoder
+                self.logger.info("Building composite model with pre-trained VAE decoder")
+                vae_inputs = [z_latent_seq, context_input, conditions_input]
+                vae_output = vae_decoder_model(vae_inputs)
+                
+                # Expand from 23 features to 57 features if needed
+                if vae_output.shape[-1] != 57:
+                    expanded_output = Dense(57, activation='linear', name="feature_expansion")(vae_output)
+                else:
+                    expanded_output = vae_output
+            else:
+                # Build complete decoder from scratch (simplified VAE decoder)
+                self.logger.info("Building complete generator model from scratch")
+                
+                # Combine all inputs for the decoder
+                combined_input = Concatenate(name="combined_input")([
+                    z_latent_seq,
+                    Lambda(lambda x: tf.expand_dims(x, axis=1), name="expand_context")(context_input),
+                    Lambda(lambda x: tf.expand_dims(x, axis=1), name="expand_conditions")(conditions_input)
+                ])
+                
+                # Decoder architecture (simplified version of VAE decoder)
+                decoder_lstm1 = LSTM(128, return_sequences=True, name="decoder_lstm1")(combined_input)
+                decoder_lstm2 = LSTM(64, return_sequences=True, name="decoder_lstm2")(decoder_lstm1)
+                
+                # Reshape to target sequence length
+                decoder_reshape = Dense(seq_len * 32, activation='relu', name="decoder_dense")(decoder_lstm2)
+                decoder_reshaped = Reshape((seq_len, 32), name="decoder_reshape")(decoder_reshape)
+                
+                # Final output layer to 57 features
+                expanded_output = TimeDistributed(Dense(57, activation='linear'), name="output_features")(decoder_reshaped)
             
             # Create composite model
             self.composite_model = Model(
