@@ -479,6 +479,8 @@ class GeneratorPlugin:
         
         # Filter out the datetime_col_name itself if it's listed but not a numeric feature
         expected_numeric_features = [f for f in expected_numeric_features if f != datetime_col_name]
+        self.logger.info(f"Expected numeric features after filtering datetime_col ({len(expected_numeric_features)}): {expected_numeric_features}")
+        self.logger.info(f"Columns in processed_df before final selection ({len(processed_df.columns.tolist())}): {processed_df.columns.tolist()}")
 
         missing_cols = [col for col in expected_numeric_features if col not in processed_df.columns]
         if missing_cols:
