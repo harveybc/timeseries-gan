@@ -325,107 +325,34 @@ class GANTrainerPlugin:
             raise
     
     # Mandatory plugin methods
-    def set_params(self, **kwargs):
-        """
-        Update plugin parameters with provided configuration.
-        
-        Args:
-            **kwargs: Parameter key-value pairs to update
-        """
-        self.logger.info(f"Setting parameters: {list(kwargs.keys())}")
-        
-        # Update self.params with new values
-        for key, value in kwargs.items():
-            self.params[key] = value
-        
-        # Update config if available
-        if hasattr(self, 'config') and self.config is not None:
-            self.config.update(kwargs)
-        
-        # Reinitialize modules with updated parameters
-        self.parameter_manager = ParameterManager(self.params, self.logger)
+    def set_params(self, **kwargs) -> None:
+        """Update plugin parameters and re-initialize modules if necessary."""
+        # Update parameters using ParameterManager
+        self.parameter_manager.set_params(**kwargs)
+        self.params = self.parameter_manager.get_params() # Ensure self.params is updated
+
+        # Re-initialize modules that depend on updated parameters
+        # It's crucial to pass all required arguments during re-initialization
         self.directory_manager = DirectoryManager(self.params, self.logger)
         self.plugin_interface = PluginInterface(self.params, self.logger)
-        self.training_coordinator = TrainingCoordinator(self.params, self.logger)
+        # Pass self.generator_plugin_instance during re-initialization
+        self.training_coordinator = TrainingCoordinator(self.params, self.logger, self.generator_plugin_instance)
         self.model_builder = ModelBuilder(self.params, self.logger)
         self.model_persistence = ModelPersistence(self.params, self.logger)
         self.training_metrics = TrainingMetrics(self.params, self.logger)
-        
-        # Rebuild models if generator is available
-        self._build_models()
-        
-        self.logger.info("Parameters updated successfully")
 
-    def process(self, x_real_df, **kwargs):
-        """
-        Main processing method - trains the GAN model.
+        # Re-setup plugin interfaces and models if necessary
+        self.plugin_interface.set_plugin_instances(
+            self.generator_plugin_instance,
+            self.feeder_plugin_instance,
+            self.discriminator_plugin_instance,
+            self.preprocessor_plugin_instance
+        )
+        self._build_models() # Re-build models if parameters affecting them changed
         
-        Args:
-            x_real_df: Real training data DataFrame
-            **kwargs: Additional training parameters
-        
-        Returns:
-            Training results dictionary
-        """
-        try:
-            self.logger.info("Starting GAN training process")
-            
-            # Extract training parameters using parameter manager
-            epochs = kwargs.get('epochs', self.params.get('gan_epochs', 1000))
-            batch_size = kwargs.get('batch_size', self.params.get('gan_batch_size', 32))
-            train_discriminator_n_times = kwargs.get('train_discriminator_n_times', 1)
-            train_generator_n_times = kwargs.get('train_generator_n_times', 1)
-            
-            # Validate models are available
-            generator = self.plugin_interface.get_generator_model()
-            if not generator or not self.discriminator or not self.gan_model:
-                raise ValueError("Generator, discriminator, or GAN model not available for training")
-            
-            # Get plugins and directories
-            feeder_plugin = self.plugin_interface.get_feeder_plugin()
-            _, models_dir, plots_dir, metrics_dir = self.directory_manager.get_directories()
-            
-            # Delegate training to the training coordinator
-            training_history = self.training_coordinator.train(
-                x_real_df=x_real_df,
-                generator=generator,
-                discriminator=self.discriminator,
-                gan_model=self.gan_model,
-                feeder_plugin=feeder_plugin,
-                epochs=epochs,
-                batch_size=batch_size,
-                train_discriminator_n_times=train_discriminator_n_times,
-                train_generator_n_times=train_generator_n_times,
-                save_interval=self.params.get("gan_save_interval", 500),
-                models_dir=models_dir,
-                plots_dir=plots_dir,
-                metrics_dir=metrics_dir
-            )
-            
-            # Save final models
-            self.save_models("final_")
-            
-            # Save final metrics and plots
-            self.training_metrics.save_metrics(metrics_dir)
-            self.training_metrics.plot_training_history(plots_dir)
-            
-            # Prepare results
-            results = {
-                'training_history': training_history,
-                'final_metrics': self.training_metrics.get_latest_metrics(),
-                'models_dir': models_dir,
-                'plots_dir': plots_dir,
-                'metrics_dir': metrics_dir
-            }
-            
-            self.logger.info("GAN training process completed successfully")
-            return results
-            
-        except Exception as e:
-            self.logger.error(f"GAN training process failed: {e}")
-            raise
-    
-    def get_debug_info(self):
+        self.logger.info("GANTrainerPlugin parameters updated and modules re-initialized.")
+
+    def get_debug_info(self) -> Dict[str, Any]:
         """
         Return debug information for the plugin.
         
