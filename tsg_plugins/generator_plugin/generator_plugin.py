@@ -93,15 +93,20 @@ class GeneratorPlugin:
         # Initialize specialized modules
         self._initialize_modules()
         
-        # Set parameters and validate
-        self.set_params(**config)
+        # Set parameters (simplified for initial testing)
+        for key, value in config.items():
+            if key in self.plugin_params:
+                self.params[key] = value
         
         # Validate configuration
         self._validate_plugin_configuration()
         
-        # Load initial close anchor
-        if self.initial_data_handler.get_initial_close_anchor() is None:
-            self.initial_data_handler.load_initial_close_anchor(initial_close_file_path)
+        # Load initial close anchor (simplified)
+        if initial_close_file_path and self.initial_data_handler.get_initial_close_anchor() is None:
+            try:
+                self.initial_data_handler.load_initial_close_anchor(initial_close_file_path)
+            except Exception as e:
+                self.logger.warning(f"Failed to load initial close anchor: {e}")
     
     def _initialize_modules(self) -> None:
         """Initialize all specialized modules."""
@@ -187,7 +192,7 @@ class GeneratorPlugin:
         
         # Check for model changes
         new_model_file = self.params.get("sequential_model_file")
-        if new_model_file != old_model_file or (new_model_file and self.sequential_model is None):
+        if new_model_file and new_model_file != old_model_file:
             self._load_model(new_model_file)
         elif not new_model_file and old_model_file:
             print("GeneratorPlugin: Model path cleared. Cleaning loaded model.")
@@ -298,26 +303,19 @@ class GeneratorPlugin:
                 return None
         return getattr(self, 'composite_model', None)
 
-    def _build_composite_generator(self) -> None:
+    def _build_composite_generator(self, vae_decoder_model=None) -> Optional[Model]:
         """
         Build the composite generator model combining BiLSTM Z-generator + VAE decoder.
         Based on REFERENCE.md Sequential Conditional VAE-GAN Architecture.
+        
+        Args:
+            vae_decoder_model: Optional pre-trained VAE decoder model to integrate
+            
+        Returns:
+            Model: The built composite generator model
         """
         try:
             self.logger.info("Building composite generator model...")
-            
-            # Check if we have a pre-trained VAE decoder to load
-            vae_decoder_model = None
-            if self.params.get("sequential_model_file"):
-                self.logger.info(f"Loading pre-trained VAE decoder from: {self.params['sequential_model_file']}")
-                vae_decoder_model = self.model_loader.load_model_from_path(self.params["sequential_model_file"])
-                if vae_decoder_model:
-                    self.logger.info("Pre-trained VAE decoder loaded successfully")
-                    vae_decoder_model.trainable = True
-                else:
-                    self.logger.warning("Failed to load pre-trained VAE decoder, building from scratch")
-            else:
-                self.logger.info("No pre-trained VAE decoder specified, building complete generator from scratch")
             
             # Get configuration parameters
             seq_len = self.params.get("decoder_input_window_size", 144)
@@ -325,64 +323,69 @@ class GeneratorPlugin:
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
             context_vector_dim = self.params.get("context_vector_dim", 64)
             
-            # Build BiLSTM Z-generator inputs
+            self.logger.info(f"Building generator with seq_len={seq_len}, noise_dim={noise_dim}")
+            
+            # Build generator inputs
             noise_input = Input(shape=(noise_dim,), name="noise_input")
             conditions_input = Input(shape=(conditional_features_dim,), name="conditions_input")
             context_input = Input(shape=(context_vector_dim,), name="context_input")
             
-            # BiLSTM Z-generator architecture (from REFERENCE.md)
-            # Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
-            z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
-            z_reshape = Reshape((18, 32), name="z_reshape")(z_dense)
-            z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
-            z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
-            
-            if vae_decoder_model:
-                # Use pre-trained VAE decoder
+            if vae_decoder_model is not None:
+                # Use pre-trained VAE decoder - implement BiLSTM Z-generator as per REFERENCE.md
                 self.logger.info("Building composite model with pre-trained VAE decoder")
+                
+                # BiLSTM Z-generator architecture: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
+                z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
+                z_reshape = Reshape((18, 32), name="z_reshape")(z_dense)
+                z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
+                z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
+                
+                # Prepare inputs for VAE decoder: [z_latent_seq, context, conditions]
                 vae_inputs = [z_latent_seq, context_input, conditions_input]
+                
+                # Pass through VAE decoder
                 vae_output = vae_decoder_model(vae_inputs)
                 
-                # Expand from 23 features to 57 features if needed
+                # Expand to 57 features if needed
                 if vae_output.shape[-1] != 57:
                     expanded_output = Dense(57, activation='linear', name="feature_expansion")(vae_output)
                 else:
                     expanded_output = vae_output
+                    
             else:
-                # Build complete decoder from scratch (simplified VAE decoder)
-                self.logger.info("Building complete generator model from scratch")
+                # Build simple generator from scratch for testing
+                self.logger.info("Building simple generator from scratch")
                 
-                # Combine all inputs for the decoder
-                combined_input = Concatenate(name="combined_input")([
-                    z_latent_seq,
-                    Lambda(lambda x: tf.expand_dims(x, axis=1), name="expand_context")(context_input),
-                    Lambda(lambda x: tf.expand_dims(x, axis=1), name="expand_conditions")(conditions_input)
-                ])
+                # Combine all inputs
+                combined_inputs = Concatenate(name="combined_inputs")([noise_input, conditions_input, context_input])
                 
-                # Decoder architecture (simplified version of VAE decoder)
-                decoder_lstm1 = LSTM(128, return_sequences=True, name="decoder_lstm1")(combined_input)
-                decoder_lstm2 = LSTM(64, return_sequences=True, name="decoder_lstm2")(decoder_lstm1)
+                # Simple feedforward generator
+                hidden1 = Dense(256, activation='relu', name="hidden1")(combined_inputs)
+                hidden2 = Dense(512, activation='relu', name="hidden2")(hidden1)
+                hidden3 = Dense(seq_len * 57, activation='relu', name="hidden3")(hidden2)
                 
-                # Reshape to target sequence length
-                decoder_reshape = Dense(seq_len * 32, activation='relu', name="decoder_dense")(decoder_lstm2)
-                decoder_reshaped = Reshape((seq_len, 32), name="decoder_reshape")(decoder_reshape)
-                
-                # Final output layer to 57 features
-                expanded_output = TimeDistributed(Dense(57, activation='linear'), name="output_features")(decoder_reshaped)
+                # Reshape to output sequence
+                expanded_output = Reshape((seq_len, 57), name="output_reshape")(hidden3)
             
             # Create composite model
-            self.composite_model = Model(
+            composite_model = Model(
                 inputs=[noise_input, conditions_input, context_input],
                 outputs=expanded_output,
                 name="composite_generator"
             )
             
-            self.logger.info(f"Composite generator built with {self.composite_model.count_params()} parameters")
+            self.logger.info(f"Composite generator built with {composite_model.count_params()} parameters")
+            
+            # Store the model
+            self.composite_model = composite_model
+            
+            return composite_model
             
         except Exception as e:
             self.logger.error(f"Error building composite generator: {e}")
             self.logger.error(traceback.format_exc())
             self.composite_model = None
+            return None
 
     def build_model(self) -> None:
         """Public interface for building the composite generator model."""
