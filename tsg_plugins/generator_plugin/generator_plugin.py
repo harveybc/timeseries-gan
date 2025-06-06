@@ -294,14 +294,22 @@ class GeneratorPlugin:
         Returns:
             Optional[Model]: The composite generator model if available, None otherwise
         """
-        if not hasattr(self, 'composite_model') or self.composite_model is None:
-            self.logger.warning("Composite generator model not built. Building model now...")
-            try:
-                self._build_composite_generator()
-            except Exception as e:
-                self.logger.error(f"Failed to build composite generator: {e}")
-                return None
-        return getattr(self, 'composite_model', None)
+        # First check if model was loaded via _load_model()
+        if hasattr(self, 'sequential_model') and self.sequential_model is not None:
+            return self.sequential_model
+            
+        # Check if we have a composite model built separately
+        if hasattr(self, 'composite_model') and self.composite_model is not None:
+            return self.composite_model
+            
+        # Try to build a simple generator model for testing/fallback
+        self.logger.warning("No generator model available. Building fallback generator...")
+        try:
+            model = self._build_composite_generator()
+            return model
+        except Exception as e:
+            self.logger.error(f"Failed to build fallback generator: {e}")
+            return None
 
     def _build_composite_generator(self, vae_decoder_model=None) -> Optional[Model]:
         """
