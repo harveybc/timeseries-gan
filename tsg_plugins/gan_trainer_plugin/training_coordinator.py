@@ -52,21 +52,22 @@ class TrainingCoordinator:
         
         self.logger.info("Optimizers setup complete")
     
-    def train(self, x_real_df: pd.DataFrame, generator: tf.keras.Model, 
-              discriminator: tf.keras.Model, gan_model: tf.keras.Model,
-              feeder_plugin: Any, epochs: int, batch_size: int,
-              train_discriminator_n_times: int = 1, train_generator_n_times: int = 1,
-              save_interval: int = 500, models_dir: str = "", plots_dir: str = "",
-              metrics_dir: str = "") -> Dict[str, Any]:
+    def train(self, generator: tf.keras.Model, discriminator: tf.keras.Model, 
+              gan_model: tf.keras.Model, feeder_plugin: Any, 
+              training_data: pd.DataFrame = None, epochs: int = None, 
+              batch_size: int = None, train_discriminator_n_times: int = 1, 
+              train_generator_n_times: int = 1, save_interval: int = 500, 
+              models_dir: str = "", plots_dir: str = "", metrics_dir: str = "",
+              **kwargs) -> Dict[str, Any]:
         """
         Main training loop for GAN.
         
         Args:
-            x_real_df: Real training data
             generator: Generator model
             discriminator: Discriminator model
             gan_model: Combined GAN model
             feeder_plugin: Plugin for data feeding
+            training_data: Real training data
             epochs: Number of training epochs
             batch_size: Training batch size
             train_discriminator_n_times: Discriminator training steps per iteration
@@ -81,11 +82,19 @@ class TrainingCoordinator:
         """
         self.logger.info(f"Starting GAN training for {epochs} epochs")
         
+        # Use defaults if not provided
+        if epochs is None:
+            epochs = self.params.get("epochs", 1000)
+        if batch_size is None:
+            batch_size = self.params.get("batch_size", 32)
+        if training_data is None:
+            raise ValueError("training_data parameter is required")
+        
         # Setup optimizers
         self._setup_optimizers()
         
         # Prepare real data for training
-        real_data = self._prepare_real_data(x_real_df, batch_size)
+        real_data = self._prepare_real_data(training_data, batch_size)
         
         # Training loop
         for epoch in range(epochs):
@@ -117,12 +126,12 @@ class TrainingCoordinator:
         self.logger.info("GAN training completed")
         return self.training_history
     
-    def _prepare_real_data(self, x_real_df: pd.DataFrame, batch_size: int) -> tf.Tensor:
+    def _prepare_real_data(self, training_data: pd.DataFrame, batch_size: int) -> tf.Tensor:
         """
         Prepare real data for training.
         
         Args:
-            x_real_df: Real data DataFrame
+            training_data: Real data DataFrame
             batch_size: Batch size for training
         
         Returns:
@@ -130,10 +139,10 @@ class TrainingCoordinator:
         """
         try:
             # Convert DataFrame to numpy array
-            if isinstance(x_real_df, pd.DataFrame):
-                real_data_np = x_real_df.values
+            if isinstance(training_data, pd.DataFrame):
+                real_data_np = training_data.values
             else:
-                real_data_np = x_real_df
+                real_data_np = training_data
             
             # Ensure proper shape for time series data
             if len(real_data_np.shape) == 2:
@@ -179,18 +188,16 @@ class TrainingCoordinator:
             real_batch = tf.gather(real_data, batch_indices)
             
             # Generate fake data with proper input shapes for composite generator
-            # Generator expects: [noise_input, conditions_input, context_input]
+            # Per REFERENCE.md, generator expects: [noise_input, conditions_input] only
             noise_dim = self.params.get("feeder_noise_dim", 32)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
-            context_vector_dim = self.params.get("context_vector_dim", 64)
             
-            # Generate inputs for composite generator
+            # Generate inputs for composite generator (only 2 inputs as per REFERENCE.md)
             noise = tf.random.normal([batch_size, noise_dim])
             conditions = tf.random.normal([batch_size, conditional_features_dim])
-            context = tf.random.normal([batch_size, context_vector_dim])
             
-            # Generate fake batch with proper inputs
-            fake_batch = generator([noise, conditions, context], training=False)
+            # Generate fake batch with correct 2 inputs
+            fake_batch = generator([noise, conditions], training=False)
             
             # Train discriminator
             with tf.GradientTape() as tape:
@@ -225,20 +232,18 @@ class TrainingCoordinator:
         total_loss = 0.0
         
         for _ in range(n_times):
-            # Generate inputs for composite generator
+            # Generate inputs for composite generator (only 2 inputs as per REFERENCE.md)
             noise_dim = self.params.get("feeder_noise_dim", 32)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
-            context_vector_dim = self.params.get("context_vector_dim", 64)
             
             # Generate inputs for composite generator
             noise = tf.random.normal([batch_size, noise_dim])
             conditions = tf.random.normal([batch_size, conditional_features_dim])
-            context = tf.random.normal([batch_size, context_vector_dim])
             
             # Train generator via GAN model
             with tf.GradientTape() as tape:
                 # Generate fake data and get discriminator prediction
-                fake_pred = gan_model([noise, conditions, context], training=True)
+                fake_pred = gan_model([noise, conditions], training=True)
                 
                 # Calculate generator loss
                 g_loss = self._generator_loss(fake_pred)

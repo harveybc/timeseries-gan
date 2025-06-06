@@ -335,14 +335,14 @@ class GeneratorPlugin:
             
             self.logger.info(f"Building generator with seq_len={seq_len}, noise_dim={noise_dim}")
             
-            # Build generator inputs
+            # Build generator inputs - per REFERENCE.md, VAE decoder only needs 2 inputs
             noise_input = Input(shape=(noise_dim,), name="noise_input")
             conditions_input = Input(shape=(conditional_features_dim,), name="conditions_input")
-            context_input = Input(shape=(context_vector_dim,), name="context_input")
             
             if vae_decoder_model is not None:
-                # Use pre-trained VAE decoder - implement iterative sequence generation
-                self.logger.info("Building composite model with pre-trained VAE decoder for sequence generation")
+                # Use pre-trained VAE decoder - implement BiLSTM Z-generator as per REFERENCE.md
+                self.logger.info("Building composite model with pre-trained VAE decoder")
+                self.logger.info(f"VAE decoder expects {len(vae_decoder_model.inputs)} inputs")
                 
                 # BiLSTM Z-generator architecture: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
                 z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
@@ -350,11 +350,10 @@ class GeneratorPlugin:
                 z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
                 z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
                 
-                # For sequence generation, we need to iterate timestep by timestep
-                # Create a custom layer that generates full sequences using the VAE decoder
+                # Generate full sequence by iteratively calling VAE decoder
                 def generate_sequence(inputs):
                     """Generate full sequence using VAE decoder iteratively."""
-                    z_seq, context, conditions = inputs
+                    z_seq, conditions = inputs
                     batch_size = tf.shape(z_seq)[0]
                     
                     # Initialize output sequence
@@ -362,35 +361,30 @@ class GeneratorPlugin:
                     
                     # Generate each timestep
                     for t in range(seq_len):
-                        # Use a portion of the latent sequence for this timestep
-                        t_idx = t % 18  # Cycle through the 18 latent timesteps
-                        z_t = z_seq[:, t_idx:t_idx+1, :]  # Shape: (batch, 1, 32)
+                        # Use latent sequence as input to VAE decoder
+                        # VAE decoder expects: [z_seq, conditions] as per REFERENCE.md
+                        vae_out = vae_decoder_model([z_seq, conditions])  # Shape: (batch, 23)
                         
-                        # Pass through VAE decoder to get 23 base features
-                        vae_inputs = [z_t, context, conditions]
-                        vae_out = vae_decoder_model(vae_inputs)  # Shape: (batch, 23)
-                        
-                        # Expand to 57 features using a dense layer
-                        expanded_features = tf.keras.layers.Dense(57, activation='linear')(vae_out)
+                        # Expand 23 features to 57 features using a dense layer
+                        expanded_features = tf.keras.layers.Dense(57, activation='linear', name=f"expand_{t}")(vae_out)
                         output_seq.append(expanded_features)
                     
                     # Stack timesteps to create sequence
                     return tf.stack(output_seq, axis=1)  # Shape: (batch, seq_len, 57)
                 
-                # Apply custom sequence generation
-                sequence_output = tf.keras.layers.Lambda(
-                    generate_sequence, 
+                # Apply sequence generation with explicit output shape
+                expanded_output = tf.keras.layers.Lambda(
+                    generate_sequence,
+                    output_shape=(seq_len, 57),
                     name="sequence_generator"
-                )([z_latent_seq, context_input, conditions_input])
-                
-                expanded_output = sequence_output
+                )([z_latent_seq, conditions_input])
                     
             else:
                 # Build simple generator from scratch for testing
                 self.logger.info("Building simple generator from scratch")
                 
-                # Combine all inputs
-                combined_inputs = Concatenate(name="combined_inputs")([noise_input, conditions_input, context_input])
+                # Combine inputs (only noise and conditions)
+                combined_inputs = Concatenate(name="combined_inputs")([noise_input, conditions_input])
                 
                 # Generate sequence directly
                 hidden1 = Dense(256, activation='relu', name="hidden1")(combined_inputs)
@@ -403,9 +397,9 @@ class GeneratorPlugin:
                 # Reshape to sequence format: (batch_size, seq_len, 57)
                 expanded_output = Reshape((seq_len, 57), name="output_reshape")(sequence_flat)
             
-            # Create composite model
+            # Create composite model with only 2 inputs as per REFERENCE.md
             composite_model = Model(
-                inputs=[noise_input, conditions_input, context_input],
+                inputs=[noise_input, conditions_input],
                 outputs=expanded_output,
                 name="composite_generator"
             )
