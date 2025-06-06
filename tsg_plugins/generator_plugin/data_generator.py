@@ -106,7 +106,7 @@ class DataGenerator:
     
     def _fill_sincos_date_features_prefill(self, window: np.ndarray, i: int, dt_obj: pd.Timestamp) -> None:
         """Fill sin/cos transformed date features for a single window position."""
-        scaled_date_features_arr = self.get_scaled_date_features(dt_obj)
+        scaled_date_features_arr = self._calculate_single_timestamp_cyclical_features(dt_obj)
         sincos_idx_counter = 0
         
         for original_date_feat_name in self.params.get("date_conditional_feature_names", []):
@@ -166,7 +166,7 @@ class DataGenerator:
             return norm_close_current
         return prev_norm_close
     
-    def get_scaled_date_features(self, datetime_obj: pd.Timestamp) -> np.ndarray:
+    def _calculate_single_timestamp_cyclical_features(self, datetime_obj: pd.Timestamp) -> np.ndarray:
         """
         Generate scaled (sin/cos) date features for a given datetime.
         Uses main_config for max values (compatible with FeederPlugin approach).
@@ -181,6 +181,8 @@ class DataGenerator:
         
         # Get main config (should be available from plugin initialization)
         main_cfg = getattr(self, 'main_config', {})
+        # Use "date_conditional_feature_names" from params to decide which features to generate
+        # This is consistent with how it was used in _fill_sincos_date_features_prefill
         date_conditional_names = self.params.get("date_conditional_feature_names", [])
 
         if "day_of_month" in date_conditional_names:
@@ -209,13 +211,65 @@ class DataGenerator:
             
         if "day_of_year" in date_conditional_names:
             doy = datetime_obj.dayofyear
-            max_doy = main_cfg.get("feeder_max_day_of_year", 366)
+            # Ensure day_of_year max is fetched correctly, e.g. 366 for leap, 365 otherwise
+            # For simplicity, using a common config value or a fixed one.
+            # The original code used feeder_max_day_of_year or 366.
+            # Let's assume main_cfg provides this, or default to 366 for wider applicability.
+            max_doy = main_cfg.get("feeder_max_day_of_year", 366 if datetime_obj.is_leap_year else 365)
+
             date_features.extend([
                 np.sin(2 * np.pi * doy / max_doy), 
                 np.cos(2 * np.pi * doy / max_doy)
             ])
             
         return np.array(date_features, dtype=np.float32)
+
+    def generate_cyclical_features_for_df(self, data_df: pd.DataFrame, datetime_col_name: str, feature_specs: List[tuple[str, Any]]) -> pd.DataFrame:
+        """
+        Generates cyclical (sin/cos) datetime features for an entire DataFrame.
+
+        Args:
+            data_df: Input DataFrame with a datetime column.
+            datetime_col_name: Name of the datetime column in data_df.
+            feature_specs: A list of tuples, where each tuple is (base_feature_name, max_value).
+                           Example: [('day_of_month', 31), ('hour_of_day', 23)]
+
+        Returns:
+            A new DataFrame with the generated cyclical features, indexed like data_df.
+        """
+        cyclical_features_df = pd.DataFrame(index=data_df.index)
+        dt_series = pd.to_datetime(data_df[datetime_col_name])
+
+        for base_name, max_val_cfg in feature_specs:
+            values = None
+            denominator = None
+
+            if base_name == "day_of_month":
+                values = dt_series.dt.day
+                denominator = max_val_cfg 
+            elif base_name == "hour_of_day":
+                values = dt_series.dt.hour
+                denominator = max_val_cfg + 1
+            elif base_name == "day_of_week":
+                values = dt_series.dt.dayofweek
+                denominator = max_val_cfg + 1
+            elif base_name == "day_of_year":
+                values = dt_series.dt.dayofyear
+                # For day_of_year, max_val_cfg should be 365 or 366.
+                # If it's passed as 365 (common year), but it's a leap year, it might be slightly off.
+                # However, we will trust max_val_cfg as provided by GeneratorPlugin, which should handle this.
+                denominator = max_val_cfg
+            else:
+                print(f"DataGenerator: Warning - Unknown base_name '{base_name}' for cyclical feature generation. Skipping.")
+                continue
+            
+            if values is not None and denominator is not None:
+                cyclical_features_df[f"{base_name}_sin"] = np.sin(2 * np.pi * values / denominator)
+                cyclical_features_df[f"{base_name}_cos"] = np.cos(2 * np.pi * values / denominator)
+            else:
+                print(f"DataGenerator: Warning - Could not process cyclical feature for base_name '{base_name}'. Values or denominator was None.")
+
+        return cyclical_features_df
     
     def set_main_config(self, main_config: Dict[str, Any]) -> None:
         """

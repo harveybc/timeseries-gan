@@ -463,8 +463,9 @@ class GeneratorPlugin:
 
         if cyclical_feature_specs:
             self.logger.info(f"Calculating cyclical features for: {cyclical_feature_specs}")
-            cyclical_df = self.data_generator._generate_cyclical_datetime_features(
-                processed_df,
+            # Call the new DataFrame-based cyclical feature generation method
+            cyclical_df = self.data_generator.generate_cyclical_features_for_df(
+                data_df=processed_df, # Pass the current state of processed_df
                 datetime_col_name=datetime_col_name,
                 feature_specs=cyclical_feature_specs
             )
