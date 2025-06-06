@@ -327,15 +327,16 @@ class GANTrainerPlugin:
     # Mandatory plugin methods
     def set_params(self, **kwargs) -> None:
         """Update plugin parameters and re-initialize modules if necessary."""
-        # Update parameters using ParameterManager
-        self.parameter_manager.set_params(**kwargs)
-        self.params = self.parameter_manager.get_params() # Ensure self.params is updated
+        # Update self.params directly first, as ParameterManager might need the updated full config
+        if kwargs:
+            self.params.update(kwargs)
+
+        # Re-initialize ParameterManager with the potentially updated self.params
+        self.parameter_manager = ParameterManager(self.params, self.logger)
 
         # Re-initialize modules that depend on updated parameters
-        # It's crucial to pass all required arguments during re-initialization
         self.directory_manager = DirectoryManager(self.params, self.logger)
         self.plugin_interface = PluginInterface(self.params, self.logger)
-        # Pass self.generator_plugin_instance during re-initialization
         self.training_coordinator = TrainingCoordinator(self.params, self.logger, self.generator_plugin_instance)
         self.model_builder = ModelBuilder(self.params, self.logger)
         self.model_persistence = ModelPersistence(self.params, self.logger)
