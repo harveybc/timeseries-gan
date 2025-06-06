@@ -34,8 +34,8 @@ class DiscriminatorPlugin:
     
     plugin_params = {
         # Input configuration
-        "sequence_length": 144,  # Standard sequence length
-        "num_features": 57,      # Full feature set size
+        "sequence_length": 144,  # Standard sequence length from REFERENCE.md
+        "num_features": 57,      # Full feature set size from REFERENCE.md (not 45)
         "feature_names": [],     # Will be populated from config
         
         # Architecture parameters

@@ -116,6 +116,12 @@ class GANTrainerPlugin:
         # Store config reference for access to merged parameters
         self.config = config or {}
         
+        # Store plugin instances for direct access
+        self.generator_plugin_instance = generator_plugin_instance
+        self.discriminator_plugin_instance = discriminator_plugin_instance
+        self.feeder_plugin_instance = feeder_plugin_instance
+        self.preprocessor_plugin_instance = preprocessor_plugin_instance
+        
         # Initialize logger
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         
@@ -452,14 +458,34 @@ class GANTrainerPlugin:
 
     def _ensure_models_are_built(self) -> bool:
         """Ensures generator, discriminator, and GAN models are built."""
-        # Models are now primarily sourced via plugin_interface
-        self.generator_model = self.plugin_interface.get_generator_model()
-        self.discriminator_model = self.plugin_interface.get_discriminator_model() # Get from interface
+        # Access models directly from plugin instances instead of plugin_interface
+        self.generator_model = None
+        self.discriminator_model = None
+        
+        # Get generator model directly from generator plugin instance
+        if hasattr(self, 'generator_plugin_instance') and self.generator_plugin_instance:
+            if hasattr(self.generator_plugin_instance, 'get_model'):
+                self.generator_model = self.generator_plugin_instance.get_model()
+                self.logger.info(f"Generator model retrieved: {self.generator_model.name if self.generator_model else 'None'}")
+            else:
+                self.logger.error("Generator plugin does not have get_model method")
+        else:
+            self.logger.warning("Generator plugin instance not available")
+            
+        # Get discriminator model directly from discriminator plugin instance  
+        if hasattr(self, 'discriminator_plugin_instance') and self.discriminator_plugin_instance:
+            if hasattr(self.discriminator_plugin_instance, 'get_model'):
+                self.discriminator_model = self.discriminator_plugin_instance.get_model()
+                self.logger.info(f"Discriminator model retrieved: {self.discriminator_model.name if self.discriminator_model else 'None'}")
+            else:
+                self.logger.error("Discriminator plugin does not have get_model method")
+        else:
+            self.logger.warning("Discriminator plugin instance not available")
 
         if not self.generator_model:
-            self.logger.warning("GANTrainer: Generator model not available via PluginInterface.")
+            self.logger.warning("GANTrainer: Generator model not available.")
         if not self.discriminator_model:
-            self.logger.warning("GANTrainer: Discriminator model not available via PluginInterface.")
+            self.logger.warning("GANTrainer: Discriminator model not available.")
 
         if self.generator_model and self.discriminator_model:
             if not self.gan_model: # Build GAN model if not already built

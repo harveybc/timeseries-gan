@@ -316,6 +316,8 @@ class GeneratorPlugin:
         Build the composite generator model combining BiLSTM Z-generator + VAE decoder.
         Based on REFERENCE.md Sequential Conditional VAE-GAN Architecture.
         
+        The generator must output sequences of shape (batch_size, 144, 57) to match discriminator input.
+        
         Args:
             vae_decoder_model: Optional pre-trained VAE decoder model to integrate
             
@@ -339,8 +341,8 @@ class GeneratorPlugin:
             context_input = Input(shape=(context_vector_dim,), name="context_input")
             
             if vae_decoder_model is not None:
-                # Use pre-trained VAE decoder - implement BiLSTM Z-generator as per REFERENCE.md
-                self.logger.info("Building composite model with pre-trained VAE decoder")
+                # Use pre-trained VAE decoder - implement iterative sequence generation
+                self.logger.info("Building composite model with pre-trained VAE decoder for sequence generation")
                 
                 # BiLSTM Z-generator architecture: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
                 z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
@@ -348,17 +350,40 @@ class GeneratorPlugin:
                 z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
                 z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
                 
-                # Prepare inputs for VAE decoder: [z_latent_seq, context, conditions]
-                vae_inputs = [z_latent_seq, context_input, conditions_input]
+                # For sequence generation, we need to iterate timestep by timestep
+                # Create a custom layer that generates full sequences using the VAE decoder
+                def generate_sequence(inputs):
+                    """Generate full sequence using VAE decoder iteratively."""
+                    z_seq, context, conditions = inputs
+                    batch_size = tf.shape(z_seq)[0]
+                    
+                    # Initialize output sequence
+                    output_seq = []
+                    
+                    # Generate each timestep
+                    for t in range(seq_len):
+                        # Use a portion of the latent sequence for this timestep
+                        t_idx = t % 18  # Cycle through the 18 latent timesteps
+                        z_t = z_seq[:, t_idx:t_idx+1, :]  # Shape: (batch, 1, 32)
+                        
+                        # Pass through VAE decoder to get 23 base features
+                        vae_inputs = [z_t, context, conditions]
+                        vae_out = vae_decoder_model(vae_inputs)  # Shape: (batch, 23)
+                        
+                        # Expand to 57 features using a dense layer
+                        expanded_features = tf.keras.layers.Dense(57, activation='linear')(vae_out)
+                        output_seq.append(expanded_features)
+                    
+                    # Stack timesteps to create sequence
+                    return tf.stack(output_seq, axis=1)  # Shape: (batch, seq_len, 57)
                 
-                # Pass through VAE decoder
-                vae_output = vae_decoder_model(vae_inputs)
+                # Apply custom sequence generation
+                sequence_output = tf.keras.layers.Lambda(
+                    generate_sequence, 
+                    name="sequence_generator"
+                )([z_latent_seq, context_input, conditions_input])
                 
-                # Expand to 57 features if needed
-                if vae_output.shape[-1] != 57:
-                    expanded_output = Dense(57, activation='linear', name="feature_expansion")(vae_output)
-                else:
-                    expanded_output = vae_output
+                expanded_output = sequence_output
                     
             else:
                 # Build simple generator from scratch for testing
@@ -367,13 +392,16 @@ class GeneratorPlugin:
                 # Combine all inputs
                 combined_inputs = Concatenate(name="combined_inputs")([noise_input, conditions_input, context_input])
                 
-                # Simple feedforward generator
+                # Generate sequence directly
                 hidden1 = Dense(256, activation='relu', name="hidden1")(combined_inputs)
                 hidden2 = Dense(512, activation='relu', name="hidden2")(hidden1)
-                hidden3 = Dense(seq_len * 57, activation='relu', name="hidden3")(hidden2)
+                hidden3 = Dense(1024, activation='relu', name="hidden3")(hidden2)
                 
-                # Reshape to output sequence
-                expanded_output = Reshape((seq_len, 57), name="output_reshape")(hidden3)
+                # Output full sequence: seq_len * 57 features
+                sequence_flat = Dense(seq_len * 57, activation='tanh', name="sequence_flat")(hidden3)
+                
+                # Reshape to sequence format: (batch_size, seq_len, 57)
+                expanded_output = Reshape((seq_len, 57), name="output_reshape")(sequence_flat)
             
             # Create composite model
             composite_model = Model(
@@ -383,6 +411,7 @@ class GeneratorPlugin:
             )
             
             self.logger.info(f"Composite generator built with {composite_model.count_params()} parameters")
+            self.logger.info(f"Generator output shape: {composite_model.output.shape}")
             
             # Store the model
             self.composite_model = composite_model

@@ -122,6 +122,12 @@ DEFAULT_VALUES = {
     "generator_decoder_input_name_conditions": "decoder_input_conditions", 
     "generator_decoder_input_name_context": "decoder_input_h_context",   
     "context_vector_dim": 64, # This is the main config value, Feeder should align
+    
+    # --- Generator Model Architecture Parameters ---
+    "feeder_noise_dim": 32, # Dimension of noise input for generator
+    "conditional_features_dim": 10, # Dimension of conditional features input
+    "generator_internal_z_sequence_length": 18, # Length of internal latent sequences
+    "generator_internal_z_latent_dim": 32, # Dimension of internal latent features
 
     # --- Feature names for GAN Trainer (Generator output and Discriminator input) ---
     "base_feature_names_ordered": [ # Features produced by the VAE decoder (GAN's generator)
