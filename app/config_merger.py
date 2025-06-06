@@ -4,6 +4,8 @@ import sys
 from app.config import DEFAULT_VALUES
 
 def process_unknown_args(unknown_args):
+    if not unknown_args or len(unknown_args) % 2 != 0:
+        return {}
     return {unknown_args[i].lstrip('--'): unknown_args[i + 1] for i in range(0, len(unknown_args), 2)}
 
 def convert_type(value):

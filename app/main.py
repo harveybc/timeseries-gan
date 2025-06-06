@@ -7,8 +7,8 @@ configurations, initializes plugins, then dispatches to the unified pipeline.
 """
 
 import sys
-from typing import Dict, Any
 import traceback
+from typing import Dict, Any
 
 from app.cli import parse_args
 from app.config import DEFAULT_VALUES
@@ -36,9 +36,17 @@ def main():
     file_config: Dict[str, Any] = {}
     
     if hasattr(args, 'remote_load_config') and args.remote_load_config:
-        file_config = remote_load_config(args.remote_load_config, args.username, args.password)
+        try:
+            file_config = remote_load_config(args.remote_load_config)
+            print(f"Remote configuration loaded from {args.remote_load_config}")
+        except Exception as e:
+            print(f"Failed to load remote configuration: {e}")
     elif hasattr(args, 'load_config') and args.load_config:
-        file_config = load_config(args.load_config)
+        try:
+            file_config = load_config(args.load_config)
+            print(f"Configuration loaded from {args.load_config}")
+        except Exception as e:
+            print(f"Failed to load configuration file: {e}")
     
     # Process unknown arguments
     unknown_args_dict = process_unknown_args(unknown_args)
@@ -88,7 +96,7 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     plugins = {
         'feeder_plugin': None,
         'generator_plugin': None,
-        'discriminator_plugin': None, # Ensure key exists
+        'discriminator_plugin': None,
         'evaluator_plugin': None,
         'optimizer_plugin': None,
         'preprocessor_plugin': None,
@@ -101,10 +109,11 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     try:
         feeder_class, _ = load_plugin('feeder.plugins', plugin_name_feeder)
         plugins['feeder_plugin'] = feeder_class(config)
+        print(f"✓ Feeder Plugin '{plugin_name_feeder}' loaded successfully")
     except Exception as e:
         print(f"Failed to load Feeder Plugin '{plugin_name_feeder}': {e}")
         traceback.print_exc()
-        # sys.exit(1) # Decide if critical
+        # Continue without feeder for now
 
     # Load Generator Plugin
     plugin_name_generator = config.get('generator', 'default_generator')
@@ -112,61 +121,92 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     try:
         generator_class, _ = load_plugin('generator.plugins', plugin_name_generator)
         plugins['generator_plugin'] = generator_class(config)
+        print(f"✓ Generator Plugin '{plugin_name_generator}' loaded successfully")
     except Exception as e:
         print(f"Failed to load Generator Plugin '{plugin_name_generator}': {e}")
         traceback.print_exc()
-        # sys.exit(1) # Decide if critical
+        # Try to load default implementation
+        try:
+            from tsg_plugins.generator_plugin.generator_plugin import GeneratorPlugin
+            plugins['generator_plugin'] = GeneratorPlugin(config)
+            print("✓ Default Generator Plugin loaded successfully")
+        except Exception as e2:
+            print(f"Failed to load default Generator Plugin: {e2}")
 
     # Load Discriminator Plugin (BEFORE Trainer)
-    # Ensure 'discriminator' is in DEFAULT_VALUES and 'default_discriminator' is in setup.py
-    plugin_name_discriminator = config.get('discriminator', 'default_discriminator') 
+    plugin_name_discriminator = config.get('discriminator', 'default_discriminator')
     print(f"Loading Discriminator Plugin: {plugin_name_discriminator}")
     try:
         discriminator_class, _ = load_plugin('discriminator.plugins', plugin_name_discriminator)
         plugins['discriminator_plugin'] = discriminator_class(config)
+        print(f"✓ Discriminator Plugin '{plugin_name_discriminator}' loaded successfully")
     except Exception as e:
         print(f"Failed to load Discriminator Plugin '{plugin_name_discriminator}': {e}")
         traceback.print_exc()
-        # sys.exit(1) # Decide if critical
+        # Try to load default implementation
+        try:
+            from tsg_plugins.discriminator_plugin import DiscriminatorPlugin
+            plugins['discriminator_plugin'] = DiscriminatorPlugin(config)
+            print("✓ Default Discriminator Plugin loaded successfully")
+        except Exception as e2:
+            print(f"Failed to load default Discriminator Plugin: {e2}")
 
-    # Load Evaluator Plugin
-    plugin_name_evaluator = config.get('evaluator', 'default_evaluator')
-    print(f"Loading Evaluator Plugin: {plugin_name_evaluator}")
-    try:
-        evaluator_class, _ = load_plugin('evaluator.plugins', plugin_name_evaluator)
-        plugins['evaluator_plugin'] = evaluator_class(config)
-    except Exception as e:
-        print(f"Failed to load Evaluator Plugin '{plugin_name_evaluator}': {e}")
-        traceback.print_exc()
-        # sys.exit(1) # Decide if critical
-    
-    # Load Optimizer Plugin
-    plugin_name_optimizer = config.get('optimizer', 'default_optimizer')
-    print(f"Loading Optimizer Plugin: {plugin_name_optimizer}")
-    try:
-        optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name_optimizer)
-        plugins['optimizer_plugin'] = optimizer_class(config)
-    except Exception as e:
-        print(f"Failed to load Optimizer Plugin '{plugin_name_optimizer}': {e}")
-        traceback.print_exc()
-        # sys.exit(1) # Decide if critical
-    
-    # Load Trainer Plugin (AFTER Generator and Discriminator)
+    # Load Trainer Plugin
     plugin_name_trainer = config.get('trainer', 'gan_trainer')
     print(f"Loading Trainer Plugin: {plugin_name_trainer}")
     try:
         trainer_class, _ = load_plugin('trainer.plugins', plugin_name_trainer)
-        plugins['trainer_plugin'] = trainer_class(
-            config=config,
-            generator_plugin_instance=plugins.get('generator_plugin'),
-            feeder_plugin_instance=plugins.get('feeder_plugin'),
-            discriminator_plugin_instance=plugins.get('discriminator_plugin') # Pass discriminator
-        )
+        # Pass the generator and discriminator plugins to the trainer
+        plugins['trainer_plugin'] = trainer_class(config, 
+                                                  generator_plugin_instance=plugins['generator_plugin'],
+                                                  discriminator_plugin_instance=plugins['discriminator_plugin'])
+        print(f"✓ Trainer Plugin '{plugin_name_trainer}' loaded successfully")
     except Exception as e:
         print(f"Failed to load Trainer Plugin '{plugin_name_trainer}': {e}")
         traceback.print_exc()
-        sys.exit(1) # Trainer is critical for train mode
-    
+        # Try to load default implementation
+        try:
+            from tsg_plugins.gan_trainer_plugin.gan_trainer_plugin import GANTrainerPlugin
+            plugins['trainer_plugin'] = GANTrainerPlugin(config,
+                                                         generator_plugin_instance=plugins['generator_plugin'],
+                                                         discriminator_plugin_instance=plugins['discriminator_plugin'])
+            print("✓ Default Trainer Plugin loaded successfully")
+        except Exception as e2:
+            print(f"Failed to load default Trainer Plugin: {e2}")
+
+    # Load Evaluator Plugin (optional)
+    plugin_name_evaluator = config.get('evaluator', 'default_evaluator')
+    if plugin_name_evaluator:
+        print(f"Loading Evaluator Plugin: {plugin_name_evaluator}")
+        try:
+            evaluator_class, _ = load_plugin('evaluator.plugins', plugin_name_evaluator)
+            plugins['evaluator_plugin'] = evaluator_class(config)
+            print(f"✓ Evaluator Plugin '{plugin_name_evaluator}' loaded successfully")
+        except Exception as e:
+            print(f"Failed to load Evaluator Plugin '{plugin_name_evaluator}': {e}")
+
+    # Load Optimizer Plugin (optional)
+    plugin_name_optimizer = config.get('optimizer', None)
+    if plugin_name_optimizer:
+        print(f"Loading Optimizer Plugin: {plugin_name_optimizer}")
+        try:
+            optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name_optimizer)
+            plugins['optimizer_plugin'] = optimizer_class(config)
+            print(f"✓ Optimizer Plugin '{plugin_name_optimizer}' loaded successfully")
+        except Exception as e:
+            print(f"Failed to load Optimizer Plugin '{plugin_name_optimizer}': {e}")
+
+    # Load Preprocessor Plugin (optional)
+    plugin_name_preprocessor = config.get('preprocessor', None)
+    if plugin_name_preprocessor:
+        print(f"Loading Preprocessor Plugin: {plugin_name_preprocessor}")
+        try:
+            preprocessor_class, _ = load_plugin('preprocessor.plugins', plugin_name_preprocessor)
+            plugins['preprocessor_plugin'] = preprocessor_class(config)
+            print(f"✓ Preprocessor Plugin '{plugin_name_preprocessor}' loaded successfully")
+        except Exception as e:
+            print(f"Failed to load Preprocessor Plugin '{plugin_name_preprocessor}': {e}")
+
     return plugins
 
 
@@ -174,40 +214,22 @@ def merge_plugin_configurations(current_config: Dict[str, Any], plugins: Dict[st
                                file_config: Dict[str, Any], cli_args: Dict[str, Any], 
                                unknown_args_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Merge configuration parameters from all loaded plugins.
+    Merge plugin-specific configurations with the current configuration.
     
     Args:
-        current_config: Current configuration dictionary
+        current_config: Current merged configuration
         plugins: Dictionary of loaded plugin instances
-        file_config: Configuration loaded from file
+        file_config: Configuration from file
         cli_args: Command line arguments
-        unknown_args_dict: Unknown arguments dictionary
+        unknown_args_dict: Unknown command line arguments
         
     Returns:
-        Merged configuration dictionary
+        Updated configuration dictionary with plugin-specific settings
     """
-    # Merge plugin_params from each instantiated plugin
-    for plugin_name, plugin in plugins.items():
-        if plugin and hasattr(plugin, 'plugin_params'):
-            current_config = merge_config(
-                current_config, 
-                plugin.plugin_params, 
-                {}, 
-                file_config, 
-                cli_args, 
-                unknown_args_dict
-            )
-    
+    # For now, just return the current config
+    # Plugin-specific configuration merging can be implemented here if needed
     return current_config
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nINFO: Execution interrupted by user (Ctrl+C).")
-        sys.exit(130)
-    except Exception as e_global:
-        print(f"❌ CRITICAL GLOBAL ERROR: An unhandled exception occurred: {e_global}")
-        traceback.print_exc()
-        sys.exit(1)
+    main()

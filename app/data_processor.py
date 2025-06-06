@@ -17,8 +17,6 @@ Author: TimeSeries-GAN Team
 """
 
 import logging
-import sys
-import traceback
 from typing import Dict, Any, Optional
 
 # Import specific pipeline classes
@@ -36,42 +34,31 @@ def run_pipeline(config: Dict[str, Any],
                  optimizer_plugin: Optional[Any] = None,
                  trainer_plugin: Optional[Any] = None,
                  preprocessor_plugin: Optional[Any] = None,
-                 **kwargs) -> None: # Use **kwargs to catch any other plugins not explicitly listed
+                 **kwargs) -> None:
     """
     Run the appropriate pipeline based on the operation mode.
     Passes necessary plugin instances to the specific pipeline constructors.
     """
-    operation_mode = config.get("operation_mode", "generate") # Default to generate if not specified
+    operation_mode = config.get("operation_mode", "generate")  # Default to generate if not specified
     logger.info(f"DataProcessor: Dispatching to pipeline for operation mode: {operation_mode}")
 
     if operation_mode == "train":
         if not trainer_plugin:
-            logger.error("Trainer plugin is required for 'train' mode but was not provided.")
-            raise ValueError("Trainer plugin instance not available for training mode.")
-        # TrainPipeline only needs trainer_plugin (which has references to other plugins)
-        pipeline = TrainPipeline(config=config, 
-                                 trainer_plugin=trainer_plugin)
+            raise ValueError("Trainer plugin is required for train operation mode")
+        pipeline = TrainPipeline(config, trainer_plugin)
+        
     elif operation_mode == "generate":
-        if not generator_plugin or not feeder_plugin:
-            logger.error("Generator and Feeder plugins are required for 'generate' mode.")
-            raise ValueError("Generator or Feeder plugin instance not available for generate mode.")
-        pipeline = GeneratePipeline(config=config,
-                                    feeder_plugin=feeder_plugin,
-                                    generator_plugin=generator_plugin,
-                                    evaluator_plugin=evaluator_plugin,
-                                    preprocessor_plugin=preprocessor_plugin)
+        if not generator_plugin:
+            raise ValueError("Generator plugin is required for generate operation mode")
+        pipeline = GeneratePipeline(config, generator_plugin, evaluator_plugin)
+        
     elif operation_mode == "optimize":
-        if not optimizer_plugin or not feeder_plugin or not generator_plugin or not evaluator_plugin:
-            logger.error("Optimizer, Feeder, Generator, and Evaluator plugins are required for 'optimize' mode.")
-            raise ValueError("One or more required plugin instances not available for optimize mode.")
-        pipeline = OptimizePipeline(config=config,
-                                    optimizer_plugin=optimizer_plugin,
-                                    feeder_plugin=feeder_plugin,
-                                    generator_plugin=generator_plugin,
-                                    evaluator_plugin=evaluator_plugin)
+        if not optimizer_plugin:
+            raise ValueError("Optimizer plugin is required for optimize operation mode")
+        pipeline = OptimizePipeline(config, optimizer_plugin)
+        
     else:
-        logger.error(f"Unsupported operation mode: {operation_mode}")
-        raise ValueError(f"Unsupported operation mode specified: {operation_mode}")
+        raise ValueError(f"Unknown operation mode: {operation_mode}")
 
     logger.info(f"Executing {operation_mode} pipeline...")
     pipeline.execute()
@@ -108,8 +95,9 @@ def run_pipeline_legacy(config: Dict[str, Any], feeder, z_generator, generator,
         config=config,
         feeder_plugin=feeder,
         generator_plugin=generator,
+        discriminator_plugin=discriminator,
         evaluator_plugin=evaluator,
         optimizer_plugin=optimizer,
-        preprocessor_plugin=None,  # Not available in legacy interface
+        preprocessor_plugin=None,
         trainer_plugin=trainer
     )
