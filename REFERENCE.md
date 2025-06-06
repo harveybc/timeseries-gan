@@ -35,6 +35,18 @@ The system combines three key machine learning components in a sequential pipeli
 2.  **Conditional Generation**: Date/time features and previous step's synthetic output for temporal conditioning.
 3.  **Generative Adversarial Network (GAN)**: Adversarial training for improved synthetic data quality, where the generator is a composite model.
 
+### Feature Engineering and Consistency
+
+A critical aspect of the SC-VAE-GAN's training stability is ensuring feature consistency between the synthetic data produced by the generator and the real data used to train the discriminator. Both data streams must present the same number and order of features to the discriminator.
+
+To address this, the `GeneratorPlugin` incorporates a dedicated method, `prepare_features_for_discriminator`. This method processes raw real data batches before they are fed to the discriminator during training. Its responsibilities include:
+
+1.  **Calculating Technical Indicators**: It applies the same technical indicator calculations (e.g., RSI, MACD, Bollinger Bands) to the real data as those defined for the synthetic data generation process.
+2.  **Generating Cyclical Date/Time Features**: It computes cyclical representations of date and time components (e.g., hour of day, day of week) from the real data's timestamps.
+3.  **Feature Alignment and Ordering**: It ensures that the processed real data contains all 57 features specified in the system configuration (e.g., `full_feature_names_ordered`). Any features missing after the previous steps are padded (e.g., with 0.0 if necessary), and all features are arranged in the precise order expected by the discriminator.
+
+By applying this consistent feature engineering pipeline to the real data, the system guarantees that the discriminator receives input with the expected shape (e.g., `(batch_size, sequence_length, 57)`), resolving potential feature mismatch errors and contributing to a more stable and effective adversarial training process. This preparation step is handled within the `TrainingCoordinator` by calling the `generator_plugin.prepare_features_for_discriminator()` method on real data batches.
+
 ### Autoencoder Model Analysis
 
 The pre-trained autoencoder models (located in `examples/results/phase_4_3/`) implement a sophisticated encoder-decoder architecture:

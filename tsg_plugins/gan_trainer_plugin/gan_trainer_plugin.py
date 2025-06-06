@@ -105,7 +105,7 @@ class GANTrainerPlugin:
     def __init__(self, config: Dict[str, Any], 
                  generator_plugin_instance: Optional[Any] = None, 
                  feeder_plugin_instance: Optional[Any] = None, 
-                 discriminator_plugin_instance: Optional[Any] = None, # ADDED discriminator_plugin_instance
+                 discriminator_plugin_instance: Optional[Any] = None, 
                  preprocessor_plugin_instance: Optional[Any] = None):
         """Initialize GAN trainer plugin with configuration and other plugin instances."""
         # Mandatory: Copy plugin_params to self.params and update with config
@@ -129,7 +129,8 @@ class GANTrainerPlugin:
         self.parameter_manager = ParameterManager(self.params, self.logger)
         self.directory_manager = DirectoryManager(self.params, self.logger)
         self.plugin_interface = PluginInterface(self.params, self.logger) # Initialize first
-        self.training_coordinator = TrainingCoordinator(self.params, self.logger)
+        # Pass generator_plugin_instance to TrainingCoordinator constructor
+        self.training_coordinator = TrainingCoordinator(self.params, self.logger, self.generator_plugin_instance)
         self.model_builder = ModelBuilder(self.params, self.logger)
         self.model_persistence = ModelPersistence(self.params, self.logger)
         self.training_metrics = TrainingMetrics(self.params, self.logger)

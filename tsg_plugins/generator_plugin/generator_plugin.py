@@ -76,7 +76,7 @@ class GeneratorPlugin:
         
         # Initialize parameters and main config
         self.params = self.plugin_params.copy()
-        self.main_config = config.copy()
+        self.main_config = config.copy() # Store the full config
         
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -87,27 +87,24 @@ class GeneratorPlugin:
         self.feature_to_idx: Dict[str, int] = {}
         self.num_all_features: int = 0
         
-        # Determine initial close file path from config
-        initial_close_file_path = config.get("x_train_file", config.get("real_data_file"))
-        
-        # Initialize specialized modules
+        # Initialize specialized modules (those not dependent on full config first)
         self._initialize_modules()
         
-        # Set parameters (simplified for initial testing)
-        for key, value in config.items():
-            if key in self.plugin_params:
-                self.params[key] = value
+        # Fully set parameters and initialize feature-dependent modules using the provided config
+        # This ensures ti_calculator, data_generator etc. are ready.
+        self.set_params(**config) 
         
-        # Validate configuration
-        self._validate_plugin_configuration()
-        
-        # Load initial close anchor (simplified)
+        # Validate configuration (set_params might call parts of this, ensure it's covered)
+        # self._validate_plugin_configuration() # Often called within set_params logic
+
+        # Load initial close anchor (set_params might handle this if x_train_file is in config)
+        initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
         if initial_close_file_path and self.initial_data_handler.get_initial_close_anchor() is None:
             try:
                 self.initial_data_handler.load_initial_close_anchor(initial_close_file_path)
             except Exception as e:
-                self.logger.warning(f"Failed to load initial close anchor: {e}")
-    
+                self.logger.warning(f"Failed to load initial close anchor in __init__: {e}")
+
     def _initialize_modules(self) -> None:
         """Initialize all specialized modules."""
         # Normalization handler (needs to be first)
@@ -413,6 +410,94 @@ class GeneratorPlugin:
             self.composite_model = None
             return None
 
+    def prepare_features_for_discriminator(self, data_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepares a raw DataFrame to have the 57 features expected by the discriminator.
+        Calculates technical indicators and cyclical date/time features.
+        Orders features according to 'full_feature_names_ordered'.
+        """
+        self.logger.info("Preparing real data features for discriminator input...")
+        processed_df = data_df.copy()
+
+        datetime_col_name = self.main_config.get("datetime_col_name", "DATE_TIME")
+        if datetime_col_name not in processed_df.columns:
+            raise ValueError(f"Datetime column '{datetime_col_name}' not found in input data for feature preparation.")
+        processed_df[datetime_col_name] = pd.to_datetime(processed_df[datetime_col_name])
+
+        # 1. Calculate Technical Indicators
+        if not hasattr(self, 'ti_calculator') or self.ti_calculator is None:
+            self.logger.warning("TI calculator not found, attempting to initialize feature-dependent modules.")
+            self._initialize_feature_dependent_modules()
+        if not hasattr(self, 'ti_calculator') or self.ti_calculator is None:
+            raise RuntimeError("TechnicalIndicatorCalculator not initialized in GeneratorPlugin.")
+        
+        ohlc_features = self.params.get("ohlc_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"])
+        missing_ohlc = [f for f in ohlc_features if f not in processed_df.columns]
+        if missing_ohlc:
+            raise ValueError(f"Missing OHLC columns for TI calculation: {missing_ohlc}. Available: {processed_df.columns.tolist()}")
+
+        self.logger.info(f"Calculating TIs using ohlc_features: {ohlc_features}")
+        ti_df = self.ti_calculator.calculate_technical_indicators(processed_df, ohlc_col_names=ohlc_features)
+        processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
+        self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
+
+        # 2. Calculate Cyclical Date/Time Features
+        if not hasattr(self, 'data_generator') or self.data_generator is None:
+            self.logger.warning("Data generator not found, attempting to initialize feature-dependent modules.")
+            self._initialize_feature_dependent_modules()
+        if not hasattr(self, 'data_generator') or self.data_generator is None:
+            raise RuntimeError("DataGenerator not initialized in GeneratorPlugin.")
+
+        date_features_to_generate = self.main_config.get('feeder_date_features_for_conditioning', [])
+        cyclical_feature_specs = []
+        default_max_map = {'day_of_month': 31, 'hour_of_day': 23, 'day_of_week': 6, 'day_of_year': 365}
+        
+        for base_feature_name in date_features_to_generate:
+            max_val_key_1 = f'feeder_max_{base_feature_name}'
+            max_val_key_2 = f'max_{base_feature_name}'
+            max_val = self.main_config.get(max_val_key_1, self.main_config.get(max_val_key_2, default_max_map.get(base_feature_name)))
+            if max_val is None:
+                self.logger.warning(f"Max value for cyclical feature {base_feature_name} not found. Skipping.")
+                continue
+            cyclical_feature_specs.append((base_feature_name, max_val))
+
+        if cyclical_feature_specs:
+            self.logger.info(f"Calculating cyclical features for: {cyclical_feature_specs}")
+            cyclical_df = self.data_generator._generate_cyclical_datetime_features(
+                processed_df,
+                datetime_col_name=datetime_col_name,
+                feature_specs=cyclical_feature_specs
+            )
+            processed_df = pd.merge(processed_df, cyclical_df, left_index=True, right_index=True, how='left')
+            self.logger.info(f"Columns after cyclical features merge: {processed_df.columns.tolist()}")
+
+        # 3. Ensure all features from full_feature_names_ordered are present and in order
+        expected_numeric_features = self.params.get("full_feature_names_ordered", [])
+        if not expected_numeric_features:
+            raise ValueError("GeneratorPlugin: 'full_feature_names_ordered' is not configured or empty.")
+        
+        # Filter out the datetime_col_name itself if it's listed but not a numeric feature
+        expected_numeric_features = [f for f in expected_numeric_features if f != datetime_col_name]
+
+        missing_cols = [col for col in expected_numeric_features if col not in processed_df.columns]
+        if missing_cols:
+            self.logger.warning(f"Missing columns that were expected in 'full_feature_names_ordered' (numeric part): {missing_cols}. They will be filled with 0.0.")
+            for col in missing_cols:
+                processed_df[col] = 0.0
+        
+        # Ensure no NaN values in the final feature set (TIs can produce NaNs at the beginning)
+        processed_df[expected_numeric_features] = processed_df[expected_numeric_features].fillna(0.0)
+
+        final_df = processed_df[expected_numeric_features]
+        
+        self.logger.info(f"Real data prepared with {len(final_df.columns)} features: {final_df.columns.tolist()}")
+        # Example: Target 57 features. This number should ideally come from len(expected_numeric_features)
+        # or a shared config value for number of discriminator features.
+        if len(final_df.columns) != self.params.get("num_features", 57): # num_features could be from discriminator
+             self.logger.warning(f"Warning: Prepared data has {len(final_df.columns)} features, but target (e.g., 57 or from config) might differ.")
+        
+        return final_df
+
     def _post_process_to_57_features(self, base_features):
         """
         Post-process 23 base features from VAE decoder to 57 final features.
@@ -437,4 +522,11 @@ class GeneratorPlugin:
 
     def build_model(self) -> None:
         """Public interface for building the composite generator model."""
-        self._build_composite_generator()
+        # Ensure VAE decoder model path is available if needed
+        vae_decoder_path = self.params.get("sequential_model_file")
+        if vae_decoder_path:
+            self._load_model(vae_decoder_path) # This builds the composite generator with VAE
+        else:
+            # Build a simple generator if no VAE decoder is specified (or handle as error)
+            self.logger.warning("No VAE decoder model path specified. Building fallback or simple generator.")
+            self._build_composite_generator() # Builds a simple one if vae_decoder_model is None
