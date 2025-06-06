@@ -51,17 +51,18 @@ class ModelLoader:
                     self.logger.error(f"Invalid .keras file format: {model_path}")
                     return None
             
-            # Set safe mode for Keras 3 if available
+            # Enable unsafe deserialization for Keras models with Lambda layers
             try:
-                tf.keras.config.set_safe_mode(False)
-                self.logger.debug("Keras 3 safe mode disabled")
+                # Try new Keras 3 API first
+                tf.keras.config.enable_unsafe_deserialization()
+                self.logger.debug("Keras unsafe deserialization enabled")
             except AttributeError:
-                # Fallback for Keras 2
                 try:
+                    # Fallback for older Keras versions
                     tf.keras.utils.enable_unsafe_deserialization()
-                    self.logger.debug("Keras 2 unsafe deserialization enabled")
+                    self.logger.debug("Keras utils unsafe deserialization enabled")
                 except AttributeError:
-                    self.logger.debug("Using default deserialization settings")
+                    self.logger.warning("Could not enable unsafe deserialization - may fail with Lambda layers")
             
             # Load the model
             try:
