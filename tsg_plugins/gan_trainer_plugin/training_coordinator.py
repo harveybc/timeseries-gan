@@ -127,74 +127,54 @@ class TrainingCoordinator:
         self.logger.info("GAN training completed")
         return self.training_history
     
-    def _prepare_real_data(self, training_data: pd.DataFrame) -> tf.Tensor: # Removed batch_size parameter
-        """
-        Prepare real data for training using the GeneratorPlugin for feature engineering.
-        
-        Args:
-            training_data: Real data DataFrame (raw).
-        
-        Returns:
-            Prepared real data tensor shaped (num_samples, seq_len, num_features).
-        """
+    def _prepare_real_data(self, training_data: pd.DataFrame) -> np.ndarray:
+        self.logger.info("Preparing real data for discriminator...")
+        if not self.generator_plugin:
+            raise RuntimeError("GeneratorPlugin not initialized in TrainingCoordinator.")
+
+        # Ensure training_data is a DataFrame
+        if not isinstance(training_data, pd.DataFrame):
+            if hasattr(training_data, 'df') and isinstance(training_data.df, pd.DataFrame):
+                training_data_df = training_data.df.copy()
+                self.logger.info("Extracted DataFrame from training_data object.")
+            else:
+                self.logger.error(f"training_data is not a DataFrame and has no 'df' attribute. Type: {type(training_data)}")
+                raise TypeError("training_data must be a pandas DataFrame or an object with a 'df' attribute that is a DataFrame.")
+        else:
+            training_data_df = training_data.copy()
+
+        self.logger.debug(f"Input training_data_df shape: {training_data_df.shape}, columns: {training_data_df.columns.tolist()}")
+
         try:
-            if not isinstance(training_data, pd.DataFrame):
-                self.logger.error("training_data must be a pandas DataFrame.")
-                raise ValueError("training_data is expected to be a pandas DataFrame.")
-
-            self.logger.info(f"Original real data shape: {training_data.shape}")
-
-            # Use GeneratorPlugin to prepare/engineer features
-            # This method is expected to return a DataFrame with 57 numeric features.
-            if self.generator_plugin is None:
-                self.logger.error("GeneratorPlugin instance is not available in TrainingCoordinator.")
-                raise ValueError("GeneratorPlugin instance is required for feature preparation.")
-            
-            processed_df = self.generator_plugin.prepare_features_for_discriminator(training_data.copy())
-            self.logger.info(f"Real data shape after GeneratorPlugin processing: {processed_df.shape}")
-
-            expected_features = self.params.get("num_features", 57) # num_features should align with discriminator
-            if processed_df.shape[1] != expected_features:
-                self.logger.error(f"Feature mismatch: Expected {expected_features} features after GeneratorPlugin processing, but got {processed_df.shape[1]}.")
-                raise ValueError(f"Processed data has {processed_df.shape[1]} features, expected {expected_features}.")
-
-            # Verify all columns are numeric
-            non_numeric_cols = processed_df.select_dtypes(exclude=[np.number]).columns
-            if not non_numeric_cols.empty:
-                self.logger.error(f"GeneratorPlugin.prepare_features_for_discriminator returned non-numeric columns: {list(non_numeric_cols)}.")
-                raise ValueError(f"Processed DataFrame contains non-numeric columns: {list(non_numeric_cols)}. All {expected_features} features must be numeric.")
-            
-            real_data_np = processed_df.values
-            
-            # Ensure proper shape for time series data (batching into sequences)
-            if len(real_data_np.shape) == 2:
-                seq_len = self.params.get("seq_len", 144) 
-                num_features_from_data = real_data_np.shape[1]
-
-                if num_features_from_data != expected_features:
-                    # This should ideally not happen if previous checks passed
-                    self.logger.warning(f"Feature count mismatch before reshaping. Expected {expected_features}, got {num_features_from_data}.")
-                
-                num_samples = len(real_data_np) // seq_len
-                if num_samples == 0:
-                    self.logger.error(f"Not enough data rows ({len(real_data_np)}) to form even one sequence of length {seq_len} with {num_features_from_data} features.")
-                    raise ValueError(f"Not enough data points for seq_len {seq_len}. Need at least {seq_len} rows, got {len(real_data_np)}.")
-                
-                # Take only enough data for full sequences
-                real_data_np = real_data_np[:num_samples * seq_len]
-                # Reshape to (num_samples, seq_len, num_features)
-                real_data_np = real_data_np.reshape(num_samples, seq_len, num_features_from_data)
-            
-            real_data_tensor = tf.convert_to_tensor(real_data_np, dtype=tf.float32)
-            
-            self.logger.info(f"Real data prepared for discriminator with final shape: {real_data_tensor.shape}")
-            return real_data_tensor
-            
+            processed_df = self.generator_plugin.prepare_features_for_discriminator(training_data_df)
+            self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}, Columns: {processed_df.columns.tolist()}")
         except Exception as e:
-            self.logger.error(f"Error preparing real data: {e}")
-            # import traceback # Uncomment for detailed stack trace if needed
-            # self.logger.error(traceback.format_exc())
+            self.logger.error(f"Error during generator_plugin.prepare_features_for_discriminator: {e}", exc_info=True)
             raise
+
+        # Validate the number of features after processing
+        # Align with the 51-feature architecture (23 base + 8 cyclical + 20 TIs)
+        expected_features = 51 # As per updated REFERENCE.md and config.py
+        
+        # More robust way to get expected_features if params are reliably populated
+        # full_feature_list = self.params.get("generator_full_feature_names_ordered", [])
+        # datetime_col_name = self.params.get("datetime_col_name", "DATE_TIME")
+        # if full_feature_list:
+        #     calculated_expected_features = len([f for f in full_feature_list if f != datetime_col_name])
+        #     if calculated_expected_features > 0:
+        #         expected_features = calculated_expected_features
+        #     else:
+        #         self.logger.warning(f"'generator_full_feature_names_ordered' resulted in 0 numeric features. Defaulting to {expected_features}.")
+        # else:
+        #     self.logger.warning(f"'generator_full_feature_names_ordered' not found in params. Defaulting to {expected_features} features.")
+
+
+        if processed_df.shape[1] != expected_features:
+            self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}. Columns: {processed_df.columns.tolist()}")
+            raise ValueError(f"Processed data has {processed_df.shape[1]} features, expected {expected_features}.")
+        
+        self.logger.info(f"Real data successfully prepared with {processed_df.shape[1]} features.")
+        return processed_df.values
     
     def _train_discriminator_step(self, real_data: tf.Tensor, generator: tf.keras.Model,
                                   discriminator: tf.keras.Model, batch_size: int,
