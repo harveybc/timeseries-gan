@@ -6,25 +6,24 @@ Main plugin interface that orchestrates specialized modules for synthetic data g
 Maintains mandatory plugin structure while delegating to focused modules.
 """
 
+import logging
+import os # Ensure os is imported
 import sys
-import traceback
+import traceback # Ensure traceback is imported
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, LSTM, Bidirectional, Conv1D, Dense, Reshape, Concatenate, ZeroPadding1D, TimeDistributed, Lambda
-from tensorflow.keras.models import Model
-from typing import Dict, Any, List, Optional
-import logging
+from tensorflow.keras.models import Model, load_model # type: ignore
+from tensorflow.keras.layers import Input, Dense, LSTM, Bidirectional, Conv1D, Reshape, Concatenate, Lambda # type: ignore
+from typing import Dict, Any, Optional, List, Tuple
 
 from .model_loader import ModelLoader
 from .normalization_handler import NormalizationHandler
-from .feature_validator import FeatureValidator
 from .initial_data_handler import InitialDataHandler
+from .feature_validator import FeatureValidator
 from .data_generator import DataGenerator
-from .technical_indicator_calculator import TechnicalIndicatorCalculator
 from .sequence_builder import SequenceBuilder
-from tensorflow import keras
-keras.config.enable_unsafe_deserialization()
+from .technical_indicator_calculator import TechnicalIndicatorCalculator
 
 
 class GeneratorPlugin:
@@ -55,13 +54,15 @@ class GeneratorPlugin:
         "feeder_noise_dim": 32, # Default noise dim, aligned with config.py
         "context_vector_dim": 64, # For decoder_input_h_context
         "conditional_features_dim": 10, # For decoder_input_conditions
-        "num_features": 51 # ADDED: To align with discriminator and overall architecture
+        "num_features": 51, # Target output features for the composite generator
+        "base_feature_names_ordered": [] # Added for _post_process_to_target_features if needed
     }
 
     plugin_debug_vars = [
         "sequential_model_file", "decoder_input_window_size", "batch_size_inference",
         "full_feature_names_ordered", "decoder_output_feature_names",
-        "ti_calculation_min_lookback"
+        "ti_calculation_min_lookback",
+        "num_features" # Added num_features for debug
     ]
     
     def __init__(self, config: Dict[str, Any]):
@@ -87,6 +88,7 @@ class GeneratorPlugin:
         # Initialize core attributes
         self.sequential_model: Optional[Model] = None
         self.model: Optional[Model] = None  # Alias for sequential_model
+        self.composite_model: Optional[Model] = None # Ensure this is initialized
         self.feature_to_idx: Dict[str, int] = {}
         self.num_all_features: int = 0
         
@@ -290,47 +292,54 @@ class GeneratorPlugin:
     def _load_model(self, vae_decoder_model_path: str) -> None:
         """
         Load the pre-trained VAE decoder and build the composite generator model.
-        
-        Based on REFERENCE.md:
-        - Load pre-trained VAE decoder from examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras
-        - Build BiLSTM Z-generator: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32 filters)
-        - Combine into composite generator that outputs 57 features
-        
-        Args:
-            vae_decoder_model_path: Path to the pre-trained VAE decoder model
         """
         if not vae_decoder_model_path:
             self.sequential_model = None
             self.model = None
+            self.composite_model = None # Clear composite model as well
             self.logger.warning("GeneratorPlugin: Attempted to load VAE decoder with empty path.")
             return
 
         self.logger.info(f"Building composite generator with VAE decoder from: {vae_decoder_model_path}")
 
         try:
-            # Load the pre-trained VAE decoder
             loaded_vae_decoder = self.model_loader.load_model_from_path(vae_decoder_model_path)
             if loaded_vae_decoder is None:
                 raise IOError(f"Failed to load VAE decoder from {vae_decoder_model_path}")
             
-            # Set the loaded VAE decoder to be trainable for joint GAN optimization
             loaded_vae_decoder.trainable = True
             self.logger.info(f"Loaded VAE decoder '{loaded_vae_decoder.name}'. Set trainable=True.")
-            self.logger.info(f"VAE decoder input shapes: {[inp.shape for inp in loaded_vae_decoder.inputs]}")
-            self.logger.info(f"VAE decoder output shape: {loaded_vae_decoder.output.shape}")
+            if hasattr(loaded_vae_decoder, 'inputs') and loaded_vae_decoder.inputs:
+                self.logger.info(f"VAE decoder input shapes: {[inp.shape for inp in loaded_vae_decoder.inputs]}")
+            if hasattr(loaded_vae_decoder, 'output') and loaded_vae_decoder.output:
+                self.logger.info(f"VAE decoder output shape: {loaded_vae_decoder.output.shape}")
 
             # Build the composite generator model
-            self.sequential_model = self._build_composite_generator(loaded_vae_decoder)
-            self.model = self.sequential_model  # Alias
+            # _build_composite_generator will set self.composite_model
+            built_model = self._build_composite_generator(loaded_vae_decoder) 
+            
+            if built_model is None: # Check if building failed
+                self.logger.error("Failed to build composite generator model (_build_composite_generator returned None).")
+                self.sequential_model = None
+                self.model = None
+                self.composite_model = None # Ensure it's None
+                raise IOError("Composite generator could not be built.")
+
+            self.sequential_model = built_model # For compatibility if anything still uses it
+            self.model = built_model  # Alias
+            # self.composite_model is already set by _build_composite_generator
 
             self.logger.info("Composite generator model built successfully.")
-            self.logger.info(f"Composite generator input shapes: {[inp.shape for inp in self.sequential_model.inputs]}")
-            self.logger.info(f"Composite generator output shape: {self.sequential_model.output.shape}")
+            if hasattr(self.model, 'inputs') and self.model.inputs: # Check model before accessing inputs
+                self.logger.info(f"Composite generator input shapes: {[inp.shape for inp in self.model.inputs]}")
+            if hasattr(self.model, 'output') and self.model.output: # Check model before accessing output
+                self.logger.info(f"Composite generator output shape: {self.model.output.shape}")
 
         except Exception as e:
-            self.logger.error(f"Error building composite generator model: {e}")
+            self.logger.error(f"Error during _load_model (building composite generator): {e}", exc_info=True)
             self.sequential_model = None
             self.model = None
+            self.composite_model = None # Ensure it's None on any exception
             raise IOError(f"Failed to build composite generator model: {e}")
 
     def get_model(self) -> Optional[Model]:
@@ -349,13 +358,51 @@ class GeneratorPlugin:
             return self.composite_model
             
         # Try to build a simple generator model for testing/fallback
-        self.logger.warning("No generator model available. Building fallback generator...")
+        self.logger.warning("No pre-loaded or pre-built composite model available. Attempting to build fallback generator...")
         try:
-            model = self._build_composite_generator()
-            return model
+            # Attempt to build using _build_composite_generator
+            # It might load VAE if path is in params and vae_decoder_model is None
+            vae_path = self.params.get("sequential_model_file")
+            vae_decoder_for_fallback = None
+            if vae_path and os.path.exists(vae_path): 
+                self.logger.info(f"Found VAE decoder path for fallback: {vae_path}")
+                vae_decoder_for_fallback = self.model_loader.load_model_from_path(vae_path)
+                if vae_decoder_for_fallback:
+                    vae_decoder_for_fallback.trainable = True 
+            
+            # _build_composite_generator sets self.composite_model
+            self._build_composite_generator(vae_decoder_model=vae_decoder_for_fallback) 
+            return self.composite_model # Return the potentially newly built model
         except Exception as e:
-            self.logger.error(f"Failed to build fallback generator: {e}")
+            self.logger.error(f"Failed to build fallback generator: {e}", exc_info=True) # Use exc_info
             return None
+
+    def _post_process_to_target_features(self, vae_output_features: tf.Tensor, target_num_features: int) -> tf.Tensor:
+        """
+        Transforms VAE output features (e.g., 23 from VAE decoder) to the target 
+        number of features for the GAN (e.g., 51).
+        This uses a Dense layer for the transformation.
+        
+        Args:
+            vae_output_features: Tensor from VAE decoder (shape: (batch, num_vae_features)).
+            target_num_features: The desired number of output features (e.g., 51).
+            
+        Returns:
+            Tensor with shape (batch, target_num_features).
+        """
+        current_features = vae_output_features.shape[-1]
+        self.logger.info(f"Post-processing VAE output from {current_features} to {target_num_features} features.")
+        
+        if current_features == target_num_features:
+            self.logger.info("VAE output features already match target. No expansion needed.")
+            return vae_output_features
+        
+        # Use a Dense layer to expand or contract features.
+        # Activation can be None (linear) or 'tanh' if outputs are normalized to [-1, 1].
+        # Using None for now, assuming normalization is handled elsewhere or features are raw.
+        expanded_features = Dense(target_num_features, activation=None, name="feature_expansion_layer")(vae_output_features)
+        self.logger.info(f"Feature expansion layer output shape: {expanded_features.shape}")
+        return expanded_features
 
     def _build_composite_generator(self, vae_decoder_model=None) -> Optional[Model]:
         """
@@ -402,10 +449,27 @@ class GeneratorPlugin:
                 
                 # Call VAE decoder once to get base features (batch, 23)
                 # VAE decoder expects: [z_latent_seq, context_input, conditions_input] as per REFERENCE.md  
-                vae_base_features = vae_decoder_model([z_latent_seq, context_input, conditions_input])  # Shape: (batch, 23)
+                # Ensure vae_decoder_model.inputs matches this expectation
+                if not hasattr(vae_decoder_model, 'inputs') or not vae_decoder_model.inputs:
+                    self.logger.error("Provided VAE decoder model has no inputs defined.")
+                    self.composite_model = None # Ensure reset before returning
+                    return None
+
+                if len(vae_decoder_model.inputs) == 3:
+                    vae_base_features = vae_decoder_model([z_latent_seq, context_input, conditions_input]) 
+                elif len(vae_decoder_model.inputs) == 2: 
+                    self.logger.warning("VAE decoder expects 2 inputs, providing z_latent_seq and conditions_input.")
+                    vae_base_features = vae_decoder_model([z_latent_seq, conditions_input])
+                elif len(vae_decoder_model.inputs) == 1: 
+                    self.logger.warning("VAE decoder expects 1 input, providing z_latent_seq.")
+                    vae_base_features = vae_decoder_model(z_latent_seq)
+                else:
+                    self.logger.error(f"VAE decoder has an unexpected number of inputs: {len(vae_decoder_model.inputs)}. Expected 1, 2 or 3.")
+                    self.composite_model = None # Ensure reset
+                    return None
                 
-                # Post-process 23 base features to 51 final features (num_output_features)
-                expanded_features = self._post_process_to_target_features(vae_base_features, num_output_features)  # Shape: (batch, num_output_features)
+                # Post-process VAE base features to target number of output features
+                expanded_features = self._post_process_to_target_features(vae_base_features, num_output_features)
                 
                 # Replicate single timestep across sequence length to create (batch, seq_len, num_output_features)
                 def replicate_across_time(features_input_tuple): # Modified to accept tuple
@@ -451,15 +515,15 @@ class GeneratorPlugin:
             self.logger.info(f"Composite generator built with {composite_model.count_params()} parameters")
             self.logger.info(f"Generator output shape: {composite_model.output.shape}")
             
-            # Store the model
-            self.composite_model = composite_model
+            # Store the model internally
+            self.composite_model = composite_model # Set the class attribute
             
-            return composite_model
+            return composite_model # Return the built model
             
         except Exception as e:
             self.logger.error(f"Error building composite generator: {e}")
-            self.logger.error(traceback.format_exc())
-            self.composite_model = None
+            self.logger.error(traceback.format_exc()) # Log full traceback
+            self.composite_model = None # Ensure it's None on failure
             return None
 
     def prepare_features_for_discriminator(self, data_df: pd.DataFrame) -> pd.DataFrame:

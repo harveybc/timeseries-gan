@@ -6,7 +6,7 @@ Clean, modular DEAP-based genetic algorithm optimizer for hyperparameter tuning.
 
 import copy
 import logging
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
 
 from .parameter_manager import ParameterManager
 from .evaluation_runner import EvaluationRunner
@@ -24,16 +24,16 @@ class OptimizerPlugin:
     """
     
     # Default plugin parameters
-    plugin_params = {
+    plugin_params: Dict[str, Any] = {
         "population_size": 20,
         "n_generations": 10,
         "cxpb": 0.7,
         "mutpb": 0.2,
         "tournament_size": 3,
         "hyperparameter_bounds": {
-            "latent_dim": (16, 128),
-            "batch_size": (16, 64),
-            "learning_rate": (1e-5, 1e-2)
+            'latent_dim': (16, 128), 
+            'batch_size': (16, 64), 
+            'learning_rate': (1e-5, 1e-2) # Example, adjust as per actual hyperparams
         },
         "optimizer_n_samples_per_eval": 100,
         "optimizer_start_datetime": None,
@@ -43,35 +43,68 @@ class OptimizerPlugin:
     # Debug variables
     plugin_debug_vars = ["population_size", "n_generations", "cxpb", "mutpb"]
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, 
+                 config: Dict[str, Any],
+                 generator_plugin_instance: Optional[Any] = None,
+                 discriminator_plugin_instance: Optional[Any] = None,
+                 trainer_plugin_instance: Optional[Any] = None,
+                 feeder_plugin_instance: Optional[Any] = None,
+                 evaluator_plugin_instance: Optional[Any] = None, # Added for completeness
+                 **kwargs): # Added **kwargs to catch any other unexpected args
         """Initialize optimizer plugin."""
-        if config is None:
-            raise ValueError("Configuration dictionary is required")
+        self.logger = logging.getLogger(__name__)
+        self.main_config = config.copy() if config else {}
+        self.params = self.plugin_params.copy()
+
+        # Store plugin instances
+        self.generator_plugin = generator_plugin_instance
+        self.discriminator_plugin = discriminator_plugin_instance
+        self.trainer_plugin = trainer_plugin_instance
+        self.feeder_plugin = feeder_plugin_instance
+        self.evaluator_plugin = evaluator_plugin_instance
+
+        # Initialize params from the global config
+        self.set_params(**self.main_config) 
         
-        # Merge config with defaults
-        self.params = copy.deepcopy(self.plugin_params)
-        self.set_params(**config)
+        self.logger.info(f"OptimizerPlugin initialized. Received plugins: "
+                         f"Gen: {self.generator_plugin is not None}, "
+                         f"Disc: {self.discriminator_plugin is not None}, "
+                         f"Trainer: {self.trainer_plugin is not None}, "
+                         f"Feeder: {self.feeder_plugin is not None}, "
+                         f"Eval: {self.evaluator_plugin is not None}")
+        if kwargs:
+            self.logger.warning(f"OptimizerPlugin received unexpected keyword arguments: {kwargs.keys()}")
+
+
+    def set_params(self, **kwargs) -> None:
+        """Update plugin parameters from global configuration or direct calls."""
+        self.logger.debug(f"OptimizerPlugin.set_params called with kwargs: {list(kwargs.keys())}")
         
-        # Initialize modular components
-        self.parameter_manager = ParameterManager(self.params)
-        self.evaluation_runner = EvaluationRunner(self.params)
-        self.genetic_optimizer = None  # Created when needed
+        # 1. Update main_config with new settings from kwargs
+        if hasattr(self, 'main_config') and self.main_config is not None:
+            self.main_config.update(kwargs)
+        else:
+            self.logger.warning("OptimizerPlugin: self.main_config was None, re-initializing from kwargs.")
+            self.main_config = kwargs.copy()
+
+        # 2. Re-initialize self.params from plugin_params defaults
+        current_params = self.plugin_params.copy()
+
+        # 3. Populate self.params from the updated self.main_config
+        # Iterate over the default plugin_params keys to ensure all are considered.
+        for param_key_default in self.plugin_params.keys():
+            # Check for prefixed version first (e.g., "optimizer_population_size")
+            prefixed_key_in_main_config = f"optimizer_{param_key_default}"
+            if prefixed_key_in_main_config in self.main_config:
+                current_params[param_key_default] = self.main_config[prefixed_key_in_main_config]
+            # Then check for non-prefixed version (e.g., "population_size")
+            elif param_key_default in self.main_config:
+                current_params[param_key_default] = self.main_config[param_key_default]
+            # If neither is found, the default from plugin_params.copy() remains.
         
-        # State tracking
-        self.is_initialized = False
-        self.optimization_results = None
-        
-        logger.info("OptimizerPlugin initialized")
-    
-    def set_params(self, **kwargs: Any) -> None:
-        """Update plugin parameters."""
-        for key, value in kwargs.items():
-            self.params[key] = value
-    
-    def get_debug_info(self) -> Dict[str, Any]:
-        """Get debugging information."""
-        return {var: self.params.get(var) for var in self.plugin_debug_vars}
-    
+        self.params = current_params
+        self.logger.debug(f"OptimizerPlugin.params re-derived: {self.params}")
+
     def optimize(
         self,
         feeder_plugin: Any,
@@ -91,7 +124,7 @@ class OptimizerPlugin:
         Returns:
             Dict: Best hyperparameters found
         """
-        logger.info("Starting hyperparameter optimization...")
+        self.logger.info("Starting hyperparameter optimization...")
         
         try:
             # Merge global config
@@ -120,13 +153,13 @@ class OptimizerPlugin:
             
             self.is_initialized = True
             
-            logger.info(f"Optimization completed successfully")
-            logger.info(f"Best parameters: {best_params}")
+            self.logger.info(f"Optimization completed successfully")
+            self.logger.info(f"Best parameters: {best_params}")
             
             return best_params
             
         except Exception as e:
-            logger.error(f"Optimization failed: {str(e)}")
+            self.logger.error(f"Optimization failed: {str(e)}")
             # Return default/random parameters as fallback
             return self.parameter_manager.generate_random_params()
     
@@ -159,29 +192,29 @@ class OptimizerPlugin:
             required_params = ['population_size', 'n_generations', 'hyperparameter_bounds']
             for param in required_params:
                 if param not in self.params:
-                    logger.error(f"Missing required parameter: {param}")
+                    self.logger.error(f"Missing required parameter: {param}")
                     return False
             
             # Validate parameter bounds
             bounds = self.params['hyperparameter_bounds']
             if not isinstance(bounds, dict) or len(bounds) == 0:
-                logger.error("Invalid hyperparameter_bounds")
+                self.logger.error("Invalid hyperparameter_bounds")
                 return False
             
             # Validate GA parameters
             if self.params['population_size'] < 2:
-                logger.error("population_size must be >= 2")
+                self.logger.error("population_size must be >= 2")
                 return False
             
             if self.params['n_generations'] < 1:
-                logger.error("n_generations must be >= 1")
+                self.logger.error("n_generations must be >= 1")
                 return False
             
-            logger.info("Configuration validation passed")
+            self.logger.info("Configuration validation passed")
             return True
             
         except Exception as e:
-            logger.error(f"Configuration validation failed: {str(e)}")
+            self.logger.error(f"Configuration validation failed: {str(e)}")
             return False
     
     def reset(self):
@@ -194,9 +227,9 @@ class OptimizerPlugin:
         if hasattr(self.evaluation_runner, 'evaluation_count'):
             self.evaluation_runner.evaluation_count = 0
         
-        logger.info("OptimizerPlugin reset")
+        self.logger.info("OptimizerPlugin reset")
     
     def cleanup(self):
         """Cleanup resources."""
         self.reset()
-        logger.info("OptimizerPlugin cleaned up")
+        self.logger.info("OptimizerPlugin cleaned up")
