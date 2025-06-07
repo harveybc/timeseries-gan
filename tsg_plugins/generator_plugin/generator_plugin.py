@@ -723,3 +723,122 @@ class GeneratorPlugin:
             "conditions_input": conditions,
             "context_input": context
         }
+    
+    def save_model(self, model_path: Optional[str] = None) -> str:
+        """
+        Save the current generator model to the specified path.
+
+        This method uses the ModelSaver component to handle the actual saving process.
+        It ensures that the model is saved in a way that is compatible with TensorFlow/Keras
+        and can be easily reloaded later.
+
+        Args:
+            model_path: Optional path where the model should be saved.
+                         If not provided, a default path will be used.
+
+        Returns:
+            str: The path where the model was saved.
+        """
+        self.logger.info(f"Saving generator model to path: {model_path}")
+        effective_model_path = self.model_saver.save_model(self.model, model_path)
+        self.logger.info(f"Model saved. Effective path: {effective_model_path}")
+        return effective_model_path
+
+    def generate(self,
+                 n_samples: int,
+                 conditional_features: Optional[np.ndarray] = None,
+                 initial_context_data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """
+        Generates synthetic time series data.
+
+        This method delegates the generation task to the internal DataGenerator component.
+        It ensures that the model and its components are initialized before generation.
+
+        Args:
+            n_samples: The number of samples (time steps) to generate.
+            conditional_features: An optional numpy array of conditional features
+                                  (e.g., date/time features) for each sample to be generated.
+                                  Shape should be (n_samples, num_conditional_features).
+            initial_context_data: Optional DataFrame providing an initial window of
+                                  real data to seed the generation process. This is used
+                                  for iterative generation where the previous step's output
+                                  (or real data) becomes context for the next.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the generated synthetic time series data,
+                          with features as columns and time steps as rows.
+        
+        Raises:
+            RuntimeError: If the DataGenerator component is not initialized or the model is not available.
+        """
+        self.logger.info(f"GeneratorPlugin: Received request to generate {n_samples} samples.")
+
+        if not hasattr(self, 'data_generator_component') or self.data_generator_component is None:
+            self.logger.error("DataGenerator component is not initialized in GeneratorPlugin. "
+                              "Ensure plugin.set_params() which calls initialize_model_components() has been successfully executed.")
+            raise RuntimeError("GeneratorPlugin's DataGenerator component is not initialized.")
+
+        # self.model here refers to self.generator_model_composite, which should be built/loaded.
+        if self.model is None:
+            self.logger.error("Generator model (self.model / self.generator_model_composite) is not built or loaded in GeneratorPlugin.")
+            raise RuntimeError("GeneratorPlugin's model is not available for generation.")
+
+        self.logger.debug(f"Number of samples to generate: {n_samples}")
+        self.logger.debug(f"Conditional features shape: {conditional_features.shape if conditional_features is not None else 'None'}")
+        self.logger.debug(f"Initial context data shape: {initial_context_data.shape if initial_context_data is not None else 'None'}")
+
+        try:
+            synthetic_data_df = self.data_generator_component.generate_synthetic_data(
+                n_samples=n_samples,
+                conditional_features=conditional_features,
+                initial_context_data=initial_context_data
+            )
+            self.logger.info(f"GeneratorPlugin: Successfully generated {synthetic_data_df.shape[0]} samples with {synthetic_data_df.shape[1]} features.")
+            return synthetic_data_df
+        except Exception as e:
+            self.logger.error(f"GeneratorPlugin: Error during synthetic data generation via DataGenerator component: {e}", exc_info=True)
+            # Re-raise as a RuntimeError to be caught by the caller
+            raise RuntimeError(f"GeneratorPlugin failed to generate data: {e}")
+
+# Example usage (for testing or direct invocation, not part of the plugin's core flow in the app)
+if __name__ == '__main__':
+    # Basic testing or demonstration of the GeneratorPlugin usage
+    # This block can be used to quickly test the plugin's functionality
+    # without needing to run the entire application.
+    
+    # Example config - in practice, this would be more detailed and loaded from a file or other source
+    example_config = {
+        "sequential_model_file": "path/to/vae_decoder_model", # Update with a valid model path for testing
+        "decoder_input_window_size": 144,
+        "full_feature_names_ordered": ["OPEN", "HIGH", "LOW", "CLOSE", "TARGET_FEATURE"],
+        "decoder_output_feature_names": ["TARGET_FEATURE"],
+        "ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
+        "ti_feature_names": ["SMA", "EMA"], # Example TIs
+        "date_conditional_feature_names": ["year", "month", "day"],
+        "feeder_conditional_feature_names": ["noise"],
+        "ti_calculation_min_lookback": 200,
+        "ti_params": {},
+        "generator_normalization_params_file": "path/to/normalization_params.json",
+        "internal_z_sequence_length": 18,
+        "internal_z_latent_dim": 32,
+        "feeder_noise_dim": 32,
+        "context_vector_dim": 64,
+        "conditional_features_dim": 10,
+        "num_features": 51,
+        "base_feature_names_ordered": []
+    }
+    
+    # Initialize the plugin
+    generator_plugin = GeneratorPlugin(example_config)
+    
+    # Generate some synthetic data
+    try:
+        synthetic_data = generator_plugin.generate(
+            n_samples=10, 
+            conditional_features=np.random.rand(10, 10), # Example conditional features
+            initial_context_data=None # No initial context for now
+        )
+        print("Generated synthetic data:")
+        print(synthetic_data)
+    except Exception as e:
+        print(f"Error during synthetic data generation: {e}")
