@@ -25,7 +25,7 @@ class DiscriminatorPlugin:
     Discriminator plugin for distinguishing real vs synthetic time series data.
     
     Architecture:
-    - Input: (batch_size, sequence_length, num_features) where num_features = 57
+    - Input: (batch_size, sequence_length, num_features) where num_features = 51 (aligned)
     - Conv1D layers for feature extraction
     - Bidirectional LSTM for temporal pattern recognition
     - Dense layers for classification
@@ -35,7 +35,7 @@ class DiscriminatorPlugin:
     plugin_params = {
         # Input configuration
         "sequence_length": 144,  # Standard sequence length from REFERENCE.md
-        "num_features": 57,      # Full feature set size from REFERENCE.md (not 45)
+        "num_features": 51,      # Aligned to 51 features
         "feature_names": [],     # Will be populated from config
         
         # Architecture parameters
@@ -157,7 +157,7 @@ class DiscriminatorPlugin:
             self.logger.info("Building discriminator model...")
             
             sequence_length = self.params.get("sequence_length", 144)
-            num_features = self.params.get("num_features", 57)
+            num_features = self.params.get("num_features", 51) # Ensure this uses the 51 default
             
             # Input layer
             input_layer = Input(shape=(sequence_length, num_features), name="discriminator_input")

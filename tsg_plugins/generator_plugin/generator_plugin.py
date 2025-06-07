@@ -32,7 +32,6 @@ class GeneratorPlugin:
     Main generator plugin interface following extreme separation of concerns.
     Orchestrates specialized modules for focused functionality.
     """
-    
     plugin_params = {
         "sequential_model_file": None, # This will be the VAE DECODER path
         "decoder_input_window_size": 144, # Output sequence length from VAE Decoder
@@ -53,12 +52,12 @@ class GeneratorPlugin:
         # New params for our internal Z-generator
         "internal_z_sequence_length": 18, # As per your spec (batch_size, 18, 32)
         "internal_z_latent_dim": 32,    # As per your spec
-        "feeder_noise_dim": 100, # Example: dimension of noise from FeederPlugin
+        "feeder_noise_dim": 32, # Default noise dim, aligned with config.py
         "context_vector_dim": 64, # For decoder_input_h_context
         "conditional_features_dim": 10, # For decoder_input_conditions
         "num_features": 51 # ADDED: To align with discriminator and overall architecture
     }
-    
+
     plugin_debug_vars = [
         "sequential_model_file", "decoder_input_window_size", "batch_size_inference",
         "full_feature_names_ordered", "decoder_output_feature_names",
@@ -314,7 +313,7 @@ class GeneratorPlugin:
         Build the composite generator model combining BiLSTM Z-generator + VAE decoder.
         Based on REFERENCE.md Sequential Conditional VAE-GAN Architecture.
         
-        The generator must output sequences of shape (batch_size, 144, 51) to match discriminator input.
+        The generator must output sequences of shape (batch_size, 144, self.params.get("num_features", 51)) to match discriminator input.
         
         Args:
             vae_decoder_model: Optional pre-trained VAE decoder model to integrate
@@ -327,9 +326,9 @@ class GeneratorPlugin:
             
             # Get configuration parameters
             seq_len = self.params.get("decoder_input_window_size", 144)
-            # Use the new num_features param, defaulting to 51
+            # Use the num_features param from plugin_params, defaulting to 51
             num_output_features = self.params.get("num_features", 51) 
-            noise_dim = self.params.get("feeder_noise_dim", 32) # Corrected from 100 to 32 based on recent config
+            noise_dim = self.params.get("feeder_noise_dim", 32) # Aligned with plugin_params
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
             context_vector_dim = self.params.get("context_vector_dim", 64)
             

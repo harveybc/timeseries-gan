@@ -17,26 +17,15 @@ Author: TimeSeries-GAN Team
 
 import os
 import logging
+import tensorflow as tf
 import pandas as pd
-import numpy as np
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.utils import Progbar
-from typing import Dict, Any, Optional
-from copy import deepcopy
+from typing import Dict, Any, List, Optional, Tuple
 
-# Import specialized modules for focused functionality
-from .training_coordinator import TrainingCoordinator
-from .model_builder import ModelBuilder
-from .model_persistence import ModelPersistence
-from .training_metrics import TrainingMetrics
-from .directory_manager import DirectoryManager
-from .plugin_interface import PluginInterface
-from .parameter_manager import ParameterManager
-
-# Configure logger
-logger = logging.getLogger(__name__)
-
+# Assuming TrainingCoordinator is in the same directory or correctly pathed
+from .training_coordinator import TrainingCoordinator 
+# from ..generator_plugin.generator_plugin import GeneratorPlugin # Example if in different plugin dir
+# from ..discriminator_plugin.discriminator_plugin import DiscriminatorPlugin # Example
+# from ..feeder_plugin.feeder_plugin import FeederPlugin # Example
 
 class GANTrainerPlugin:
     """
@@ -103,370 +92,250 @@ class GANTrainerPlugin:
     ]
     
     def __init__(self, config: Dict[str, Any], 
-                 generator_plugin_instance: Optional[Any] = None, 
-                 feeder_plugin_instance: Optional[Any] = None, 
-                 discriminator_plugin_instance: Optional[Any] = None, 
-                 preprocessor_plugin_instance: Optional[Any] = None):
-        """Initialize GAN trainer plugin with configuration and other plugin instances."""
-        # Mandatory: Copy plugin_params to self.params and update with config
-        self.params = deepcopy(self.plugin_params)
-        if config:
-            self.params.update(config)
+                 generator_plugin: Optional[Any] = None, 
+                 discriminator_plugin: Optional[Any] = None, 
+                 feeder_plugin: Optional[Any] = None, 
+                 **kwargs):
+        """
+        Initialize the GANTrainerPlugin.
+
+        Args:
+            config: Configuration dictionary.
+            generator_plugin: Instance of GeneratorPlugin.
+            discriminator_plugin: Instance of DiscriminatorPlugin.
+            feeder_plugin: Instance of FeederPlugin.
+        """
+        self.logger = logging.getLogger(__name__)
+        self.main_config = config.copy()
+        self.params = {} # Initialize before set_params
+        self._initialize_parameters() # Call to populate self.params from main_config and defaults
+
+        # Store plugin instances
+        if generator_plugin is None:
+            self.logger.error("Critical: GANTrainerPlugin received no GeneratorPlugin instance.")
+        self.generator_plugin = generator_plugin
+
+        if discriminator_plugin is None:
+            self.logger.error("Critical: GANTrainerPlugin received no DiscriminatorPlugin instance.")
+        self.discriminator_plugin = discriminator_plugin
+
+        if feeder_plugin is None:
+            self.logger.error("Critical: GANTrainerPlugin received no FeederPlugin instance.")
+        self.feeder_plugin = feeder_plugin
         
-        # Store config reference for access to merged parameters
-        self.config = config or {}
+        self.generator_model: Optional[tf.keras.Model] = None
+        self.discriminator_model: Optional[tf.keras.Model] = None
+        self.gan_model: Optional[tf.keras.Model] = None
         
-        # Store plugin instances for direct access
-        self.generator_plugin_instance = generator_plugin_instance
-        self.discriminator_plugin_instance = discriminator_plugin_instance
-        self.feeder_plugin_instance = feeder_plugin_instance
-        self.preprocessor_plugin_instance = preprocessor_plugin_instance
-        
-        # Initialize logger
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        
-        # Initialize specialized modules
-        self.parameter_manager = ParameterManager(self.params, self.logger)
-        self.directory_manager = DirectoryManager(self.params, self.logger)
-        self.plugin_interface = PluginInterface(self.params, self.logger) # Initialize first
-        # Pass generator_plugin_instance to TrainingCoordinator constructor
-        self.training_coordinator = TrainingCoordinator(self.params, self.logger, self.generator_plugin_instance)
-        self.model_builder = ModelBuilder(self.params, self.logger)
-        self.model_persistence = ModelPersistence(self.params, self.logger)
-        self.training_metrics = TrainingMetrics(self.params, self.logger)
-        
-        # Setup plugin interfaces and extract models
-        self.plugin_interface.set_plugin_instances(
-            generator_plugin_instance, 
-            feeder_plugin_instance, 
-            discriminator_plugin_instance, # PASS discriminator_plugin_instance
-            preprocessor_plugin_instance
+        # Initialize TrainingCoordinator
+        # Pass self.params which should now be populated
+        self.training_coordinator = TrainingCoordinator(
+            params=self.params, 
+            logger=self.logger, # Pass logger to TrainingCoordinator
+            generator_plugin=self.generator_plugin # Pass the stored instance
         )
-        
-        # Build models if generator is available
-        self._build_models()
-        
-        self.logger.info("GANTrainerPlugin initialized successfully")
-    
-    def _build_models(self):
-        """Build discriminator and GAN models if generator is available."""
-        generator = self.plugin_interface.get_generator_model()
-        
-        if generator:
-            seq_len, latent_dim, num_features = self.plugin_interface.get_extracted_parameters()
-            
-            self.discriminator = self.model_builder.build_discriminator(generator, seq_len, num_features)
-            self.gan_model = self.model_builder.build_gan(generator, self.discriminator)
-            
-            self.logger.info("Discriminator and GAN models built successfully")
-        else:
-            self.discriminator = None
-            self.gan_model = None
-            self.logger.warning("Generator not available - models not built")
-    
-    def train(self, training_data=None, epochs=None, batch_size=None, 
-              train_discriminator_n_times: int = 1, train_generator_n_times: int = 1, **kwargs):
-        """
-        Train the GAN model using the provided training data.
-        
-        Args:
-            training_data: Training dataset (pandas DataFrame or numpy array)
-            epochs: Number of training epochs (optional, uses plugin param if None)
-            batch_size: Batch size for training (optional, uses plugin param if None)
-            train_discriminator_n_times: Number of discriminator training steps per iteration
-            train_generator_n_times: Number of generator training steps per iteration
-            **kwargs: Additional training parameters
-        """
-        try:
-            self.logger.info("Starting GAN training...")
-            
-            # Use provided parameters or fallback to plugin params
-            epochs = epochs or self.params.get("gan_epochs", 10000)
-            batch_size = batch_size or self.params.get("gan_batch_size", 32)
-            
-            self.logger.info(f"Training with {epochs} epochs, batch size {batch_size}")
-            
-            if training_data is None:
-                raise ValueError("Training data is required for GAN training")
-            
-            # Ensure models are built
-            if not self._ensure_models_are_built():
-                raise RuntimeError("Failed to build GAN models")
-            
-            # Delegate to training coordinator
-            if hasattr(self, 'training_coordinator'):
-                # Pass required positional arguments first, then keyword arguments
-                return self.training_coordinator.train(
-                    self.generator_model,  # generator (required positional)
-                    self.discriminator_model,  # discriminator (required positional)
-                    self.gan_model,  # gan_model (required positional)
-                    None,  # feeder_plugin (required positional, using None for now)
-                    training_data=training_data,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    train_discriminator_n_times=train_discriminator_n_times,
-                    train_generator_n_times=train_generator_n_times,
-                    **kwargs
-                )
-            else:
-                # Simple fallback training
-                self.logger.info("Training coordinator not available, using simple training")
-                return self._simple_train(training_data, epochs, batch_size)
-                
-        except Exception as e:
-            self.logger.error(f"GAN training failed: {e}")
-            raise RuntimeError(f"GAN training failed: {e}")
-    
-    def _simple_train(self, training_data, epochs, batch_size):
-        """Simple fallback training implementation."""
-        self.logger.info(f"Simple training: {training_data.shape if hasattr(training_data, 'shape') else 'unknown shape'}")
-        self.logger.info(f"Training for {epochs} epochs with batch size {batch_size}")
-        
-        # For now, just log and return success
-        self.logger.info("GAN training completed successfully (simple mode)")
-        return {"status": "success", "epochs_trained": epochs}
-        """
-        Train the GAN model using the training coordinator.
-        
-        Args:
-            training_data: Real training data DataFrame
-            epochs: Number of training epochs
-            batch_size: Training batch size
-            train_discriminator_n_times: Number of discriminator training steps per iteration
-            train_generator_n_times: Number of generator training steps per iteration
-            **kwargs: Additional training parameters
-        """
-        try:
-            self.logger.info(f"Starting GAN training for {epochs} epochs with batch size {batch_size}")
-            
-            # Use training_data parameter
-            x_real_df = training_data
-            
-            # Get models from plugin interface
-            generator = self.plugin_interface.get_generator_model()
-            feeder_plugin = self.plugin_interface.get_feeder_plugin()
-            
-            # Validate that models are available
-            if not generator or not self.discriminator or not self.gan_model:
-                raise ValueError("Generator, discriminator, or GAN model not available for training")
-            
-            # Get directory paths
-            _, models_dir, plots_dir, metrics_dir = self.directory_manager.get_directories()
-            
-            # Delegate training to the training coordinator
-            training_history = self.training_coordinator.train(
-                x_real_df=x_real_df,
-                generator=generator,
-                discriminator=self.discriminator,
-                gan_model=self.gan_model,
-                feeder_plugin=feeder_plugin,
-                epochs=epochs,
-                batch_size=batch_size,
-                train_discriminator_n_times=train_discriminator_n_times,
-                train_generator_n_times=train_generator_n_times,
-                save_interval=self.params.get("gan_save_interval", 500),
-                models_dir=models_dir,
-                plots_dir=plots_dir,
-                metrics_dir=metrics_dir
-            )
-            
-            self.logger.info("GAN training completed successfully")
-            return training_history
-            
-        except Exception as e:
-            self.logger.error(f"GAN training failed: {e}")
-            raise
-    
-    def save_models(self, path_prefix: str = "gan_model_"):
-        """
-        Save trained models using the model persistence module.
-        
-        Args:
-            path_prefix: Prefix for saved model files
-        """
-        try:
-            generator = self.plugin_interface.get_generator_model()
-            models_dir = self.directory_manager.get_models_dir()
-            
-            self.model_persistence.save_models(
-                generator=generator,
-                discriminator=self.discriminator,
-                gan_model=self.gan_model,
-                models_dir=models_dir,
-                path_prefix=path_prefix
-            )
-            self.logger.info(f"Models saved with prefix {path_prefix}")
-        except Exception as e:
-            self.logger.error(f"Failed to save models: {e}")
-            raise
-    
-    def load_models(self, path_prefix: str = "gan_model_"):
-        """
-        Load trained models using the model persistence module.
-        
-        Args:
-            path_prefix: Prefix for model files to load
-        """
-        try:
-            models_dir = self.directory_manager.get_models_dir()
-            
-            models = self.model_persistence.load_models(
-                models_dir=models_dir,
-                path_prefix=path_prefix
-            )
-            
-            # Update discriminator and gan_model (generator is managed by plugin interface)
-            self.discriminator = models.get('discriminator') 
-            self.gan_model = models.get('gan_model')
-            
-            self.logger.info(f"Models loaded with prefix {path_prefix}")
-        except Exception as e:
-            self.logger.error(f"Failed to load models: {e}")
-            raise
-    
-    # Mandatory plugin methods
+        self.logger.info("GANTrainerPlugin initialized.")
+
+    def _initialize_parameters(self):
+        """Initialize self.params from main_config and plugin_params defaults."""
+        # Start with plugin defaults
+        self.params = self.plugin_params.copy()
+        # Override with main_config values
+        if hasattr(self, 'main_config') and self.main_config is not None:
+            for key, value in self.main_config.items():
+                # Update if key is in plugin_params or if it's a general param
+                if key in self.params or not key.startswith(("generator_", "discriminator_", "feeder_")):
+                    self.params[key] = value
+                # Handle prefixed params specifically for this plugin
+                if key.startswith("trainer_"):
+                    param_key = key[len("trainer_"):]
+                    self.params[param_key] = value
+        self.logger.debug(f"GANTrainerPlugin params initialized: {self.params.keys()}")
+
     def set_params(self, **kwargs) -> None:
-        """Update plugin parameters and re-initialize modules if necessary."""
-        # Update self.params directly first, as ParameterManager might need the updated full config
-        if kwargs:
-            self.params.update(kwargs)
+        """
+        Update plugin parameters.
+        """
+        self.logger.debug(f"GANTrainerPlugin.set_params called with: {list(kwargs.keys())}")
+        # Update main config, which is the primary source of truth from outside
+        if hasattr(self, 'main_config') and self.main_config is not None:
+            self.main_config.update(kwargs)
+        else:
+            self.main_config = kwargs.copy()
 
-        # Re-initialize ParameterManager with the potentially updated self.params
-        self.parameter_manager = ParameterManager(self.params, self.logger)
-
-        # Re-initialize modules that depend on updated parameters
-        self.directory_manager = DirectoryManager(self.params, self.logger)
-        self.plugin_interface = PluginInterface(self.params, self.logger)
-        self.training_coordinator = TrainingCoordinator(self.params, self.logger, self.generator_plugin_instance)
-        self.model_builder = ModelBuilder(self.params, self.logger)
-        self.model_persistence = ModelPersistence(self.params, self.logger)
-        self.training_metrics = TrainingMetrics(self.params, self.logger)
-
-        # Re-setup plugin interfaces and models if necessary
-        self.plugin_interface.set_plugin_instances(
-            self.generator_plugin_instance,
-            self.feeder_plugin_instance,
-            self.discriminator_plugin_instance,
-            self.preprocessor_plugin_instance
-        )
-        self._build_models() # Re-build models if parameters affecting them changed
+        # Re-initialize/update self.params based on the potentially changed main_config and new kwargs
+        # current_params_copy = self.params.copy() # Keep a copy of current specific params
+        self._initialize_parameters() # This will reload from main_config and defaults
         
-        self.logger.info("GANTrainerPlugin parameters updated and modules re-initialized.")
+        # Now, apply kwargs directly to self.params to ensure CLI overrides etc. are effective
+        # This prioritizes kwargs passed to set_params directly
+        for key, value in kwargs.items():
+            if key.startswith("trainer_"):
+                param_key = key[len("trainer_"):]
+                self.params[param_key] = value
+            else:
+                # Also allow non-prefixed keys from kwargs to update params if they exist in plugin_params
+                if key in self.plugin_params:
+                     self.params[key] = value
+                # Or if they are general config keys not specific to other plugins
+                elif not key.startswith(("generator_", "discriminator_", "feeder_")):
+                    self.params[key] = value
+
+
+        # After updating params, if TrainingCoordinator exists and has a set_params method:
+        if hasattr(self, 'training_coordinator') and self.training_coordinator and hasattr(self.training_coordinator, 'set_params'):
+            # Pass only the relevant params for TrainingCoordinator if possible, or all if it handles filtering
+            self.training_coordinator.set_params(**self.params)
+        
+        self.logger.debug(f"GANTrainerPlugin params updated: {self.params.keys()}")
+
+    def _build_models(self) -> bool:
+        """
+        Build or retrieve generator, discriminator, and combined GAN models.
+        """
+        self.logger.info("GANTrainer: Building/retrieving GAN models...")
+
+        if self.generator_plugin is None:
+            self.logger.error("GANTrainer: Generator plugin instance not available.")
+            return False
+        if not hasattr(self.generator_plugin, 'get_model'):
+            self.logger.error("GANTrainer: Generator plugin has no get_model method.")
+            return False
+        self.generator_model = self.generator_plugin.get_model()
+        if self.generator_model is None:
+            self.logger.error("GANTrainer: Generator model not available from plugin.")
+            return False
+        self.logger.info("GANTrainer: Generator model retrieved successfully.")
+
+        if self.discriminator_plugin is None:
+            self.logger.error("GANTrainer: Discriminator plugin instance not available.")
+            return False
+        if not hasattr(self.discriminator_plugin, 'get_model'):
+            self.logger.error("GANTrainer: Discriminator plugin has no get_model method.")
+            return False
+        self.discriminator_model = self.discriminator_plugin.get_model()
+        if self.discriminator_model is None:
+            self.logger.error("GANTrainer: Discriminator model not available from plugin.")
+            return False
+        self.logger.info("GANTrainer: Discriminator model retrieved successfully.")
+
+        # Build the combined GAN model
+        try:
+            # Ensure discriminator is not trainable during generator training phase
+            self.discriminator_model.trainable = False
+            
+            # Generator takes 3 inputs: noise, conditions, context
+            # These should match the inputs defined in GeneratorPlugin._build_composite_generator
+            if not isinstance(self.generator_model.inputs, list) or len(self.generator_model.inputs) < 3:
+                self.logger.error(f"GANTrainer: Generator model inputs are not as expected (list of 3). Got: {self.generator_model.inputs}")
+                return False
+
+            noise_input = self.generator_model.inputs[0]
+            conditions_input = self.generator_model.inputs[1]
+            context_input = self.generator_model.inputs[2]
+            
+            generated_sequence = self.generator_model([noise_input, conditions_input, context_input])
+            gan_output = self.discriminator_model(generated_sequence)
+            
+            self.gan_model = tf.keras.Model(
+                inputs=[noise_input, conditions_input, context_input],
+                outputs=gan_output,
+                name="combined_gan_model"
+            )
+            
+            generator_optimizer_config = {
+                'learning_rate': self.params.get('generator_learning_rate', 1e-4),
+                'beta_1': self.params.get('generator_beta_1', 0.5) 
+            }
+            gan_optimizer = tf.keras.optimizers.Adam(**generator_optimizer_config)
+
+            self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+            self.logger.info("GANTrainer: Combined GAN model built and compiled successfully.")
+            # self.gan_model.summary(print_fn=self.logger.info)
+
+        except Exception as e:
+            self.logger.error(f"GANTrainer: Failed to build combined GAN model: {e}", exc_info=True)
+            self.gan_model = None
+            return False
+            
+        return True
+
+    def train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None):
+        self.logger.info("GANTrainerPlugin: Starting GAN training process...")
+
+        if self.generator_plugin is None or self.discriminator_plugin is None or self.feeder_plugin is None:
+            self.logger.error("GANTrainerPlugin: One or more required plugins (Generator, Discriminator, Feeder) are not set.")
+            raise RuntimeError("Required plugins not available for training.")
+
+        # Build models if not already built
+        if self.generator_model is None or self.discriminator_model is None or self.gan_model is None:
+            self.logger.info("GANTrainerPlugin: Models not built or cleared, attempting to build...")
+            if not self._build_models():
+                self.logger.error("GANTrainerPlugin: Failed to build GAN models. Aborting training.")
+                raise RuntimeError("Failed to build GAN models")
+        
+        # Ensure models are available after attempting to build
+        if self.generator_model is None:
+            self.logger.error("GANTrainer: Generator model is MISSING after build attempt.")
+            raise RuntimeError("Generator model is MISSING.")
+        if self.discriminator_model is None:
+            self.logger.error("GANTrainer: Discriminator model is MISSING after build attempt.")
+            raise RuntimeError("Discriminator model is MISSING.")
+        if self.gan_model is None:
+            self.logger.error("GANTrainer: Combined GAN model is MISSING after build attempt.")
+            raise RuntimeError("Combined GAN model is MISSING.")
+
+        self.logger.info("GANTrainerPlugin: All models are available. Proceeding with TrainingCoordinator.")
+        
+        current_epochs = epochs if epochs is not None else self.params.get('epochs', 100)
+        current_batch_size = batch_size if batch_size is not None else self.params.get('batch_size', 32)
+
+        self.params['epochs'] = current_epochs
+        self.params['batch_size'] = current_batch_size
+        
+        if hasattr(self.training_coordinator, 'set_params'):
+             self.training_coordinator.set_params(**self.params)
+
+        try:
+            history = self.training_coordinator.train(
+                training_data=training_data,
+                generator=self.generator_model,
+                discriminator=self.discriminator_model,
+                gan_model=self.gan_model,
+                feeder_plugin=self.feeder_plugin 
+            )
+            self.logger.info("GANTrainerPlugin: Training completed by TrainingCoordinator.")
+            return history
+        except Exception as e:
+            self.logger.error(f"GANTrainerPlugin: Error during TrainingCoordinator.train: {e}", exc_info=True)
+            raise RuntimeError(f"GAN training failed: {e}")
 
     def get_debug_info(self) -> Dict[str, Any]:
-        """
-        Return debug information for the plugin.
-        
-        Returns:
-            Dict containing debug information
-        """
-        debug_info = {}
-        
-        # Add plugin parameters
-        debug_info.update({var: self.params.get(var) for var in self.plugin_debug_vars})
-        
-        # Add custom debug info
-        if hasattr(self, '_debug_info'):
-            debug_info.update(self._debug_info)
-        
-        # Add component debug info
-        debug_info['parameter_manager'] = self.parameter_manager.get_debug_info() if hasattr(self, 'parameter_manager') else None
-        debug_info['directory_manager'] = self.directory_manager.get_debug_info() if hasattr(self, 'directory_manager') else None
-        debug_info['plugin_interface'] = self.plugin_interface.get_debug_info() if hasattr(self, 'plugin_interface') else None
-        debug_info['model_builder'] = self.model_builder.get_debug_info() if hasattr(self, 'model_builder') else None
-        debug_info['training_metrics'] = self.training_metrics.get_debug_info() if hasattr(self, 'training_metrics') else None
-        
-        return debug_info
-    
-    def add_debug_info(self, key, value):
-        """
-        Add debug information key-value pair.
-        
-        Args:
-            key: Debug info key
-            value: Debug info value
-        """
-        if not hasattr(self, '_debug_info'):
-            self._debug_info = {}
-        self._debug_info[key] = value
-
-    def _ensure_models_are_built(self) -> bool:
-        """Ensures generator, discriminator, and GAN models are built."""
-        # Access models directly from plugin instances instead of plugin_interface
-        self.generator_model = None
-        self.discriminator_model = None
-        
-        # Get generator model directly from generator plugin instance
-        if hasattr(self, 'generator_plugin_instance') and self.generator_plugin_instance:
-            if hasattr(self.generator_plugin_instance, 'get_model'):
-                self.generator_model = self.generator_plugin_instance.get_model()
-                self.logger.info(f"Generator model retrieved: {self.generator_model.name if self.generator_model else 'None'}")
-            else:
-                self.logger.error("Generator plugin does not have get_model method")
-        else:
-            self.logger.warning("Generator plugin instance not available")
-            
-        # Get discriminator model directly from discriminator plugin instance  
-        if hasattr(self, 'discriminator_plugin_instance') and self.discriminator_plugin_instance:
-            if hasattr(self.discriminator_plugin_instance, 'get_model'):
-                self.discriminator_model = self.discriminator_plugin_instance.get_model()
-                self.logger.info(f"Discriminator model retrieved: {self.discriminator_model.name if self.discriminator_model else 'None'}")
-            else:
-                self.logger.error("Discriminator plugin does not have get_model method")
-        else:
-            self.logger.warning("Discriminator plugin instance not available")
-
-        if not self.generator_model:
-            self.logger.warning("GANTrainer: Generator model not available.")
-        if not self.discriminator_model:
-            self.logger.warning("GANTrainer: Discriminator model not available.")
-
-        if self.generator_model and self.discriminator_model:
-            if not self.gan_model: # Build GAN model if not already built
-                self.logger.info("GANTrainer: Building combined GAN model.")
-                self._build_gan_model(self.generator_model, self.discriminator_model)
-        else:
-            self.logger.warning("GANTrainer: Generator or Discriminator model is not available. GAN model not built/cleared.")
-            self.gan_model = None # Clear GAN model if components are missing
-        
-        if self.generator_model and self.discriminator_model and self.gan_model:
-            self.logger.info("GANTrainer: All required models (Generator, Discriminator, GAN) are available.")
-            return True
-        else:
-            if not self.generator_model: self.logger.warning("GANTrainer: Generator model is MISSING.")
-            if not self.discriminator_model: self.logger.warning("GANTrainer: Discriminator model is MISSING.")
-            if not self.gan_model: self.logger.warning("GANTrainer: Combined GAN model is MISSING.")
-            return False
-
-    def _build_gan_model(self, generator: Model, discriminator: Model) -> None:
-        """Builds the combined GAN model."""
-        if not generator or not discriminator:
-            self.logger.error("Cannot build GAN model: Generator or Discriminator is None.")
-            self.gan_model = None
-            return
-
-        discriminator.trainable = False
-        
-        gan_inputs = generator.inputs # Generator model's inputs
-        generator_output = generator(gan_inputs)
-        gan_output = discriminator(generator_output)
-        
-        self.gan_model = Model(inputs=gan_inputs, outputs=gan_output, name="combined_gan")
-        
-        gan_optimizer = Adam(
-            learning_rate=self.params.get("generator_lr", 1e-4), 
-            beta_1=self.params.get("generator_beta1", 0.5) # Ensure these params are in plugin_params
-        )
-        self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
-        self.logger.info("Combined GAN model built and compiled.")
-        # self.gan_model.summary(print_fn=self.logger.info)
-
-    def _save_models(self, epoch: int) -> None:
-        """Saves the generator and discriminator models."""
-        model_dir = self.params.get("gan_model_dir", "models/gan_trained")
-        os.makedirs(model_dir, exist_ok=True)
+        """Return debug information for the plugin."""
+        debug_info = {
+            "plugin_name": self.__class__.__name__,
+            "params": self.params,
+            "main_config_keys": list(self.main_config.keys()) if hasattr(self, 'main_config') else [],
+            "generator_plugin_set": self.generator_plugin is not None,
+            "discriminator_plugin_set": self.discriminator_plugin is not None,
+            "feeder_plugin_set": self.feeder_plugin is not None,
+            "generator_model_built": self.generator_model is not None,
+            "discriminator_model_built": self.discriminator_model is not None,
+            "gan_model_built": self.gan_model is not None,
+        }
         if self.generator_model:
-            self.generator_model.save(os.path.join(model_dir, f"generator_epoch_{epoch}.keras"))
+            debug_info["generator_model_summary"] = []
+            self.generator_model.summary(print_fn=lambda x: debug_info["generator_model_summary"].append(x))
         if self.discriminator_model:
-            self.discriminator_model.save(os.path.join(model_dir, f"discriminator_epoch_{epoch}.keras"))
-        self.logger.info(f"Models saved at epoch {epoch} to {model_dir}")
+            debug_info["discriminator_model_summary"] = []
+            self.discriminator_model.summary(print_fn=lambda x: debug_info["discriminator_model_summary"].append(x))
+        if self.gan_model:
+            debug_info["gan_model_summary"] = []
+            self.gan_model.summary(print_fn=lambda x: debug_info["gan_model_summary"].append(x))
+        return debug_info
+
+    def add_debug_info(self, key: str, value: Any) -> None:
+        """Add custom debug information (not standard)."""
+        if not hasattr(self, '_custom_debug_info'):
+            self._custom_debug_info = {}
+        self._custom_debug_info[key] = value
