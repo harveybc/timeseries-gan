@@ -121,7 +121,7 @@ class GeneratorPlugin:
         self.logger.info("Initializing GeneratorPlugin modules...")
         
         # Model loading and saving
-        self.model_loader = ModelLoader(self.logger)
+        self.model_loader = ModelLoader(self.params, self.logger) # Pass self.params
         self.model_saver = ModelSaver(self.logger)
         
         # Normalization (even if minimal, the handler object is expected)
