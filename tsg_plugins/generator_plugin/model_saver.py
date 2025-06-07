@@ -1,23 +1,22 @@
-\
 import logging
 import os
 from typing import Optional
 from tensorflow.keras.models import Model
 
 class ModelSaver:
-    \"\"\"Handles saving Keras models.\"\"\"
+    """Handles saving Keras models."""
 
     def __init__(self, logger: Optional[logging.Logger] = None):
-        \"\"\"
+        """
         Initialize the ModelSaver.
 
         Args:
             logger: Optional logger instance.
-        \"\"\"
+        """
         self.logger = logger if logger else logging.getLogger(__name__)
 
     def save_model_to_path(self, model: Model, file_path: str, overwrite: bool = True) -> bool:
-        \"\"\"
+        """
         Save a Keras model to the specified file path.
 
         Args:
@@ -27,7 +26,7 @@ class ModelSaver:
 
         Returns:
             bool: True if saving was successful, False otherwise.
-        \"\"\"
+        """
         if not model:
             self.logger.error("ModelSaver: No model provided to save.")
             return False
@@ -51,7 +50,7 @@ class ModelSaver:
             return False
 
     def save_weights_to_path(self, model: Model, file_path: str, overwrite: bool = True) -> bool:
-        \"\"\"
+        """
         Save model weights to the specified file path.
 
         Args:
@@ -61,7 +60,7 @@ class ModelSaver:
 
         Returns:
             bool: True if saving was successful, False otherwise.
-        \"\"\"
+        """
         if not model:
             self.logger.error("ModelSaver: No model provided to save weights.")
             return False
