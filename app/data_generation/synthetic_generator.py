@@ -74,12 +74,20 @@ class SyntheticDataGenerator:
             )
             
             # Generate synthetic data using generator plugin
+            # Prepare initial_context_data from initial_window if available
+            initial_context_data = None
+            if initial_window and initial_window.get('features') is not None:
+                # Convert initial window features to DataFrame for initial_context_data
+                features_array = initial_window.get('features')
+                if isinstance(features_array, np.ndarray) and features_array.size > 0:
+                    # Create a simple DataFrame from the features array
+                    # This will serve as initial context for the generator
+                    initial_context_data = pd.DataFrame(features_array)
+            
             generated_values = self.generator_plugin.generate(
+                n_samples=n_samples,
                 conditional_features=feeder_outputs,
-                sequence_length_T=n_samples,
-                initial_full_feature_window=initial_window.get('features') if initial_window else None,
-                initial_datetimes_for_window=initial_window.get('datetimes') if initial_window else None,
-                true_prev_close_for_initial_window_log_return=initial_window.get('prev_close') if initial_window else None
+                initial_context_data=initial_context_data
             )
             
             # Convert to DataFrame
