@@ -117,21 +117,28 @@ class GeneratorPlugin:
                 # For now, it logs the error and continues.
 
     def _initialize_modules(self) -> None:
-        """Initialize all specialized modules."""
-        # Normalization handler (needs to be first)
+        """Initialize core modules for the generator."""
+        self.logger.info("Initializing GeneratorPlugin modules...")
+        
+        # Model loading and saving
+        self.model_loader = ModelLoader(self.logger)
+        self.model_saver = ModelSaver(self.logger)
+        
+        # Normalization (even if minimal, the handler object is expected)
         self.normalization_handler = NormalizationHandler(self.params, self.logger)
         
-        # Model loader
-        self.model_loader = ModelLoader(self.params, self.logger)
+        # Initial data handling (for anchor close, initial window)
+        self.initial_data_handler = InitialDataHandler(
+            params=self.params, 
+            logger=self.logger, 
+            normalization_handler=self.normalization_handler
+        )
         
-        # Initial data handler
-        self.initial_data_handler = InitialDataHandler(self.normalization_handler)
-        
-        # Other modules will be initialized after feature validation
-        self.feature_validator = None
-        self.data_generator = None
-        self.ti_calculator = None
-        self.sequence_builder = None
+        # Feature engineering and validation
+        self.feature_validator: Optional[FeatureValidator] = None
+        self.data_generator: Optional[DataGenerator] = None
+        self.ti_calculator: Optional[TechnicalIndicatorCalculator] = None
+        self.sequence_builder: Optional[SequenceBuilder] = None
     
     def _initialize_feature_dependent_modules(self) -> None:
         """Initialize modules that depend on feature configuration."""
