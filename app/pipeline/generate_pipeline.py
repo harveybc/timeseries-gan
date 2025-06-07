@@ -150,7 +150,17 @@ class GeneratePipeline:
         if not hasattr(self, 'synthetic_generator') or self.synthetic_generator is None:
             raise RuntimeError("SyntheticDataGenerator is not initialized.")
         
-        synthetic_data = self.synthetic_generator.generate()
+        # Get the number of samples to generate from config
+        n_samples_to_generate = self.config.get("num_synthetic_samples_to_generate", 1000)
+        if not isinstance(n_samples_to_generate, int) or n_samples_to_generate <= 0:
+            print(f"⚠️ Warning: Invalid 'num_synthetic_samples_to_generate' ({n_samples_to_generate}) in config. Defaulting to 1000.")
+            n_samples_to_generate = 1000
+        
+        # Note: The `initial_window` argument for `self.synthetic_generator.generate()`
+        # is optional and defaults to None. If initial window data is required,
+        # it would need to be prepared and passed here.
+        # For now, we are only addressing the missing `n_samples` argument.
+        synthetic_data = self.synthetic_generator.generate(n_samples=n_samples_to_generate)
         if synthetic_data.empty:
             print("⚠️ Synthetic data generation resulted in an empty DataFrame.")
         else:
