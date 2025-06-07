@@ -309,9 +309,9 @@ class GeneratorPlugin:
             
             loaded_vae_decoder.trainable = True
             self.logger.info(f"Loaded VAE decoder '{loaded_vae_decoder.name}'. Set trainable=True.")
-            if hasattr(loaded_vae_decoder, 'inputs') and loaded_vae_decoder.inputs:
+            if hasattr(loaded_vae_decoder, 'inputs') and loaded_vae_decoder.inputs is not None: # Check against None
                 self.logger.info(f"VAE decoder input shapes: {[inp.shape for inp in loaded_vae_decoder.inputs]}")
-            if hasattr(loaded_vae_decoder, 'output') and loaded_vae_decoder.output:
+            if hasattr(loaded_vae_decoder, 'output') and loaded_vae_decoder.output is not None: # Check against None
                 self.logger.info(f"VAE decoder output shape: {loaded_vae_decoder.output.shape}")
 
             # Build the composite generator model
@@ -330,9 +330,9 @@ class GeneratorPlugin:
             # self.composite_model is already set by _build_composite_generator
 
             self.logger.info("Composite generator model built successfully.")
-            if hasattr(self.model, 'inputs') and self.model.inputs: # Check model before accessing inputs
+            if hasattr(self.model, 'inputs') and self.model.inputs is not None: # Check against None
                 self.logger.info(f"Composite generator input shapes: {[inp.shape for inp in self.model.inputs]}")
-            if hasattr(self.model, 'output') and self.model.output: # Check model before accessing output
+            if hasattr(self.model, 'output') and self.model.output is not None: # Check against None
                 self.logger.info(f"Composite generator output shape: {self.model.output.shape}")
 
         except Exception as e:
@@ -450,8 +450,8 @@ class GeneratorPlugin:
                 # Call VAE decoder once to get base features (batch, 23)
                 # VAE decoder expects: [z_latent_seq, context_input, conditions_input] as per REFERENCE.md  
                 # Ensure vae_decoder_model.inputs matches this expectation
-                if not hasattr(vae_decoder_model, 'inputs') or not vae_decoder_model.inputs:
-                    self.logger.error("Provided VAE decoder model has no inputs defined.")
+                if not hasattr(vae_decoder_model, 'inputs') or vae_decoder_model.inputs is None: # Check against None
+                    self.logger.error("Provided VAE decoder model has no inputs defined or inputs is None.")
                     self.composite_model = None # Ensure reset before returning
                     return None
 
@@ -513,7 +513,10 @@ class GeneratorPlugin:
             )
             
             self.logger.info(f"Composite generator built with {composite_model.count_params()} parameters")
-            self.logger.info(f"Generator output shape: {composite_model.output.shape}")
+            if hasattr(composite_model, 'output') and composite_model.output is not None: # Check against None
+                self.logger.info(f"Generator output shape: {composite_model.output.shape}")
+            else:
+                self.logger.warning("Built composite model has no output attribute or output is None.")
             
             # Store the model internally
             self.composite_model = composite_model # Set the class attribute
