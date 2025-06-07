@@ -100,7 +100,6 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
         'discriminator_plugin': None,
         'evaluator_plugin': None,
         'optimizer_plugin': None,
-        'preprocessor_plugin': None,
         'trainer_plugin': None
     }
     
@@ -119,7 +118,6 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
         ('trainer', 'trainer_plugin', ['feeder_plugin', 'generator_plugin', 'discriminator_plugin']),
         ('optimizer', 'optimizer_plugin', ['feeder_plugin', 'generator_plugin', 'discriminator_plugin', 'trainer_plugin']),
         ('evaluator', 'evaluator_plugin', ['generator_plugin']), # Example: Evaluator might need Generator
-        ('preprocessor', 'preprocessor_plugin', []) # Example: Preprocessor might be standalone or have specific deps
     ]
 
     # Load and initialize core plugins
