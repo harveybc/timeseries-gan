@@ -61,7 +61,7 @@ class GeneratePipeline:
         # Initialize component modules
         self.synthetic_generator = SyntheticDataGenerator(config, feeder_plugin, generator_plugin)
         self.real_data_processor = RealDataProcessor(config)
-        self.metrics_evaluator = MetricsEvaluator(config, evaluator_plugin)
+        self.metrics_evaluator = MetricsEvaluator(config) # Pass only config
         self.output_manager = OutputManager(config)
 
     def execute(self) -> None:
