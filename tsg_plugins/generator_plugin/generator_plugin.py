@@ -627,7 +627,7 @@ class GeneratorPlugin:
             'day_of_month': 31, 
             'hour_of_day': 23, # Max value is 23 for 0-23 hours
             'day_of_week': 6,  # Max value is 6 for 0-6 days
-            'day_of_year': 365, # Max value for day_of_year (if used)
+            # 'day_of_year': 365, # Removed as per Scenario B - day_of_year cyclical features are not desired
             'month_of_year': 12, 
             'week_of_year': 52
         }
