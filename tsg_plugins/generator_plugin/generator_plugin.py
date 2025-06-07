@@ -612,12 +612,27 @@ class GeneratorPlugin:
         if not hasattr(self, 'data_generator') or self.data_generator is None:
             raise RuntimeError("DataGenerator not initialized in GeneratorPlugin.")
 
-        date_features_to_generate = self.main_config.get('feeder_date_features_for_conditioning', [])
+        # Use 'feeder_date_features_for_conditioning' from main_config to determine which cyclical features to generate.
+        # This ensures alignment with what the FeederPlugin might provide for conditions.
+        # The desired final list of features should NOT include day_of_year_sin/cos if not intended.
+        date_features_to_make_cyclical = self.main_config.get('feeder_date_features_for_conditioning', [])
+        # Example: if date_features_to_make_cyclical = ["day_of_month", "hour_of_day", "day_of_week"]
+        # then only sin/cos for these three will be generated.
+        
+        self.logger.info(f"Base date features for cyclical generation: {date_features_to_make_cyclical}")
+
         cyclical_feature_specs = []
         # Ensure default_max_map covers all features in feeder_date_features_for_conditioning from config
-        default_max_map = {'day_of_month': 31, 'hour_of_day': 23, 'day_of_week': 6, 'day_of_year': 365, 'month_of_year': 12, 'week_of_year': 52}
+        default_max_map = {
+            'day_of_month': 31, 
+            'hour_of_day': 23, # Max value is 23 for 0-23 hours
+            'day_of_week': 6,  # Max value is 6 for 0-6 days
+            'day_of_year': 365, # Max value for day_of_year (if used)
+            'month_of_year': 12, 
+            'week_of_year': 52
+        }
         
-        for base_feature_name in date_features_to_generate:
+        for base_feature_name in date_features_to_make_cyclical:
             if base_feature_name in default_max_map:
                 cyclical_feature_specs.append({
                     "feature_name": base_feature_name,
@@ -628,12 +643,10 @@ class GeneratorPlugin:
         
         if cyclical_feature_specs:
             self.logger.info(f"Generating cyclical features using specs: {cyclical_feature_specs}")
-            # This assumes self.data_generator.add_cyclical_date_features is implemented
-            # to take df, datetime_col_name, and cyclical_feature_specs.
             processed_df = self.data_generator.add_cyclical_date_features(processed_df, datetime_col_name, cyclical_feature_specs)
             self.logger.info(f"Columns after cyclical feature generation: {processed_df.columns.tolist()}")
         else:
-            self.logger.info("No cyclical features specified or to be generated.")
+            self.logger.info("No cyclical features specified or to be generated based on 'feeder_date_features_for_conditioning'.")
 
         # 3. Final Feature Selection and Ordering
         all_expected_features_ordered = self.main_config.get("generator_full_feature_names_ordered", [])
