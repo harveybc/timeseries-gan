@@ -67,6 +67,60 @@ class FeederPlugin:
         
         logger.info("FeederPlugin initialized")
     
+    def generate(self, n_ticks_to_generate: int, target_datetimes: pd.Series) -> Optional[np.ndarray]:
+        """
+        Generate conditional features for a sequence of target datetimes.
+
+        Args:
+            n_ticks_to_generate: The number of ticks (samples) for which to generate conditions.
+            target_datetimes: A pandas Series of datetimes for which to generate conditions.
+
+        Returns:
+            Optional[np.ndarray]: An array of processed conditional features, or None if generation fails.
+        """
+        logger.info(f"FeederPlugin: Generating conditional features for {n_ticks_to_generate} ticks.")
+
+        if not hasattr(self, 'condition_manager') or self.condition_manager is None:
+            logger.error("ConditionManager not initialized in FeederPlugin.")
+            return None
+
+        if target_datetimes is None or len(target_datetimes) != n_ticks_to_generate:
+            logger.error(
+                f"Target datetimes are invalid or length mismatch. Expected {n_ticks_to_generate}, "
+                f"got {len(target_datetimes) if target_datetimes is not None else 'None'}."
+            )
+            return None
+
+        datetime_col_name = self.config.get("datetime_col_name", "DATE_TIME")
+        data_df = pd.DataFrame({datetime_col_name: target_datetimes})
+
+        # Extract raw conditions (e.g., cyclical features from datetimes)
+        # This relies on ConditionManager being configured to use temporal conditions
+        # and knowing which datetime column to use (timestamp_col).
+        raw_conditions = self.condition_manager.extract_conditions(data_df, timestamp_col=datetime_col_name)
+        if raw_conditions is None:
+            logger.error("FeederPlugin: Failed to extract raw conditions via ConditionManager.")
+            return None
+
+        # Process conditions (e.g., normalization if applicable and configured)
+        # This step assumes that if scaling is involved, the ConditionManager's
+        # scalers have been appropriately fitted (e.g., during FeederPlugin.initialize with sample_data)
+        # or are not needed for the type of conditions being generated (e.g., pre-normalized cyclical features).
+        processed_conditions = self.condition_manager.process_conditions(raw_conditions)
+        if processed_conditions is None:
+            logger.error("FeederPlugin: Failed to process conditions via ConditionManager.")
+            return None
+        
+        if processed_conditions.shape[0] != n_ticks_to_generate:
+            logger.error(
+                f"FeederPlugin: Shape mismatch in processed conditions. Expected {n_ticks_to_generate} samples, "
+                f"got {processed_conditions.shape[0]}. Raw conditions shape: {raw_conditions.shape}"
+            )
+            return None
+
+        logger.info(f"FeederPlugin: Successfully generated processed conditions with shape: {processed_conditions.shape}")
+        return processed_conditions
+
     def initialize(self, encoder_path: str, sample_data: Optional[pd.DataFrame] = None) -> bool:
         """
         Initialize the feeder plugin with encoder model and sample data.
