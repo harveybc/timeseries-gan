@@ -40,11 +40,10 @@ class GeneratePipeline:
         feeder_plugin: Plugin instance for noise generation and conditioning
         generator_plugin: Plugin instance for synthetic data generation
         evaluator_plugin: Plugin instance for evaluation metrics (optional)
-        preprocessor_plugin: Plugin instance for data preprocessing (optional)
     """
     
     def __init__(self, config: Dict[str, Any], feeder_plugin, generator_plugin, 
-                 evaluator_plugin, preprocessor_plugin):
+                 evaluator_plugin):
         """
         Initialize generation pipeline with configuration and plugin instances.
         
@@ -53,13 +52,11 @@ class GeneratePipeline:
             feeder_plugin: Plugin instance for noise generation and conditioning
             generator_plugin: Plugin instance for synthetic data generation
             evaluator_plugin: Plugin instance for evaluation metrics (optional)
-            preprocessor_plugin: Plugin instance for data preprocessing (optional)
         """
         self.config = config
         self.feeder_plugin = feeder_plugin
         self.generator_plugin = generator_plugin
         self.evaluator_plugin = evaluator_plugin
-        self.preprocessor_plugin = preprocessor_plugin
         
         # Initialize component modules
         self.synthetic_generator = SyntheticDataGenerator(config, feeder_plugin, generator_plugin)

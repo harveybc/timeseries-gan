@@ -50,7 +50,9 @@ def run_pipeline(config: Dict[str, Any],
     elif operation_mode == "generate":
         if not generator_plugin:
             raise ValueError("Generator plugin is required for generate operation mode")
-        pipeline = GeneratePipeline(config, generator_plugin, evaluator_plugin)
+        if not feeder_plugin: # Added check for feeder_plugin
+            raise ValueError("Feeder plugin is required for generate operation mode")
+        pipeline = GeneratePipeline(config, feeder_plugin, generator_plugin, evaluator_plugin)
         
     elif operation_mode == "optimize":
         if not optimizer_plugin:
