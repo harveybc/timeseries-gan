@@ -172,15 +172,10 @@ class GeneratePipeline:
                 print("No synthetic samples requested, skipping generation")
                 return pd.DataFrame()
             
-            # Prepare initial window for generator if preprocessor is available
-            initial_window = None
-            if self.preprocessor_plugin:
-                initial_window = self.synthetic_generator.prepare_initial_window(self.preprocessor_plugin)
-            
             # Generate synthetic data
             synthetic_data = self.synthetic_generator.generate(
                 n_samples=n_samples_synthetic,
-                initial_window=initial_window
+                initial_window=None # GeneratorPlugin handles its own initial context
             )
             
             print(f"✓ Synthetic data generated. Shape: {synthetic_data.shape}")
