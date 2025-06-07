@@ -41,8 +41,8 @@ class GeneratePipeline:
         generator_plugin: Plugin instance for synthetic data generation
         evaluator_plugin: Plugin instance for evaluation metrics (optional)
     """
-    
-    def __init__(self, config: Dict[str, Any], feeder_plugin, generator_plugin, 
+
+    def __init__(self, config: Dict[str, Any], feeder_plugin, generator_plugin,
                  evaluator_plugin):
         """
         Initialize generation pipeline with configuration and plugin instances.
@@ -57,60 +57,45 @@ class GeneratePipeline:
         self.feeder_plugin = feeder_plugin
         self.generator_plugin = generator_plugin
         self.evaluator_plugin = evaluator_plugin
-        
+
         # Initialize component modules
         self.synthetic_generator = SyntheticDataGenerator(config, feeder_plugin, generator_plugin)
         self.real_data_processor = RealDataProcessor(config)
+        self.metrics_evaluator = MetricsEvaluator(config, evaluator_plugin)
         self.output_manager = OutputManager(config)
-        
-        if evaluator_plugin:
-            self.metrics_evaluator = MetricsEvaluator(config, evaluator_plugin)
-    
+
     def execute(self) -> None:
         """
-        Execute the complete data generation and evaluation pipeline.
-        
-        Performs the following steps:
-        1. Validate generation configuration and data availability
-        2. Process evaluation stage and update output paths
-        3. Generate synthetic data using feeder and generator plugins
-        4. Load and process real data segment if configured
-        5. Combine synthetic and real data for output
-        6. Perform evaluation if evaluator plugin is available
-        7. Save results and handle output management
-        
-        Raises:
-            SystemExit: If required data is unavailable or generation fails
+        Execute the full data generation and evaluation pipeline.
         """
         print("Starting data generation and evaluation pipeline...")
-        
         try:
-            # Validate generation configuration
             self._validate_generation_config()
-            
-            # Process evaluation stage configuration
             evaluation_stage = self._process_evaluation_stage()
-            
-            # Generate synthetic data
-            synthetic_data = self._generate_synthetic_data()
-            
-            # Process real data segment
-            real_data = self._process_real_data()
-            
-            # Combine and save data
-            combined_data = self._combine_and_save_data(synthetic_data, real_data)
-            
-            # Perform evaluation if available
-            if self.evaluator_plugin and not synthetic_data.empty:
-                self._perform_evaluation(synthetic_data, evaluation_stage)
-            
-            print("✔ Data generation and evaluation completed successfully.")
-            
+
+            synthetic_data_df = self._generate_synthetic_data()
+
+            if synthetic_data_df.empty:
+                print("Synthetic data generation resulted in an empty DataFrame. Skipping further processing.")
+                return
+
+            real_data_segment_df = self._process_real_data()
+            combined_data_df = self._combine_data(synthetic_data_df, real_data_segment_df)
+
+            if self.evaluator_plugin:
+                self._evaluate_data(combined_data_df, real_data_segment_df, evaluation_stage)
+            else:
+                print("Evaluator plugin not available, skipping evaluation.")
+
+            self._save_outputs(combined_data_df, evaluation_stage)
+
+            print("✓ Data generation and evaluation pipeline completed successfully.")
+
         except Exception as e:
             print(f"❌ Data generation pipeline failed: {e}")
             traceback.print_exc()
             sys.exit(1)
-    
+
     def _validate_generation_config(self) -> None:
         """
         Validate generation configuration parameters.
@@ -120,22 +105,26 @@ class GeneratePipeline:
         
         Raises:
             ValueError: If required configuration is missing
-            FileNotFoundError: If required data files are not found
         """
         # Check required configuration keys
-        required_keys = ["x_train_file"]
+        required_keys = ["x_train_file"] # Used by RealDataProcessor for context if needed
         for key in required_keys:
             if key not in self.config:
                 raise ValueError(f"Required configuration key '{key}' missing")
-        
-        # Validate training data file existence
+
+        # Validate training data file existence (used by RealDataProcessor)
         x_train_file_path = self.config["x_train_file"]
         if not x_train_file_path or not os.path.exists(x_train_file_path):
-            raise FileNotFoundError(f"Training data file not found: '{x_train_file_path}'")
-        
+            # This might be optional if no real data processing is done,
+            # but RealDataProcessor might expect it.
+            print(f"Warning: Training data file '{x_train_file_path}' not found. Real data processing might fail if enabled.")
+            # Not raising FileNotFoundError here, as per the target version.
+
         print(f"✓ Generation configuration validated")
-        print(f"✓ Training data file verified: {x_train_file_path}")
-    
+        if x_train_file_path and os.path.exists(x_train_file_path):
+             print(f"✓ Training data file verified: {x_train_file_path}")
+
+
     def _process_evaluation_stage(self) -> str:
         """
         Process evaluation stage and update output paths accordingly.
@@ -147,4 +136,129 @@ class GeneratePipeline:
         print(f"Evaluation stage: {evaluation_stage}")
         
         # Update output paths based on evaluation stage
-       
+        # self.output_manager.update_paths_for_stage(evaluation_stage) # This line was removed as per previous steps
+        return evaluation_stage
+
+    def _generate_synthetic_data(self) -> pd.DataFrame:
+        """
+        Generate synthetic data using the configured synthetic_generator.
+        
+        Returns:
+            pd.DataFrame: The generated synthetic data.
+        """
+        print("Generating synthetic data...")
+        if not hasattr(self, 'synthetic_generator') or self.synthetic_generator is None:
+            raise RuntimeError("SyntheticDataGenerator is not initialized.")
+        
+        synthetic_data = self.synthetic_generator.generate()
+        if synthetic_data.empty:
+            print("⚠️ Synthetic data generation resulted in an empty DataFrame.")
+        else:
+            print(f"✓ Synthetic data generated with shape: {synthetic_data.shape}")
+        return synthetic_data
+
+    def _process_real_data(self) -> Optional[pd.DataFrame]:
+        """
+        Process real data segment using the configured real_data_processor.
+        
+        Returns:
+            Optional[pd.DataFrame]: The processed real data, or None if not configured.
+        """
+        print("Processing real data segment...")
+        if not hasattr(self, 'real_data_processor') or self.real_data_processor is None:
+            print("ℹ️ RealDataProcessor is not initialized. Skipping real data processing.")
+            return None
+            
+        real_data_file = self.config.get("real_data_file_for_generation")
+        if not real_data_file:
+            print("ℹ️ No real_data_file_for_generation specified. Skipping real data processing.")
+            return None
+
+        if not os.path.exists(real_data_file):
+            print(f"⚠️ Real data file for generation not found: {real_data_file}. Skipping.")
+            return None
+            
+        real_data = self.real_data_processor.process(real_data_file)
+        if real_data is not None and not real_data.empty:
+            print(f"✓ Real data processed with shape: {real_data.shape}")
+        elif real_data is not None and real_data.empty:
+            print("⚠️ Real data processing resulted in an empty DataFrame.")
+        else:
+            print("ℹ️ No real data processed.")
+        return real_data
+
+    def _combine_and_save_data(self, synthetic_data: pd.DataFrame, real_data: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """
+        Combine synthetic data with real data if available, and save the outputs.
+        
+        Args:
+            synthetic_data: The generated synthetic data.
+            real_data: The processed real data (optional).
+            
+        Returns:
+            pd.DataFrame: The combined data (or just synthetic if real_data is None).
+        """
+        print("Combining and saving data...")
+        if not hasattr(self, 'output_manager') or self.output_manager is None:
+            raise RuntimeError("OutputManager is not initialized.")
+
+        combined_data = synthetic_data
+        if real_data is not None and not real_data.empty:
+            # Example combination: append real data to synthetic data
+            # Adjust based on actual requirements (e.g., specific merging strategy)
+            print(f"Combining synthetic data (shape: {synthetic_data.shape}) with real data (shape: {real_data.shape})")
+            combined_data = pd.concat([synthetic_data, real_data], ignore_index=True) # Basic concatenation
+            self.output_manager.save_dataframe(real_data, "processed_real_data.csv")
+            print(f"✓ Real data segment saved.")
+
+        if not combined_data.empty:
+            self.output_manager.save_dataframe(combined_data, "combined_generated_data.csv")
+            self.output_manager.save_dataframe(synthetic_data, "synthetic_generated_data.csv")
+            print(f"✓ Combined data saved with shape: {combined_data.shape}")
+            print(f"✓ Synthetic data saved separately with shape: {synthetic_data.shape}")
+        else:
+            print("⚠️ Combined data is empty. Nothing to save.")
+            
+        return combined_data
+
+    def _perform_evaluation(self, synthetic_data: pd.DataFrame, evaluation_stage: str) -> None:
+        """
+        Perform evaluation of the synthetic data against real data if configured.
+        
+        Args:
+            synthetic_data: The generated synthetic data.
+            evaluation_stage: Identifier for the current evaluation stage.
+        """
+        print(f"Performing evaluation for stage: {evaluation_stage}...")
+        if not hasattr(self, 'metrics_evaluator') or self.metrics_evaluator is None:
+            print("ℹ️ MetricsEvaluator is not initialized. Skipping evaluation.")
+            return
+
+        if synthetic_data.empty:
+            print("⚠️ Synthetic data is empty. Skipping evaluation.")
+            return
+            
+        # Assuming real_data_for_evaluation is specified in config for comparison
+        real_data_eval_file = self.config.get("real_data_file_for_evaluation") 
+        if not real_data_eval_file or not os.path.exists(real_data_eval_file):
+            print(f"⚠️ Real data for evaluation not found or not specified ('{real_data_eval_file}'). Evaluation might be limited or skipped.")
+            # Decide if evaluation can proceed without real data or with a subset of metrics
+            # For now, let's assume the evaluator handles this.
+            
+        try:
+            evaluation_results = self.metrics_evaluator.evaluate(
+                synthetic_data=synthetic_data,
+                real_data_path=real_data_eval_file, # Pass path, evaluator should load
+                stage_name=evaluation_stage
+            )
+            if evaluation_results:
+                self.output_manager.save_results(evaluation_results, f"evaluation_results_{evaluation_stage}.json")
+                print(f"✓ Evaluation results saved for stage: {evaluation_stage}")
+            else:
+                print("⚠️ Evaluation did not produce any results.")
+        except Exception as e:
+            print(f"❌ Error during evaluation: {e}")
+            traceback.print_exc()
+
+# Ensure the class definition ends here if it's the end of the file.
+# If there's more code after this class, this comment is not needed.

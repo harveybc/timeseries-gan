@@ -117,7 +117,7 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     dependent_plugins = [
         ('trainer', 'trainer_plugin', ['feeder_plugin', 'generator_plugin', 'discriminator_plugin']),
         ('optimizer', 'optimizer_plugin', ['feeder_plugin', 'generator_plugin', 'discriminator_plugin', 'trainer_plugin']),
-        ('evaluator', 'evaluator_plugin', ['generator_plugin']), # Example: Evaluator might need Generator
+        ('evaluator', 'evaluator_plugin', []), # Evaluator does not directly depend on generator_plugin in its constructor
     ]
 
     # Load and initialize core plugins
