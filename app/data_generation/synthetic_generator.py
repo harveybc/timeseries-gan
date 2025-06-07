@@ -75,7 +75,7 @@ class SyntheticDataGenerator:
             
             # Generate synthetic data using generator plugin
             generated_values = self.generator_plugin.generate(
-                feeder_outputs_sequence=feeder_outputs,
+                conditional_features=feeder_outputs,
                 sequence_length_T=n_samples,
                 initial_full_feature_window=initial_window.get('features') if initial_window else None,
                 initial_datetimes_for_window=initial_window.get('datetimes') if initial_window else None,
