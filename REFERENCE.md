@@ -424,7 +424,6 @@ All configuration parameters are defined in `app/config.py` with comprehensive d
 |-----------|------|---------|-------------|
 | `generator_sequential_model_file` | str | "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras" | Pre-trained decoder model path |
 | `generator_decoder_input_window_size` | int | 144 | Expected input sequence length |
-| `generator_normalization_params_file` | str | "examples/data/phase_3/phase_3_debug_out.json" | Normalization parameters JSON |
 | `context_vector_dim` | int | 64 | Context vector dimension (must match feeder) |
 
 #### Generator Feature Configuration
@@ -565,7 +564,7 @@ timeseries-gan/
 │   └── generator_plugin/                  # FULLY MODULARIZED Generator Plugin
 │       ├── __init__.py                    # Generator plugin package initialization (~19 lines)
 │       ├── generator_plugin.py            # Main plugin interface with BiLSTM Z-generator (360 lines)
-│       ├── normalization_handler.py       # Data normalization/denormalization (~251 lines)
+
 │       ├── model_loader.py                # Model loading and validation (~195 lines)
 │       ├── feature_processor.py           # Feature processing and validation (~198 lines)
 │       ├── technical_indicator_calculator.py # Technical indicator calculations (~282 lines)
@@ -583,7 +582,7 @@ timeseries-gan/
 │   │   │   ├── normalized_d4.csv          # Training data (default x_train_file)
 │   │   │   ├── normalized_d5.csv          # Validation data
 │   │   │   ├── normalized_d6.csv          # Test data
-│   │   │   └── phase_3_debug_out.json     # Normalization parameters
+
 │   │   └── phase_4/                       # Final processed datasets
 │   │
 │   ├── results/                           # Pre-trained models and results
@@ -658,7 +657,7 @@ Generator Plugin → model_loader.py → VAE Decoder → Base Feature Generation
         ↓                      ↓                      ↓
 technical_indicator_calculator.py → TI Computation → feature_processor.py
         ↓                      ↓                      ↓
-sequence_builder.py → Feature Assembly → normalization_handler.py → Denormalization
+
         ↓                      ↓                      ↓
 output_manager.py → CSV Export → Evaluation (Optional) → Final Results
 ```
@@ -865,16 +864,7 @@ Standalone discriminator plugin implementing Conv1D/LSTM architecture for evalua
 
 **Integration**: Implements mandatory plugin interface, coordinates BiLSTM Z-generator with VAE decoder and all specialized modules
 
-#### normalization_handler.py (~251 lines) - Data Normalization
-**Purpose**: Comprehensive data normalization and denormalization operations
-**Key Functions**:
-- `load_normalization_params()`: JSON parameter loading
-- `normalize_data()`: Min-max normalization with feature-specific handling
-- `denormalize_data()`: Reverse normalization for output
-- `handle_ohlc_relationships()`: OHLC price relationship preservation
-- `convert_log_returns_to_prices()`: Log return to price conversion
 
-**Integration**: Used by `data_generator.py` and `sequence_builder.py` for data scaling
 
 #### model_loader.py (~195 lines) - Model Loading and Validation
 **Purpose**: Keras model loading, validation, and initialization  
@@ -995,7 +985,7 @@ class PluginName:
 **Key Tests**:
 - BiLSTM architecture construction and parameter initialization
 - Output shape verification: (batch_size, 18, 32) for VAE decoder compatibility
-- Tanh activation function verification for latent space normalization
+- Tanh activation function verification 
 - Noise input processing and latent sequence generation
 
 **Validation Results**: ✅ BiLSTM produces correct output shape with proper activation
