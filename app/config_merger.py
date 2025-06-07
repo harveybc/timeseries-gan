@@ -36,39 +36,39 @@ def merge_config(defaults, plugin_params1, plugin_params2, file_config, cli_args
     # Step 1: Merge plugin_params1 and plugin_params2 (lowest priority)
     merged_config = {}
     for k, v in plugin_params1.items():
-        print(f"Step 1 merging plugin_param1: {k} = {v}")
+        #print(f"Step 1 merging plugin_param1: {k} = {v}")
         merged_config[k] = v
 
     for k, v in plugin_params2.items():
-        print(f"Step 1.5 merging plugin_param2: {k} = {v}")
+        #print(f"Step 1.5 merging plugin_param2: {k} = {v}")
         merged_config[k] = v
 
-    print(f"After merging plugin params: {merged_config}")
+    #print(f"After merging plugin params: {merged_config}")
 
     # Step 2: Overwrite with default values from config.py
     # This ensures that defaults override plugin parameters.
     for k, v in defaults.items():
-        print(f"Step 2 merging default: {k} = {v}")
+        #print(f"Step 2 merging default: {k} = {v}")
         merged_config[k] = v
 
-    print(f"After merging defaults: {merged_config}")
+    #print(f"After merging defaults: {merged_config}")
 
     # Step 3: Merge with file configuration (override defaults and plugin params)
     for k, v in file_config.items():
-        print(f"Step 3 merging from file config: {k} = {v}")
+        #print(f"Step 3 merging from file config: {k} = {v}")
         merged_config[k] = v
 
-    print(f"After merging file config: {merged_config}")
+    #print(f"After merging file config: {merged_config}")
 
     # Step 4: Merge with CLI arguments (highest priority)
     cli_keys = [arg.lstrip('--') for arg in sys.argv if arg.startswith('--')]
     for key in cli_keys:
         if key in cli_args:
-            print(f"Step 4 merging from CLI args: {key} = {cli_args[key]}")
+            #print(f"Step 4 merging from CLI args: {key} = {cli_args[key]}")
             merged_config[key] = cli_args[key]
         elif key in unknown_args:
             value = convert_type(unknown_args[key])
-            print(f"Step 4 merging from unknown args: {key} = {value}")
+            #print(f"Step 4 merging from unknown args: {key} = {value}")
             merged_config[key] = value
 
     # Special handling for x_train_file if provided as the first non-flag argument
