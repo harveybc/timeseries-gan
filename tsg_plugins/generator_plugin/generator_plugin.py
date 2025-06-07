@@ -71,15 +71,18 @@ class GeneratorPlugin:
         Args:
             config: Configuration dictionary
         """
+        # Setup logging first
+        self.logger = logging.getLogger(__name__) # Moved up to be available immediately
+
         if config is None:
-            raise ValueError("Configuration dictionary ('config') is required.")
+            self.logger.error("GeneratorPlugin initialized with None config. Cannot proceed.")
+            raise ValueError("Configuration cannot be None for GeneratorPlugin.")
         
         # Initialize parameters and main config
         self.params = self.plugin_params.copy()
         self.main_config = config.copy() # Store the full config
         
-        # Set up logging
-        self.logger = logging.getLogger(__name__)
+        # self.logger is already set up
         
         # Initialize core attributes
         self.sequential_model: Optional[Model] = None
@@ -92,18 +95,24 @@ class GeneratorPlugin:
         
         # Fully set parameters and initialize feature-dependent modules using the provided config
         # This ensures ti_calculator, data_generator etc. are ready.
+        # Note: set_params itself might call _initialize_feature_dependent_modules if features change.
+        # We call it here to ensure modules are set up based on the initial config.
+        # However, the original code calls self.set_params(**config) which then might call _initialize_feature_dependent_modules.
+        # Let's stick to the original call order for set_params.
         self.set_params(**config) 
         
-        # Validate configuration (set_params might call parts of this, ensure it's covered)
-        # self._validate_plugin_configuration() # Often called within set_params logic
-
-        # Load initial close anchor (set_params might handle this if x_train_file is in config)
+        # Load initial close anchor. This was potentially problematic if initial_data_handler wasn't fully set up.
+        # initial_data_handler is initialized in _initialize_modules(), which is called before set_params.
         initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
-        if initial_close_file_path and self.initial_data_handler.get_initial_close_anchor() is None:
+        if initial_close_file_path and hasattr(self, 'initial_data_handler') and self.initial_data_handler.get_initial_close_anchor() is None:
             try:
+                self.logger.info(f"Attempting to load initial close anchor from: {initial_close_file_path}")
                 self.initial_data_handler.load_initial_close_anchor(initial_close_file_path)
+                self.logger.info(f"Successfully loaded initial close anchor from: {initial_close_file_path}")
             except Exception as e:
-                self.logger.warning(f"Failed to load initial close anchor in __init__: {e}")
+                self.logger.error(f"Failed to load initial close anchor from {initial_close_file_path}: {e}", exc_info=True)
+                # Depending on application requirements, this might be a critical error.
+                # For now, it logs the error and continues.
 
     def _initialize_modules(self) -> None:
         """Initialize all specialized modules."""
@@ -160,12 +169,12 @@ class GeneratorPlugin:
         Args:
             **kwargs: Parameter updates
         """
-        print(f"GeneratorPlugin.set_params called with kwargs: {list(kwargs.keys())}")
+        print(f"GeneratorPlugin.set_params called with kwargs: {list(kwargs.keys())}") # Existing print
         
         # Store old values for change detection
         old_model_file = self.params.get("sequential_model_file")
         old_norm_file = self.params.get("generator_normalization_params_file")
-        old_full_feature_names = self.params.get("full_feature_names_ordered")
+        old_full_feature_names = list(self.params.get("full_feature_names_ordered", [])) # Ensure it's a list for comparison
         old_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
         
         # Update main config
@@ -205,30 +214,70 @@ class GeneratorPlugin:
                 self.normalization_handler.normalization_params = None
         
         # Check for feature configuration changes
-        if (self.params.get("full_feature_names_ordered") != old_full_feature_names or
-            self._features_config_changed(kwargs)):
-            if self.params.get("full_feature_names_ordered"):
-                self._initialize_feature_dependent_modules()
-                if self.feature_validator:
-                    self.feature_validator.validate_feature_name_consistency(self.params)
+        # Compare current self.params["full_feature_names_ordered"] (which might have been updated by kwargs)
+        # with its old value.
+        current_full_feature_names = self.params.get("full_feature_names_ordered")
+        if current_full_feature_names is None: current_full_feature_names = [] # Ensure list for comparison
+
+        if list(current_full_feature_names) != old_full_feature_names or \
+           self._features_config_changed(kwargs):
+            if self.params.get("full_feature_names_ordered"): # Check if there are still features configured
+                self.logger.info("Feature configuration changed. Re-initializing feature-dependent modules.")
+                self._initialize_feature_dependent_modules() # This will set up validator, ti_calc, etc.
+                if hasattr(self, 'feature_validator') and self.feature_validator:
+                    self.logger.info("Feature validator available. Running plugin configuration validation.")
+                    self._validate_plugin_configuration() 
+            else:
+                self.logger.warning("Feature configuration resulted in empty 'full_feature_names_ordered'. Clearing feature-dependent modules.")
+                self.feature_validator = None
+                self.feature_to_idx = {}
+                self.num_all_features = 0
+                if hasattr(self, 'ti_calculator'): self.ti_calculator = None
+                if hasattr(self, 'data_generator'): self.data_generator = None
+                if hasattr(self, 'sequence_builder'): self.sequence_builder = None
         
         # Handle initial close anchor reload if the relevant file path changed
         new_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
         if new_initial_close_file_path != old_initial_close_file_path and new_initial_close_file_path:
             self.logger.info(f"Initial close anchor file path changed. Reloading from: {new_initial_close_file_path}")
-            self.initial_data_handler.load_initial_close_anchor(new_initial_close_file_path)
+            if hasattr(self, 'initial_data_handler'): # Ensure handler exists
+                self.initial_data_handler.load_initial_close_anchor(new_initial_close_file_path)
     
     def _features_config_changed(self, kwargs: Dict[str, Any]) -> bool:
-        """Check if any feature-related configuration parameters have changed."""
+        """
+        Check if any feature-related configuration parameters, when provided in kwargs,
+        lead to a change from their initial default values.
+        self.params is assumed to be already updated with kwargs at this point.
+        """
         feature_keys = [
             "full_feature_names_ordered", "decoder_output_feature_names",
             "ohlc_feature_names", "ti_feature_names",
             "date_conditional_feature_names", "feeder_conditional_feature_names"
         ]
         for key in feature_keys:
-            if self.params.get(key) != self.plugin_params.get(key): # Compare with initial defaults or previous state
-                if key in kwargs or f"generator_{key}" in kwargs: # Check if it was in the update
+            param_prefix = "generator_"
+            key_was_in_kwargs = False
+
+            if f"{param_prefix}{key}" in kwargs:
+                key_was_in_kwargs = True
+            elif key in kwargs:
+                key_was_in_kwargs = True
+            
+            if key_was_in_kwargs:
+                # self.params.get(key) reflects the value after update from kwargs.
+                # self.plugin_params.get(key) is the initial default.
+                current_value = self.params.get(key)
+                default_value = self.plugin_params.get(key)
+                
+                # Handle cases where values might be lists or other mutable types for comparison
+                if isinstance(current_value, list) and isinstance(default_value, list):
+                    if set(current_value) != set(default_value): # Order-agnostic for lists of simple items
+                        self.logger.info(f"Feature configuration for list '{key}' changed via kwargs and differs from default.")
+                        return True
+                elif current_value != default_value:
+                    self.logger.info(f"Feature configuration for '{key}' changed via kwargs and differs from default.")
                     return True
+        
         return False
 
     def _validate_plugin_configuration(self) -> None:
@@ -423,9 +472,9 @@ class GeneratorPlugin:
         self.logger.info("Preparing real data features for discriminator input...")
         processed_df = data_df.copy()
         
-        target_num_features = self.params.get("num_features", 51) # Target 51 features
-
+        target_num_features = self.params.get("num_features", 51)
         datetime_col_name = self.main_config.get("datetime_col_name", "DATE_TIME")
+
         if datetime_col_name not in processed_df.columns:
             raise ValueError(f"Datetime column '{datetime_col_name}' not found in input data for feature preparation.")
         processed_df[datetime_col_name] = pd.to_datetime(processed_df[datetime_col_name])
@@ -446,7 +495,7 @@ class GeneratorPlugin:
         ti_df = self.ti_calculator.calculate_technical_indicators(
             processed_df, 
             ohlc_feature_names=ohlc_features,
-            return_last_row_only=False # Ensure all rows are processed
+            return_last_row_only=False
         )
         
         self.logger.info(f"Shape of processed_df before TI merge: {processed_df.shape}")
@@ -463,7 +512,6 @@ class GeneratorPlugin:
             nan_counts_in_tis = processed_df[ti_cols_in_processed].isnull().sum()
             self.logger.info(f"NaN counts in TI columns after merge:\\n{nan_counts_in_tis[nan_counts_in_tis > 0]}")
 
-
         # 2. Calculate Cyclical Date/Time Features
         if not hasattr(self, 'data_generator') or self.data_generator is None:
             self.logger.warning("Data generator not found, attempting to initialize feature-dependent modules.")
@@ -473,119 +521,99 @@ class GeneratorPlugin:
 
         date_features_to_generate = self.main_config.get('feeder_date_features_for_conditioning', [])
         cyclical_feature_specs = []
-        default_max_map = {'day_of_month': 31, 'hour_of_day': 23, 'day_of_week': 6, 'day_of_year': 365}
+        # Ensure default_max_map covers all features in feeder_date_features_for_conditioning from config
+        default_max_map = {'day_of_month': 31, 'hour_of_day': 23, 'day_of_week': 6, 'day_of_year': 365, 'month_of_year': 12, 'week_of_year': 52}
         
         for base_feature_name in date_features_to_generate:
-            max_val_key_1 = f'feeder_max_{base_feature_name}'
-            max_val_key_2 = f'max_{base_feature_name}'
-            max_val = self.main_config.get(max_val_key_1, self.main_config.get(max_val_key_2, default_max_map.get(base_feature_name)))
-            if max_val is None:
-                self.logger.warning(f"Max value for cyclical feature {base_feature_name} not found. Skipping.")
-                continue
-            cyclical_feature_specs.append((base_feature_name, max_val))
-
+            if base_feature_name in default_max_map:
+                cyclical_feature_specs.append({
+                    "feature_name": base_feature_name,
+                    "max_value": default_max_map[base_feature_name]
+                })
+            else:
+                self.logger.warning(f"Max value for date feature '{base_feature_name}' not defined in default_max_map. Skipping cyclical generation for it.")
+        
         if cyclical_feature_specs:
-            self.logger.info(f"Calculating cyclical features for: {cyclical_feature_specs}")
-            cyclical_df = self.data_generator.generate_cyclical_features_for_df(
-                data_df=processed_df, 
-                datetime_col_name=datetime_col_name,
-                feature_specs=cyclical_feature_specs
+            self.logger.info(f"Generating cyclical features using specs: {cyclical_feature_specs}")
+            # This assumes self.data_generator.add_cyclical_date_features is implemented
+            # to take df, datetime_col_name, and cyclical_feature_specs.
+            processed_df = self.data_generator.add_cyclical_date_features(processed_df, datetime_col_name, cyclical_feature_specs)
+            self.logger.info(f"Columns after cyclical feature generation: {processed_df.columns.tolist()}")
+        else:
+            self.logger.info("No cyclical features specified or to be generated.")
+
+        # 3. Final Feature Selection and Ordering
+        all_expected_features_ordered = self.main_config.get("generator_full_feature_names_ordered", [])
+        if not all_expected_features_ordered:
+            self.logger.error("'generator_full_feature_names_ordered' not found in config. Cannot finalize features.")
+            raise ValueError("'generator_full_feature_names_ordered' is crucial and not found in configuration.")
+
+        numeric_features_ordered = [f for f in all_expected_features_ordered if f != datetime_col_name]
+        self.logger.info(f"Target numeric features ordered ({len(numeric_features_ordered)}): {numeric_features_ordered}")
+
+
+        missing_features = [f for f in numeric_features_ordered if f not in processed_df.columns]
+        if missing_features:
+            self.logger.error(f"Missing expected numeric features after all processing steps: {missing_features}")
+            self.logger.error(f"Available columns in processed_df: {processed_df.columns.tolist()}")
+            raise ValueError(f"Could not produce all expected numeric features. Missing: {missing_features}. Please check TI and cyclical feature generation.")
+
+        try:
+            final_df = processed_df[numeric_features_ordered].copy()
+        except KeyError as e:
+            self.logger.error(f"KeyError during final numeric feature selection: {e}. One or more expected features not found.")
+            self.logger.error(f"Expected numeric features: {numeric_features_ordered}")
+            self.logger.error(f"Available columns: {processed_df.columns.tolist()}")
+            raise
+
+        if final_df.shape[1] != target_num_features:
+            self.logger.error(
+                f"Final numeric feature count ({final_df.shape[1]}) does not match target_num_features ({target_num_features})."
             )
-            processed_df = pd.merge(processed_df, cyclical_df, left_index=True, right_index=True, how='left')
-            self.logger.info(f"Columns after cyclical features merge: {processed_df.columns.tolist()}")
-
-        # 3. Ensure all features from full_feature_names_ordered are present and in order
-        raw_full_feature_names = self.params.get("full_feature_names_ordered", [])
-        self.logger.info(f"RAW full_feature_names_ordered from params ({len(raw_full_feature_names)}): {raw_full_feature_names}")
-
-        if not raw_full_feature_names:
-            raise ValueError("GeneratorPlugin: 'full_feature_names_ordered' is not configured or empty.")
+            self.logger.error(f"Selected features: {final_df.columns.tolist()}")
+            self.logger.error(f"Expected from config (numeric part of generator_full_feature_names_ordered): {numeric_features_ordered}")
+            raise ValueError(f"Final numeric feature count mismatch: expected {target_num_features}, got {final_df.shape[1]}. Check 'generator_full_feature_names_ordered' and feature generation steps.")
         
-        expected_numeric_features = [f for f in raw_full_feature_names if f != datetime_col_name]
-        self.logger.info(f"Expected numeric features AFTER filtering datetime_col '{datetime_col_name}' ({len(expected_numeric_features)}): {expected_numeric_features}")
+        self.logger.info(f"Successfully prepared {final_df.shape[1]} numeric features for discriminator. Shape: {final_df.shape}")
+        self.logger.info(f"Final numeric feature columns for discriminator: {final_df.columns.tolist()}")
         
-        # Ensure expected_numeric_features matches target_num_features
-        if len(expected_numeric_features) != target_num_features:
-            self.logger.warning(
-                f"Mismatch: 'full_feature_names_ordered' (numeric part) has {len(expected_numeric_features)} features, "
-                f"but 'num_features' param is {target_num_features}. Using 'full_feature_names_ordered'."
-            )
-            # If you want to strictly enforce num_features, you might adjust expected_numeric_features here,
-            # but it's usually better if full_feature_names_ordered is the source of truth.
-
-        self.logger.info(f"Columns in processed_df before final selection ({len(processed_df.columns.tolist())}): {processed_df.columns.tolist()}")
-
-        missing_cols = [col for col in expected_numeric_features if col not in processed_df.columns]
-        if missing_cols:
-            self.logger.warning(f"Missing columns that were expected in 'full_feature_names_ordered' (numeric part): {missing_cols}. They will be filled with 0.0.")
-            for col in missing_cols:
-                processed_df[col] = 0.0 # Ensure new columns are added with the correct type if possible, e.g., float
-        
-        # Ensure no NaN values in the final feature set (TIs can produce NaNs at the beginning)
-        # Only select columns that are actually in processed_df to avoid KeyErrors if a feature in expected_numeric_features was never created
-        final_expected_cols_present = [col for col in expected_numeric_features if col in processed_df.columns]
-        processed_df[final_expected_cols_present] = processed_df[final_expected_cols_present].fillna(0.0)
-
-        # Select the final set of features
-        final_df = processed_df[final_expected_cols_present]
-        
-        # If some expected_numeric_features were still missing and not created by the loop above, reindex to ensure all are present, filled with 0.0
-        if len(final_df.columns) != len(expected_numeric_features):
-            self.logger.warning(f"Re-indexing to ensure all {len(expected_numeric_features)} expected numeric features are present.")
-            final_df = final_df.reindex(columns=expected_numeric_features, fill_value=0.0)
-
-        self.logger.info(f"Real data prepared with {len(final_df.columns)} features: {final_df.columns.tolist()}")
-        
-        if len(final_df.columns) != target_num_features:
-             self.logger.error(
-                 f"CRITICAL MISMATCH: Final prepared data has {len(final_df.columns)} features, "
-                 f"but system is configured for {target_num_features} features. This will likely cause errors downstream."
-             )
-        
+        if final_df.isnull().values.any():
+            nan_counts_final = final_df.isnull().sum()
+            self.logger.warning(f"NaNs found in final numeric feature set for discriminator:\\n{nan_counts_final[nan_counts_final > 0]}")
+            final_df = final_df.fillna(0) 
+            self.logger.warning("Filled NaNs with 0 in the final numeric feature set. Review if this is the desired strategy.")
+            
         return final_df
 
-    def _post_process_to_target_features(self, base_features, target_num_features: int):
+    def sample_noise_for_model(self, batch_size: int) -> Dict[str, np.ndarray]:
         """
-        Post-process base features from VAE decoder to the target number of final features.
-        This is a placeholder and should ideally involve actual calculation of TIs and cyclical features
-        if the VAE output doesn't include them directly or in a form that can be expanded.
-        Currently uses Dense layers for expansion.
-        
+        Generates a batch of noise, conditions, and context vectors for the generator model.
+        This method is intended to be called by the GAN training loop.
+
         Args:
-            base_features: Tensor of shape (batch, num_base_features) from VAE decoder (e.g., 23 features)
-            target_num_features: The desired number of output features (e.g., 51)
-            
+            batch_size: The number of samples to generate inputs for.
+
         Returns:
-            Tensor of shape (batch, target_num_features) with expanded features
+            A dictionary containing 'noise_input', 'conditions_input', and 'context_input'
+            compatible with the generator model's inputs.
         """
-        num_base_features = base_features.shape[-1]
-        self.logger.info(f"Post-processing VAE output from {num_base_features} to {target_num_features} features using Dense layers.")
+        noise_dim = self.params.get("feeder_noise_dim", 32)
+        conditional_features_dim = self.params.get("conditional_features_dim", 10) # Example, ensure this matches model
+        context_vector_dim = self.params.get("context_vector_dim", 64) # Example, ensure this matches model
 
-        if num_base_features == target_num_features:
-            self.logger.info("Base features already match target feature count. No expansion needed.")
-            return base_features
-        elif num_base_features > target_num_features:
-            self.logger.warning(f"Base features ({num_base_features}) > target ({target_num_features}). Truncating with a Dense layer.")
-            # Use a single Dense layer to reduce dimensions
-            final_features = Dense(target_num_features, activation='tanh', name="feature_reduction")(base_features)
-        else:
-            # Expand features using Dense layers if base < target
-            # Example: 23 -> 37 -> 51 (if target is 51)
-            # Adjust intermediate layer size based on difference
-            intermediate_dim = max(num_base_features, (num_base_features + target_num_features) // 2)
-            
-            expanded_intermediate = Dense(intermediate_dim, activation='tanh', name="feature_expansion_intermediate")(base_features)
-            final_features = Dense(target_num_features, activation='tanh', name="final_feature_expansion")(expanded_intermediate)
+        self.logger.debug(f"Sampling inputs for generator: batch_size={batch_size}, noise_dim={noise_dim}, cond_dim={conditional_features_dim}, ctx_dim={context_vector_dim}")
+
+        noise = np.random.normal(0, 1, (batch_size, noise_dim))
         
-        return final_features
+        # Placeholder for actual conditional features and context vectors
+        # These should ideally come from the FeederPlugin or be generated based on some strategy
+        # For now, using random data as a placeholder.
+        # TODO: Integrate with FeederPlugin to get meaningful conditional/context data if available for the batch.
+        conditions = np.random.rand(batch_size, conditional_features_dim) 
+        context = np.random.rand(batch_size, context_vector_dim)
 
-    def build_model(self) -> None:
-        """Public interface for building the composite generator model."""
-        # Ensure VAE decoder model path is available if needed
-        vae_decoder_path = self.params.get("sequential_model_file")
-        if vae_decoder_path:
-            self._load_model(vae_decoder_path) # This builds the composite generator with VAE
-        else:
-            # Build a simple generator if no VAE decoder is specified (or handle as error)
-            self.logger.warning("No VAE decoder model path specified. Building fallback or simple generator.")
-            self._build_composite_generator() # Builds a simple one if vae_decoder_model is None
+        return {
+            "noise_input": noise,
+            "conditions_input": conditions,
+            "context_input": context
+        }

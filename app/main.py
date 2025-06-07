@@ -156,10 +156,11 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
     print(f"Loading Trainer Plugin: {plugin_name_trainer}")
     try:
         trainer_class, _ = load_plugin('trainer.plugins', plugin_name_trainer)
-        # Pass the generator and discriminator plugins to the trainer
+        # Pass the generator, discriminator, and feeder plugins to the trainer
         plugins['trainer_plugin'] = trainer_class(config, 
                                                   generator_plugin_instance=plugins['generator_plugin'],
-                                                  discriminator_plugin_instance=plugins['discriminator_plugin'])
+                                                  discriminator_plugin_instance=plugins['discriminator_plugin'],
+                                                  feeder_plugin_instance=plugins['feeder_plugin'])
         print(f"✓ Trainer Plugin '{plugin_name_trainer}' loaded successfully")
     except Exception as e:
         print(f"Failed to load Trainer Plugin '{plugin_name_trainer}': {e}")
@@ -169,7 +170,8 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
             from tsg_plugins.gan_trainer_plugin.gan_trainer_plugin import GANTrainerPlugin
             plugins['trainer_plugin'] = GANTrainerPlugin(config,
                                                          generator_plugin_instance=plugins['generator_plugin'],
-                                                         discriminator_plugin_instance=plugins['discriminator_plugin'])
+                                                         discriminator_plugin_instance=plugins['discriminator_plugin'],
+                                                         feeder_plugin_instance=plugins['feeder_plugin'])
             print("✓ Default Trainer Plugin loaded successfully")
         except Exception as e2:
             print(f"Failed to load default Trainer Plugin: {e2}")
@@ -186,15 +188,27 @@ def load_and_initialize_plugins(config: Dict[str, Any]) -> Dict[str, Any]:
             print(f"Failed to load Evaluator Plugin '{plugin_name_evaluator}': {e}")
 
     # Load Optimizer Plugin (optional)
-    plugin_name_optimizer = config.get('optimizer', None)
+    plugin_name_optimizer = config.get('optimizer', None) # Default to None if not specified
     if plugin_name_optimizer:
         print(f"Loading Optimizer Plugin: {plugin_name_optimizer}")
         try:
             optimizer_class, _ = load_plugin('optimizer.plugins', plugin_name_optimizer)
-            plugins['optimizer_plugin'] = optimizer_class(config)
+            # Pass relevant plugins to the optimizer
+            plugins['optimizer_plugin'] = optimizer_class(
+                config,
+                generator_plugin_instance=plugins.get('generator_plugin'),
+                discriminator_plugin_instance=plugins.get('discriminator_plugin'),
+                trainer_plugin_instance=plugins.get('trainer_plugin'),
+                feeder_plugin_instance=plugins.get('feeder_plugin')
+            )
             print(f"✓ Optimizer Plugin '{plugin_name_optimizer}' loaded successfully")
         except Exception as e:
             print(f"Failed to load Optimizer Plugin '{plugin_name_optimizer}': {e}")
+            traceback.print_exc() # Print stack trace for diagnostics
+            # The user needs to ensure plugin_loader can find and load the specified optimizer
+            # No further fallbacks here to avoid incorrect assumptions about plugin locations.
+    else:
+        print("No Optimizer Plugin specified in configuration.")
 
     # Load Preprocessor Plugin (optional)
     plugin_name_preprocessor = config.get('preprocessor', None)

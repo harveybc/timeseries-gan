@@ -224,6 +224,77 @@ class DataGenerator:
             
         return np.array(date_features, dtype=np.float32)
 
+    def add_cyclical_date_features(self, data_df: pd.DataFrame, datetime_col_name: str, cyclical_feature_specs: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Adds cyclical (sin/cos) datetime features to a DataFrame based on provided specifications.
+        This method is designed to be called by GeneratorPlugin.prepare_features_for_discriminator.
+
+        Args:
+            data_df: Input DataFrame with a datetime column.
+            datetime_col_name: Name of the datetime column in data_df.
+            cyclical_feature_specs: A list of dictionaries, where each dict contains
+                                    'feature_name' (e.g., 'day_of_month') and 'max_value'.
+                                    Example: [{"feature_name": "day_of_month", "max_value": 31},
+                                              {"feature_name": "hour_of_day", "max_value": 23}]
+
+        Returns:
+            The DataFrame with added cyclical features.
+        """
+        if not cyclical_feature_specs:
+            print("DataGenerator: No cyclical feature specifications provided. Returning original DataFrame.")
+            return data_df
+
+        # Ensure datetime column is in datetime format
+        if datetime_col_name not in data_df.columns:
+            raise ValueError(f"Datetime column '{datetime_col_name}' not found in DataFrame.")
+        dt_series = pd.to_datetime(data_df[datetime_col_name])
+
+        processed_df = data_df.copy()
+
+        for spec in cyclical_feature_specs:
+            base_name = spec.get("feature_name")
+            max_val = spec.get("max_value")
+
+            if not base_name or max_val is None:
+                print(f"DataGenerator: Warning - Invalid spec: {spec}. Skipping.")
+                continue
+
+            values = None
+            denominator = None
+
+            if base_name == "day_of_month":
+                values = dt_series.dt.day
+                denominator = max_val 
+            elif base_name == "hour_of_day":
+                values = dt_series.dt.hour
+                denominator = max_val + 1 # Max value is 23, so 24 distinct values (0-23)
+            elif base_name == "day_of_week":
+                values = dt_series.dt.dayofweek # Monday=0, Sunday=6
+                denominator = max_val + 1 # Max value is 6, so 7 distinct values (0-6)
+            elif base_name == "day_of_year":
+                values = dt_series.dt.dayofyear
+                # max_val should be 365 or 366. If it's 365 for a leap year, it might be slightly off.
+                # The GeneratorPlugin is responsible for providing the correct max_val.
+                denominator = max_val 
+            elif base_name == "month_of_year":
+                values = dt_series.dt.month
+                denominator = max_val # Max value is 12
+            elif base_name == "week_of_year":
+                values = dt_series.dt.isocalendar().week.astype(int)
+                denominator = max_val # Max value is 52 or 53
+            else:
+                print(f"DataGenerator: Warning - Unknown base_name '{base_name}' for cyclical feature generation. Skipping.")
+                continue
+            
+            if values is not None and denominator is not None and denominator > 0:
+                processed_df[f"{base_name}_sin"] = np.sin(2 * np.pi * values / denominator)
+                processed_df[f"{base_name}_cos"] = np.cos(2 * np.pi * values / denominator)
+                print(f"DataGenerator: Generated cyclical features for '{base_name}'.")
+            else:
+                print(f"DataGenerator: Warning - Could not process cyclical feature for base_name '{base_name}'. Values, denominator invalid, or max_val was zero.")
+
+        return processed_df
+
     def generate_cyclical_features_for_df(self, data_df: pd.DataFrame, datetime_col_name: str, feature_specs: List[tuple[str, Any]]) -> pd.DataFrame:
         """
         Generates cyclical (sin/cos) datetime features for an entire DataFrame.
