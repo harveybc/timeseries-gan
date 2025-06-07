@@ -155,34 +155,48 @@ class TrainPipeline:
         Raises:
             RuntimeError: If training fails
         """
+        self.logger.info("Starting GAN model training...")
+        # Log training parameters that will be used by the trainer plugin
+        # These should be sourced from the trainer_plugin's own params, which are set from global config
+        epochs = self.trainer_plugin.params.get('epochs', 'N/A')
+        batch_size = self.trainer_plugin.params.get('batch_size', 'N/A')
+        self.logger.info(f"Training parameters - Epochs: {epochs}, Batch size: {batch_size}")
+
         try:
-            print("Starting GAN model training...")
+            # The trainer_plugin.train method should use its internally stored configuration.
+            # We only pass the training_data. Epochs and batch_size can be passed if
+            # the train method signature supports overriding them.
+            # Based on the error, 'config' is not an expected argument.
             
-            # Extract training parameters
-            epochs = self.config.get("gan_epochs", 1000)
-            batch_size = self.config.get("gan_batch_size", 32)
+            # Assuming trainer_plugin.train() might take epochs and batch_size as optional overrides
+            # Let's check its signature or common practice.
+            # For now, just pass training_data. If epochs/batch_size are needed, they should be
+            # part of the trainer_plugin's internal params or settable via set_params.
             
-            print(f"Training parameters - Epochs: {epochs}, Batch size: {batch_size}")
+            # The GANTrainerPlugin.train method signature is:
+            # train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None)
+            # So we can pass epochs and batch_size if we want to override its internal defaults for this specific call.
+            # Let's use the config values from the pipeline's config for this call.
             
-            # Check if trainer plugin is available
-            if self.trainer_plugin is None:
-                raise ValueError("Trainer plugin not available")
+            train_epochs = self.config.get('trainer_epochs', self.trainer_plugin.params.get('epochs'))
+            train_batch_size = self.config.get('trainer_batch_size', self.trainer_plugin.params.get('batch_size'))
+
+            self.logger.info(f"Calling trainer_plugin.train with epochs={train_epochs}, batch_size={train_batch_size}")
             
-            # Check if trainer plugin has train method
-            if not hasattr(self.trainer_plugin, 'train'):
-                raise ValueError("Trainer plugin does not have 'train' method")
-            
-            # Execute training via trainer plugin
-            # Pass the training data and configuration to the trainer
             self.trainer_plugin.train(
                 training_data=training_data,
-                epochs=epochs,
-                batch_size=batch_size,
-                config=self.config
+                epochs=train_epochs, # Pass epochs if the method supports it
+                batch_size=train_batch_size  # Pass batch_size if the method supports it
             )
+            self.logger.info("GAN model training completed successfully.")
+            # Optionally, save models or results here if train method doesn't handle it
+            # For example, self.trainer_plugin.save_models(...)
             
-            print("✓ GAN training completed successfully")
-            
+        except TypeError as te:
+            if "unexpected keyword argument 'config'" in str(te):
+                self.logger.error(f"TypeError during trainer_plugin.train: {te}. 'config' argument is not accepted by the train method.")
+                # Re-raise with a more specific message or handle as needed
+            raise
         except Exception as e:
             print(f"❌ GAN training failed: {e}")
             self.logger.error(f"Training execution failed: {e}")
