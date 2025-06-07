@@ -568,25 +568,42 @@ class GeneratorPlugin:
             raise ValueError(f"Missing OHLC columns for TI calculation: {missing_ohlc}. Available: {processed_df.columns.tolist()}")
 
         self.logger.info(f"Calculating TIs using ohlc_features: {ohlc_features}")
+        # Pass a copy of processed_df to ensure ti_calculator doesn't modify it in a way that affects original data if it operates in-place on parts.
         ti_df = self.ti_calculator.calculate_technical_indicators(
-            processed_df, 
+            processed_df.copy(), 
             ohlc_feature_names=ohlc_features,
             return_last_row_only=False
         )
         
         self.logger.info(f"Shape of processed_df before TI merge: {processed_df.shape}")
         self.logger.info(f"Columns of processed_df before TI merge: {processed_df.columns.tolist()}")
-        self.logger.info(f"Shape of ti_df: {ti_df.shape}")
-        self.logger.info(f"Columns of ti_df: {ti_df.columns.tolist()}")
+        self.logger.info(f"Shape of ti_df from calculator: {ti_df.shape}")
+        ti_cols_produced_by_calculator = ti_df.columns.tolist()
+        self.logger.info(f"Columns of ti_df from calculator: {ti_cols_produced_by_calculator}")
 
+        # Before merging, remove any columns from processed_df that have the same names
+        # as the TIs we are about to merge from ti_df.
+        # This ensures the newly calculated TIs from ti_df take precedence and avoids suffixed columns.
+        cols_to_drop_from_processed_df = [col for col in ti_cols_produced_by_calculator if col in processed_df.columns]
+        if cols_to_drop_from_processed_df:
+            self.logger.info(f"Dropping pre-existing columns from input data to avoid TI merge conflicts: {cols_to_drop_from_processed_df}")
+            processed_df.drop(columns=cols_to_drop_from_processed_df, inplace=True)
+        
+        # Merge the newly calculated TIs.
         processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
         self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
         self.logger.info(f"Shape of processed_df after TI merge: {processed_df.shape}")
         
-        ti_cols_in_processed = [col for col in self.params.get("ti_feature_names", []) if col in processed_df.columns]
-        if ti_cols_in_processed:
-            nan_counts_in_tis = processed_df[ti_cols_in_processed].isnull().sum()
-            self.logger.info(f"NaN counts in TI columns after merge:\\n{nan_counts_in_tis[nan_counts_in_tis > 0]}")
+        # Check for NaNs introduced by TIs (especially at the beginning of the series)
+        # Use ti_cols_produced_by_calculator for checking NaNs in the TIs that were just added.
+        ti_cols_in_processed_after_merge = [col for col in ti_cols_produced_by_calculator if col in processed_df.columns]
+        if ti_cols_in_processed_after_merge:
+            nan_counts_in_tis = processed_df[ti_cols_in_processed_after_merge].isnull().sum()
+            if nan_counts_in_tis.any():
+                 self.logger.info(f"NaN counts in TI columns after merge (expected at start of series):\\n{nan_counts_in_tis[nan_counts_in_tis > 0]}")
+        else:
+            self.logger.warning("No TI columns (as produced by calculator) found in processed_df after merge for NaN check.")
+
 
         # 2. Calculate Cyclical Date/Time Features
         if not hasattr(self, 'data_generator') or self.data_generator is None:
