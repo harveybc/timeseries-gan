@@ -55,7 +55,8 @@ class GeneratorPlugin:
         "internal_z_latent_dim": 32,    # As per your spec
         "feeder_noise_dim": 100, # Example: dimension of noise from FeederPlugin
         "context_vector_dim": 64, # For decoder_input_h_context
-        "conditional_features_dim": 10 # For decoder_input_conditions
+        "conditional_features_dim": 10, # For decoder_input_conditions
+        "num_features": 51 # ADDED: To align with discriminator and overall architecture
     }
     
     plugin_debug_vars = [
@@ -313,7 +314,7 @@ class GeneratorPlugin:
         Build the composite generator model combining BiLSTM Z-generator + VAE decoder.
         Based on REFERENCE.md Sequential Conditional VAE-GAN Architecture.
         
-        The generator must output sequences of shape (batch_size, 144, 57) to match discriminator input.
+        The generator must output sequences of shape (batch_size, 144, 51) to match discriminator input.
         
         Args:
             vae_decoder_model: Optional pre-trained VAE decoder model to integrate
@@ -326,11 +327,13 @@ class GeneratorPlugin:
             
             # Get configuration parameters
             seq_len = self.params.get("decoder_input_window_size", 144)
-            noise_dim = self.params.get("feeder_noise_dim", 32)
+            # Use the new num_features param, defaulting to 51
+            num_output_features = self.params.get("num_features", 51) 
+            noise_dim = self.params.get("feeder_noise_dim", 32) # Corrected from 100 to 32 based on recent config
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
             context_vector_dim = self.params.get("context_vector_dim", 64)
             
-            self.logger.info(f"Building generator with seq_len={seq_len}, noise_dim={noise_dim}")
+            self.logger.info(f"Building generator with seq_len={seq_len}, num_output_features={num_output_features}, noise_dim={noise_dim}")
             
             # Build generator inputs - per REFERENCE.md, VAE decoder needs 3 inputs
             noise_input = Input(shape=(noise_dim,), name="noise_input")
@@ -344,30 +347,31 @@ class GeneratorPlugin:
                 
                 # BiLSTM Z-generator architecture: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
                 z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
-                z_reshape = Reshape((18, 32), name="z_reshape")(z_dense)
+                z_reshape = Reshape((self.params.get("internal_z_sequence_length", 18), 
+                                     self.params.get("internal_z_latent_dim", 32)), name="z_reshape")(z_dense)
                 z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
-                z_latent_seq = Conv1D(32, kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
+                z_latent_seq = Conv1D(self.params.get("internal_z_latent_dim", 32), kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
                 
                 # Call VAE decoder once to get base features (batch, 23)
                 # VAE decoder expects: [z_latent_seq, context_input, conditions_input] as per REFERENCE.md  
                 vae_base_features = vae_decoder_model([z_latent_seq, context_input, conditions_input])  # Shape: (batch, 23)
                 
-                # Post-process 23 base features to 57 final features as per REFERENCE.md
-                # This includes technical indicators and cyclical features
-                expanded_features = self._post_process_to_57_features(vae_base_features)  # Shape: (batch, 57)
+                # Post-process 23 base features to 51 final features (num_output_features)
+                expanded_features = self._post_process_to_target_features(vae_base_features, num_output_features)  # Shape: (batch, num_output_features)
                 
-                # Replicate single timestep across sequence length to create (batch, seq_len, 57)
-                def replicate_across_time(features):
+                # Replicate single timestep across sequence length to create (batch, seq_len, num_output_features)
+                def replicate_across_time(features_input_tuple): # Modified to accept tuple
+                    features, target_seq_len, target_num_features = features_input_tuple
                     """Replicate features across time dimension."""
-                    # Expand dims to add time dimension: (batch, 57) -> (batch, 1, 57)
+                    # Expand dims to add time dimension: (batch, target_num_features) -> (batch, 1, target_num_features)
                     expanded = tf.expand_dims(features, axis=1)
-                    # Tile across time dimension: (batch, 1, 57) -> (batch, seq_len, 57)
-                    return tf.tile(expanded, [1, seq_len, 1])
+                    # Tile across time dimension: (batch, 1, target_num_features) -> (batch, target_seq_len, target_num_features)
+                    return tf.tile(expanded, [1, target_seq_len, 1])
                 
                 # Apply replication with explicit output shape
                 expanded_output = tf.keras.layers.Lambda(
-                    replicate_across_time,
-                    output_shape=(seq_len, 57),
+                    lambda x: replicate_across_time((x, seq_len, num_output_features)), # Pass seq_len and num_output_features
+                    output_shape=(seq_len, num_output_features),
                     name="sequence_replicator"
                 )(expanded_features)
                     
@@ -383,11 +387,11 @@ class GeneratorPlugin:
                 hidden2 = Dense(512, activation='relu', name="hidden2")(hidden1)
                 hidden3 = Dense(1024, activation='relu', name="hidden3")(hidden2)
                 
-                # Output full sequence: seq_len * 57 features
-                sequence_flat = Dense(seq_len * 57, activation='tanh', name="sequence_flat")(hidden3)
+                # Output full sequence: seq_len * num_output_features features
+                sequence_flat = Dense(seq_len * num_output_features, activation='tanh', name="sequence_flat")(hidden3)
                 
-                # Reshape to sequence format: (batch_size, seq_len, 57)
-                expanded_output = Reshape((seq_len, 57), name="output_reshape")(sequence_flat)
+                # Reshape to sequence format: (batch_size, seq_len, num_output_features)
+                expanded_output = Reshape((seq_len, num_output_features), name="output_reshape")(sequence_flat)
             
             # Create composite model with 3 inputs as per REFERENCE.md
             composite_model = Model(
@@ -412,12 +416,15 @@ class GeneratorPlugin:
 
     def prepare_features_for_discriminator(self, data_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Prepares a raw DataFrame to have the 57 features expected by the discriminator.
+        Prepares a raw DataFrame to have the features expected by the discriminator.
         Calculates technical indicators and cyclical date/time features.
         Orders features according to 'full_feature_names_ordered'.
+        The number of output features should align with self.params.get("num_features", 51).
         """
         self.logger.info("Preparing real data features for discriminator input...")
         processed_df = data_df.copy()
+        
+        target_num_features = self.params.get("num_features", 51) # Target 51 features
 
         datetime_col_name = self.main_config.get("datetime_col_name", "DATE_TIME")
         if datetime_col_name not in processed_df.columns:
@@ -443,22 +450,15 @@ class GeneratorPlugin:
             return_last_row_only=False # Ensure all rows are processed
         )
         
-        # Debug: Log shapes and columns before and after merge
         self.logger.info(f"Shape of processed_df before TI merge: {processed_df.shape}")
         self.logger.info(f"Columns of processed_df before TI merge: {processed_df.columns.tolist()}")
         self.logger.info(f"Shape of ti_df: {ti_df.shape}")
         self.logger.info(f"Columns of ti_df: {ti_df.columns.tolist()}")
-        self.logger.info(f"Index of processed_df: {processed_df.index[:5]}...{processed_df.index[-5:]}")
-        self.logger.info(f"Index of ti_df: {ti_df.index[:5]}...{ti_df.index[-5:]}")
 
-        # Merge TIs. Ensure indices align.
-        # If ti_df has a different index (e.g., RangeIndex if it was reset), this merge might fail or produce NaNs.
-        # The TechnicalIndicatorCalculator should preserve the index of the input ohlc_history_df.
         processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
         self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
         self.logger.info(f"Shape of processed_df after TI merge: {processed_df.shape}")
         
-        # Check for NaNs introduced by merge, specifically in TI columns
         ti_cols_in_processed = [col for col in self.params.get("ti_feature_names", []) if col in processed_df.columns]
         if ti_cols_in_processed:
             nan_counts_in_tis = processed_df[ti_cols_in_processed].isnull().sum()
@@ -487,9 +487,8 @@ class GeneratorPlugin:
 
         if cyclical_feature_specs:
             self.logger.info(f"Calculating cyclical features for: {cyclical_feature_specs}")
-            # Call the new DataFrame-based cyclical feature generation method
             cyclical_df = self.data_generator.generate_cyclical_features_for_df(
-                data_df=processed_df, # Pass the current state of processed_df
+                data_df=processed_df, 
                 datetime_col_name=datetime_col_name,
                 feature_specs=cyclical_feature_specs
             )
@@ -503,50 +502,81 @@ class GeneratorPlugin:
         if not raw_full_feature_names:
             raise ValueError("GeneratorPlugin: 'full_feature_names_ordered' is not configured or empty.")
         
-        # Filter out the datetime_col_name itself if it's listed but not a numeric feature
         expected_numeric_features = [f for f in raw_full_feature_names if f != datetime_col_name]
         self.logger.info(f"Expected numeric features AFTER filtering datetime_col '{datetime_col_name}' ({len(expected_numeric_features)}): {expected_numeric_features}")
         
+        # Ensure expected_numeric_features matches target_num_features
+        if len(expected_numeric_features) != target_num_features:
+            self.logger.warning(
+                f"Mismatch: 'full_feature_names_ordered' (numeric part) has {len(expected_numeric_features)} features, "
+                f"but 'num_features' param is {target_num_features}. Using 'full_feature_names_ordered'."
+            )
+            # If you want to strictly enforce num_features, you might adjust expected_numeric_features here,
+            # but it's usually better if full_feature_names_ordered is the source of truth.
+
         self.logger.info(f"Columns in processed_df before final selection ({len(processed_df.columns.tolist())}): {processed_df.columns.tolist()}")
 
         missing_cols = [col for col in expected_numeric_features if col not in processed_df.columns]
         if missing_cols:
             self.logger.warning(f"Missing columns that were expected in 'full_feature_names_ordered' (numeric part): {missing_cols}. They will be filled with 0.0.")
             for col in missing_cols:
-                processed_df[col] = 0.0
+                processed_df[col] = 0.0 # Ensure new columns are added with the correct type if possible, e.g., float
         
         # Ensure no NaN values in the final feature set (TIs can produce NaNs at the beginning)
-        processed_df[expected_numeric_features] = processed_df[expected_numeric_features].fillna(0.0)
+        # Only select columns that are actually in processed_df to avoid KeyErrors if a feature in expected_numeric_features was never created
+        final_expected_cols_present = [col for col in expected_numeric_features if col in processed_df.columns]
+        processed_df[final_expected_cols_present] = processed_df[final_expected_cols_present].fillna(0.0)
 
-        final_df = processed_df[expected_numeric_features]
+        # Select the final set of features
+        final_df = processed_df[final_expected_cols_present]
         
+        # If some expected_numeric_features were still missing and not created by the loop above, reindex to ensure all are present, filled with 0.0
+        if len(final_df.columns) != len(expected_numeric_features):
+            self.logger.warning(f"Re-indexing to ensure all {len(expected_numeric_features)} expected numeric features are present.")
+            final_df = final_df.reindex(columns=expected_numeric_features, fill_value=0.0)
+
         self.logger.info(f"Real data prepared with {len(final_df.columns)} features: {final_df.columns.tolist()}")
-        # Example: Target 57 features. This number should ideally come from len(expected_numeric_features)
-        # or a shared config value for number of discriminator features.
-        if len(final_df.columns) != self.params.get("num_features", 57): # num_features could be from discriminator
-             self.logger.warning(f"Warning: Prepared data has {len(final_df.columns)} features, but target (e.g., 57 or from config) might differ.")
+        
+        if len(final_df.columns) != target_num_features:
+             self.logger.error(
+                 f"CRITICAL MISMATCH: Final prepared data has {len(final_df.columns)} features, "
+                 f"but system is configured for {target_num_features} features. This will likely cause errors downstream."
+             )
         
         return final_df
 
-    def _post_process_to_57_features(self, base_features):
+    def _post_process_to_target_features(self, base_features, target_num_features: int):
         """
-        Post-process 23 base features from VAE decoder to 57 final features.
-        Based on REFERENCE.md: Add technical indicators and cyclical date features.
+        Post-process base features from VAE decoder to the target number of final features.
+        This is a placeholder and should ideally involve actual calculation of TIs and cyclical features
+        if the VAE output doesn't include them directly or in a form that can be expanded.
+        Currently uses Dense layers for expansion.
         
         Args:
-            base_features: Tensor of shape (batch, 23) from VAE decoder
+            base_features: Tensor of shape (batch, num_base_features) from VAE decoder (e.g., 23 features)
+            target_num_features: The desired number of output features (e.g., 51)
             
         Returns:
-            Tensor of shape (batch, 57) with expanded features
+            Tensor of shape (batch, target_num_features) with expanded features
         """
-        # Use Dense layers to expand from 23 to 57 features
-        # This simulates adding technical indicators (15 additional) and cyclical features (19 additional)
-        
-        # First expansion: 23 -> 40 (add technical indicators)
-        technical_features = Dense(40, activation='tanh', name="technical_expansion")(base_features)
-        
-        # Second expansion: 40 -> 57 (add cyclical and other derived features)  
-        final_features = Dense(57, activation='tanh', name="final_feature_expansion")(technical_features)
+        num_base_features = base_features.shape[-1]
+        self.logger.info(f"Post-processing VAE output from {num_base_features} to {target_num_features} features using Dense layers.")
+
+        if num_base_features == target_num_features:
+            self.logger.info("Base features already match target feature count. No expansion needed.")
+            return base_features
+        elif num_base_features > target_num_features:
+            self.logger.warning(f"Base features ({num_base_features}) > target ({target_num_features}). Truncating with a Dense layer.")
+            # Use a single Dense layer to reduce dimensions
+            final_features = Dense(target_num_features, activation='tanh', name="feature_reduction")(base_features)
+        else:
+            # Expand features using Dense layers if base < target
+            # Example: 23 -> 37 -> 51 (if target is 51)
+            # Adjust intermediate layer size based on difference
+            intermediate_dim = max(num_base_features, (num_base_features + target_num_features) // 2)
+            
+            expanded_intermediate = Dense(intermediate_dim, activation='tanh', name="feature_expansion_intermediate")(base_features)
+            final_features = Dense(target_num_features, activation='tanh', name="final_feature_expansion")(expanded_intermediate)
         
         return final_features
 
