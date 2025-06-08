@@ -38,7 +38,7 @@ DEFAULT_VALUES = {
     # --- Parameters for FeederPlugin ---
     "feeder_sampling_method": "standard_normal", 
     "feeder_encoder_sampling_technique": "direct", 
-    "encoder_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras", 
+    "encoder_model_path": "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras", 
     "feeder_feature_columns_for_encoder": [], 
     "feeder_real_data_file_has_header": True,
     "feeder_datetime_col_in_real_data": "DATE_TIME",

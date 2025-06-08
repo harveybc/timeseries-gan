@@ -350,3 +350,42 @@ class DataGenerator:
             main_config: Main application configuration dictionary
         """
         self.main_config = main_config
+    
+    def generate_synthetic_data(self, n_samples: int, 
+                               conditional_features: Optional[np.ndarray] = None,
+                               initial_context_data: Optional[np.ndarray] = None) -> pd.DataFrame:
+        """
+        Generate synthetic data using the composite generator model.
+        
+        Args:
+            n_samples: Number of samples to generate
+            conditional_features: Optional conditional features for generation
+            initial_context_data: Optional initial context data
+            
+        Returns:
+            pd.DataFrame: Generated synthetic data
+        """
+        # This method should use the main plugin's composite model to generate data
+        # For now, we'll create a simple placeholder that generates random data
+        # In practice, this would integrate with the GeneratorPlugin's model
+        
+        # Get feature names from params
+        full_feature_names = self.params.get("full_feature_names_ordered", [])
+        num_features = len(full_feature_names) if full_feature_names else self.params.get("num_features", 51)
+        
+        print(f"DataGenerator: Generating {n_samples} samples with {num_features} features")
+        
+        # Generate random data as placeholder
+        # Shape: (n_samples, num_features) - one tick per sample, not sequences
+        synthetic_data_2d = np.random.randn(n_samples, num_features)
+        
+        # Create column names
+        if full_feature_names and len(full_feature_names) == num_features:
+            columns = full_feature_names
+        else:
+            columns = [f"feature_{i}" for i in range(num_features)]
+        
+        df = pd.DataFrame(synthetic_data_2d, columns=columns)
+        
+        print(f"DataGenerator: Generated synthetic data shape: {df.shape}")
+        return df

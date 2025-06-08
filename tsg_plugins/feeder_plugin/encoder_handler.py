@@ -117,7 +117,13 @@ class EncoderHandler:
         
         try:
             # Create dummy input matching expected shape
-            dummy_input = np.random.randn(1, *self.expected_input_shape)
+            # Ensure shape is properly handled for numpy
+            if isinstance(self.expected_input_shape, (list, tuple)):
+                input_shape = tuple(self.expected_input_shape)
+            else:
+                input_shape = (self.expected_input_shape,)
+            
+            dummy_input = np.random.randn(1, *input_shape)
             
             # Test encoding
             encoded = self.model.predict(dummy_input, verbose=0)

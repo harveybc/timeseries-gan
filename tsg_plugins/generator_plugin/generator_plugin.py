@@ -89,7 +89,6 @@ class GeneratorPlugin:
         
         # Initialize core attributes
         self.sequential_model: Optional[Model] = None
-        self.model: Optional[Model] = None  # Alias for sequential_model
         self.composite_model: Optional[Model] = None # Ensure this is initialized
         self.feature_to_idx: Dict[str, int] = {}
         self.num_all_features: int = 0
@@ -214,7 +213,6 @@ class GeneratorPlugin:
         elif not new_model_file and old_model_file:
             print("GeneratorPlugin: Model path cleared. Cleaning loaded model.")
             self.sequential_model = None
-            self.model = None
         
         # Check for normalization parameter changes
         new_norm_file = self.params.get("generator_normalization_params_file")
@@ -330,12 +328,10 @@ class GeneratorPlugin:
             if built_model is None: # Check if building failed
                 self.logger.error("Failed to build composite generator model (_build_composite_generator returned None).")
                 self.sequential_model = None
-                self.model = None
                 self.composite_model = None # Ensure it's None
                 raise IOError("Composite generator could not be built.")
 
             self.sequential_model = built_model # For compatibility if anything still uses it
-            self.model = built_model  # Alias
             # self.composite_model is already set by _build_composite_generator
 
             self.logger.info("Composite generator model built successfully.")
@@ -347,7 +343,6 @@ class GeneratorPlugin:
         except Exception as e:
             self.logger.error(f"Error during _load_model (building composite generator): {e}", exc_info=True)
             self.sequential_model = None
-            self.model = None
             self.composite_model = None # Ensure it's None on any exception
             raise IOError(f"Failed to build composite generator model: {e}")
 
