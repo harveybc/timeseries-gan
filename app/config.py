@@ -67,7 +67,7 @@ DEFAULT_VALUES = {
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        # "day_of_year_sin", "day_of_year_cos", # REMOVED
+        "day_of_year_sin", "day_of_year_cos", # Added back for 51 features
         "S&P500_Close", "vix_close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
@@ -99,7 +99,7 @@ DEFAULT_VALUES = {
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        # "day_of_year_sin", "day_of_year_cos", # REMOVED
+        "day_of_year_sin", "day_of_year_cos", # Added back for 51 features
         "S&P500_Close", "vix_close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",

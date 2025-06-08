@@ -270,5 +270,48 @@ class GeneratePipeline:
             print(f"❌ Error during evaluation: {e}")
             traceback.print_exc()
 
+    def _evaluate_data(self, combined_data_df: pd.DataFrame, real_data_segment_df: Optional[pd.DataFrame], evaluation_stage: str) -> None:
+        """
+        Evaluate the generated data using the evaluator plugin.
+        
+        Args:
+            combined_data_df: Combined synthetic and real data
+            real_data_segment_df: Real data segment for comparison
+            evaluation_stage: Identifier for the current evaluation stage
+        """
+        try:
+            print(f"Evaluating data for stage: {evaluation_stage}...")
+            
+            if not self.evaluator_plugin:
+                print("⚠️ No evaluator plugin available. Skipping evaluation.")
+                return
+                
+            # Use the existing _perform_evaluation method
+            self._perform_evaluation(combined_data_df, evaluation_stage)
+            
+        except Exception as e:
+            print(f"❌ Error during data evaluation: {e}")
+            traceback.print_exc()
+
+    def _save_outputs(self, combined_data_df: pd.DataFrame, evaluation_stage: str) -> None:
+        """
+        Save the generated outputs to files.
+        
+        Args:
+            combined_data_df: Combined data to save
+            evaluation_stage: Current evaluation stage
+        """
+        try:
+            print("Saving generated outputs...")
+            
+            # Save combined data
+            output_filename = f"generated_data_{evaluation_stage}.csv"
+            saved_path = self.output_manager.save_dataframe(combined_data_df, output_filename)
+            print(f"✓ Generated data saved to: {saved_path}")
+            
+        except Exception as e:
+            print(f"❌ Error saving outputs: {e}")
+            traceback.print_exc()
+
 # Ensure the class definition ends here if it's the end of the file.
 # If there's more code after this class, this comment is not needed.
