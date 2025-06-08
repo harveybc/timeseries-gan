@@ -265,6 +265,21 @@ class OutputManager:
             logger.error(f"Failed to create summary report: {str(e)}")
             raise
     
+    def save_dataframe(self, dataframe: pd.DataFrame, filename: str, 
+                      output_dir: Optional[str] = None) -> str:
+        """
+        Save DataFrame to CSV file.
+        
+        Args:
+            dataframe: DataFrame to save
+            filename: Filename (with or without .csv extension)
+            output_dir: Output directory (uses default if None)
+            
+        Returns:
+            Full path to saved file
+        """
+        return self.save_data(dataframe, filename, output_dir, format='csv')
+    
     def _ensure_directory_exists(self, directory: str) -> None:
         """Ensure directory exists, create if it doesn't."""
         Path(directory).mkdir(parents=True, exist_ok=True)
