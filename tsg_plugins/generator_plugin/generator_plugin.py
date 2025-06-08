@@ -773,9 +773,9 @@ class GeneratorPlugin:
         """
         self.logger.info(f"GeneratorPlugin: Received request to generate {n_samples} samples.")
 
-        if not hasattr(self, 'data_generator_component') or self.data_generator_component is None:
+        if not hasattr(self, 'data_generator') or self.data_generator is None:
             self.logger.error("DataGenerator component is not initialized in GeneratorPlugin. "
-                              "Ensure plugin.set_params() which calls initialize_model_components() has been successfully executed.")
+                              "Ensure plugin.set_params() which calls _initialize_feature_dependent_modules() has been successfully executed.")
             raise RuntimeError("GeneratorPlugin's DataGenerator component is not initialized.")
 
         # self.model here refers to self.generator_model_composite, which should be built/loaded.
@@ -788,7 +788,7 @@ class GeneratorPlugin:
         self.logger.debug(f"Initial context data shape: {initial_context_data.shape if initial_context_data is not None else 'None'}")
 
         try:
-            synthetic_data_df = self.data_generator_component.generate_synthetic_data(
+            synthetic_data_df = self.data_generator.generate_synthetic_data(
                 n_samples=n_samples,
                 conditional_features=conditional_features,
                 initial_context_data=initial_context_data
