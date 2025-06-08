@@ -13,7 +13,7 @@ import traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Conv1D, LSTM, Dense, Dropout, LeakyReLU, BatchNormalization, Bidirectional
+from tensorflow.keras.layers import Input, Conv1D, LeakyReLU, LSTM, Bidirectional, Dense, Flatten # Removed BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from typing import Dict, Any, List, Optional, Tuple
@@ -149,117 +149,85 @@ class DiscriminatorPlugin:
             self.logger.info("DiscriminatorPlugin: No model exists. Building model...")
             self._build_model()
     
-    def _build_model(self) -> None:
-        """
-        Build the discriminator model architecture.
-        """
-        try:
-            self.logger.info("Building discriminator model...")
-            
-            sequence_length = self.params.get("sequence_length", 144)
-            num_features = self.params.get("num_features", 51) # Ensure this uses the 51 default
-            
-            # Input layer
-            input_layer = Input(shape=(sequence_length, num_features), name="discriminator_input")
-            x = input_layer
-            
-            # Conv1D layers for feature extraction
-            conv_filters = self.params.get("conv_filters", [64, 128, 256])
-            conv_kernel_sizes = self.params.get("conv_kernel_sizes", [7, 5, 3])
-            conv_dropout_rate = self.params.get("conv_dropout_rate", 0.3)
-            leaky_relu_alpha = self.params.get("leaky_relu_alpha", 0.2)
-            use_batch_norm = self.params.get("use_batch_normalization", True)
-            
-            for i, (filters, kernel_size) in enumerate(zip(conv_filters, conv_kernel_sizes)):
-                x = Conv1D(filters, kernel_size, padding='same', name=f"conv1d_{i+1}")(x)
-                if use_batch_norm:
-                    x = BatchNormalization(name=f"bn_conv_{i+1}")(x)
-                x = LeakyReLU(alpha=leaky_relu_alpha, name=f"leaky_relu_conv_{i+1}")(x)
-                x = Dropout(conv_dropout_rate, name=f"dropout_conv_{i+1}")(x)
-            
-            # LSTM layer for temporal patterns
-            lstm_units = self.params.get("lstm_units", 128)
-            lstm_dropout = self.params.get("lstm_dropout", 0.3)
-            lstm_recurrent_dropout = self.params.get("lstm_recurrent_dropout", 0.3)
-            use_bidirectional = self.params.get("use_bidirectional_lstm", True)
-            
-            if use_bidirectional:
-                x = Bidirectional(
-                    LSTM(lstm_units, 
-                         dropout=lstm_dropout,
-                         recurrent_dropout=lstm_recurrent_dropout,
-                         return_sequences=False),
-                    name="bidirectional_lstm"
-                )(x)
-            else:
-                x = LSTM(lstm_units,
-                        dropout=lstm_dropout,
-                        recurrent_dropout=lstm_recurrent_dropout,
-                        return_sequences=False,
-                        name="lstm")(x)
-            
-            # Dense layers for classification
-            dense_units = self.params.get("dense_units", [64, 32])
-            dense_dropout_rate = self.params.get("dense_dropout_rate", 0.5)
-            
-            for i, units in enumerate(dense_units):
-                x = Dense(units, name=f"dense_{i+1}")(x)
-                if use_batch_norm:
-                    x = BatchNormalization(name=f"bn_dense_{i+1}")(x)
-                x = LeakyReLU(alpha=leaky_relu_alpha, name=f"leaky_relu_dense_{i+1}")(x)
-                x = Dropout(dense_dropout_rate, name=f"dropout_dense_{i+1}")(x)
-            
-            # Output layer
-            final_activation = self.params.get("final_activation", "sigmoid")
-            output = Dense(1, activation=final_activation, name="discriminator_output")(x)
-            
-            # Create model
-            self.model = Model(inputs=input_layer, outputs=output, name="discriminator")
-            
-            self.logger.info(f"Discriminator model built successfully with {self.model.count_params()} parameters")
-            self.logger.info(f"Input shape: {self.model.input.shape}")
-            self.logger.info(f"Output shape: {self.model.output.shape}")
-            
-            # Compile the model
-            self._compile_model()
-            
-        except Exception as e:
-            self.logger.error(f"Error building discriminator model: {e}")
-            self.logger.error(traceback.format_exc())
-            self.model = None
-            raise
-    
-    def _compile_model(self) -> None:
-        """
-        Compile the discriminator model with optimizer and loss function.
-        """
-        if self.model is None:
-            self.logger.warning("No model to compile")
-            return
+    def _build_model(self) -> Model:
+        """Builds the discriminator model."""
+        seq_len = self.params.get("sequence_length")
+        num_features = self.params.get("num_features")
+        conv_filters = self.params.get("conv_filters", [64, 128])
+        conv_kernel_sizes = self.params.get("conv_kernel_sizes", [7,5,3]) # Allow multiple kernel sizes
+        conv_strides = self.params.get("conv_strides", [1,1,1]) # Allow multiple strides
+        conv_activation = self.params.get("conv_activation", "leaky_relu")
+        # conv_dropout_rate = self.params.get("conv_dropout_rate", 0.3) # Removed
         
-        try:
-            learning_rate = self.params.get("learning_rate", 1e-4)
-            beta_1 = self.params.get("beta_1", 0.5)
-            beta_2 = self.params.get("beta_2", 0.999)
-            loss_function = self.params.get("loss_function", "binary_crossentropy")
-            metrics = self.params.get("metrics", ["accuracy"])
-            
-            optimizer = Adam(learning_rate=learning_rate, beta_1=beta_1, beta_2=beta_2)
-            
-            self.model.compile(
-                optimizer=optimizer,
-                loss=loss_function,
-                metrics=metrics
-            )
-            
-            self.compiled = True
-            self.logger.info("Discriminator model compiled successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Error compiling discriminator model: {e}")
-            self.compiled = False
-            raise
-    
+        lstm_units = self.params.get("lstm_units", 128)
+        # lstm_dropout = self.params.get("lstm_dropout", 0.3) # Removed
+        # lstm_recurrent_dropout = self.params.get("lstm_recurrent_dropout", 0.3) # Removed
+        use_bidirectional_lstm = self.params.get("use_bidirectional_lstm", True)
+        
+        dense_units = self.params.get("dense_units", [64, 32])
+        # dense_dropout_rate = self.params.get("dense_dropout_rate", 0.5) # Removed
+        final_activation = self.params.get("final_activation", "sigmoid")
+        # leaky_relu_alpha = self.params.get("leaky_relu_alpha", 0.2) # Used by LeakyReLU layer directly
+
+        input_layer = Input(shape=(seq_len, num_features))
+        x = input_layer
+
+        # Convolutional layers
+        for i, filters in enumerate(conv_filters):
+            kernel_size = conv_kernel_sizes[i] if i < len(conv_kernel_sizes) else conv_kernel_sizes[-1]
+            strides = conv_strides[i] if i < len(conv_strides) else conv_strides[-1]
+            x = Conv1D(
+                filters=filters, 
+                kernel_size=kernel_size, 
+                strides=strides, 
+                padding="same"
+                # No kernel_regularizer or bias_regularizer
+            )(x)
+            if conv_activation == "leaky_relu":
+                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2))(x)
+            else:
+                x = tf.keras.layers.Activation(conv_activation)(x)
+            # No BatchNormalization
+            # No Dropout
+
+        # LSTM layer
+        if use_bidirectional_lstm:
+            x = Bidirectional(LSTM(lstm_units))(x) # No dropout, recurrent_dropout, regularizers
+        else:
+            x = LSTM(lstm_units)(x) # No dropout, recurrent_dropout, regularizers
+        # No Dropout after LSTM
+
+        # Dense layers
+        for units in dense_units:
+            x = Dense(units)(x) # No regularizers
+            if conv_activation == "leaky_relu": # Assuming same activation for dense for consistency
+                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2))(x)
+            else:
+                x = tf.keras.layers.Activation(conv_activation)(x) # Or a different dense_activation param
+            # No Dropout
+
+        output_layer = Dense(1, activation=final_activation)(x)
+        
+        model = Model(input_layer, output_layer, name="discriminator")
+        self.add_debug_info("Discriminator model built.", True)
+        return model
+
+    def _compile_model(self) -> None:
+        if self.model is None:
+            self.model = self._build_model()
+        
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=self.params.get("learning_rate"),
+            beta_1=self.params.get("beta_1") 
+            # beta_2 is also a common Adam param, ensure it's in defaults if used
+        )
+        self.model.compile(
+            optimizer=optimizer,
+            loss=self.params.get("loss_function"), # e.g., 'binary_crossentropy'
+            metrics=self.params.get("metrics", ["accuracy"])
+        )
+        self.add_debug_info("Discriminator model compiled.", True)
+
     def get_model(self) -> Optional[Model]:
         """
         Get the discriminator model.

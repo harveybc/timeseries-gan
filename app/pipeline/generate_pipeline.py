@@ -248,8 +248,8 @@ class GeneratePipeline:
             print("⚠️ Synthetic data is empty. Skipping evaluation.")
             return
             
-        # Assuming real_data_for_evaluation is specified in config for comparison
-        real_data_eval_file = self.config.get("real_data_file_for_evaluation") 
+        # Use x_train_file as the real data for evaluation
+        real_data_eval_file = self.config.get("x_train_file") 
         if not real_data_eval_file or not os.path.exists(real_data_eval_file):
             print(f"⚠️ Real data for evaluation not found or not specified ('{real_data_eval_file}'). Evaluation might be limited or skipped.")
             # Decide if evaluation can proceed without real data or with a subset of metrics

@@ -14,8 +14,9 @@ import traceback # Added traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.models import Model # type: ignore
-from tensorflow.keras.layers import Input, Dense, LSTM, Bidirectional, Conv1D, Reshape, Concatenate, Lambda # type: ignore
+from tensorflow.keras.layers import Input, Dense, Reshape, LSTM, Bidirectional, Conv1D, Concatenate, TimeDistributed
+from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import l2 # Import l2 regularizer
 
 # Import modularized components
 from .model_loader import ModelLoader

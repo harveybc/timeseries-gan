@@ -18,6 +18,8 @@ Author: TimeSeries-GAN Team
 import os
 import logging
 import tensorflow as tf
+from tensorflow.keras.callbacks import ReduceLROnPlateau # Import ReduceLROnPlateau
+from tensorflow.keras import backend as K # Import Keras backend
 import pandas as pd
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -49,8 +51,9 @@ class GANTrainerPlugin:
         "discriminator_lstm_units": 64, "discriminator_dropout_rate": 0.3,
         
         # Learning rate scheduling
-        "enable_reduce_lr_on_plateau": True, "lr_reduction_factor": 0.5, "lr_patience": 50,
-        "lr_min_delta": 0.001, "min_lr_g": 1e-7, "min_lr_d": 1e-7, "lr_monitor_metric": "g_loss",
+        "enable_reduce_lr_on_plateau": True, "lr_reduction_factor": 0.5, "lr_patience": 10, # Reduced for faster effect in testing, adjust as needed
+        "lr_min_delta": 0.001, "min_lr_g": 1e-7, "min_lr_d": 1e-7, "lr_monitor_metric_g": "g_loss", # Monitor g_loss for generator
+        "lr_monitor_metric_d": "d_loss", # Monitor d_loss for discriminator
         
         # Early stopping
         "enable_early_stopping": True, "es_patience": 200, "es_min_delta": 0.001, "es_monitor_metric": "g_loss",
@@ -82,7 +85,10 @@ class GANTrainerPlugin:
         "feeder_date_feature_names_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week"],
         "feeder_max_day_of_month": 31.0, "feeder_max_hour_of_day": 24.0, "feeder_max_day_of_week": 7.0,
         "conditional_fundamental_feature_names": ["S&P500_Close", "vix_close"],
-        "num_conditional_prev_tick_features": 5, "datetime_col_name_in_x_real_df": "DATE_TIME"
+        "num_conditional_prev_tick_features": 5, "datetime_col_name_in_x_real_df": "DATE_TIME",
+        
+        # Additional parameters
+        "generator_l2_reg": 0.01,  # Added for generator L2 regularization
     }
     
     # Debug variables for monitoring
@@ -92,10 +98,9 @@ class GANTrainerPlugin:
     ]
     
     def __init__(self, config: Dict[str, Any], 
-                 generator_plugin: Optional[Any] = None, 
-                 discriminator_plugin: Optional[Any] = None, 
-                 feeder_plugin: Optional[Any] = None, 
-                 **kwargs):
+                 generator_plugin: Any, 
+                 discriminator_plugin: Any,
+                 feeder_plugin: Any = None): # Feeder plugin might be needed for data
         """
         Initialize the GANTrainerPlugin.
 
@@ -135,6 +140,34 @@ class GANTrainerPlugin:
             generator_plugin=self.generator_plugin # Pass the stored instance
         )
         self.logger.info("GANTrainerPlugin initialized.")
+
+        self.generator_l2_reg = self.params.get("generator_l2_reg")
+
+        # Initialize ReduceLROnPlateau callbacks
+        if self.params.get("enable_reduce_lr_on_plateau"):
+            self.lr_scheduler_g = ReduceLROnPlateau(
+                monitor=self.params.get("lr_monitor_metric_g", "g_loss"),
+                factor=self.params.get("lr_reduction_factor"),
+                patience=self.params.get("lr_patience"),
+                verbose=1,
+                min_delta=self.params.get("lr_min_delta"),
+                min_lr=self.params.get("min_lr_g")
+            )
+            self.lr_scheduler_d = ReduceLROnPlateau(
+                monitor=self.params.get("lr_monitor_metric_d", "d_loss"),
+                factor=self.params.get("lr_reduction_factor"),
+                patience=self.params.get("lr_patience"),
+                verbose=1,
+                min_delta=self.params.get("lr_min_delta"),
+                min_lr=self.params.get("min_lr_d")
+            )
+            # Associate models with schedulers - this needs to happen after models are compiled
+            # We will call them manually in the training loop.
+        else:
+            self.lr_scheduler_g = None
+            self.lr_scheduler_d = None
+        
+        self.feeder_plugin = feeder_plugin # Store feeder plugin
 
     def _initialize_parameters(self):
         """Initialize self.params from main_config and plugin_params defaults."""

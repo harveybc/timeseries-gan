@@ -280,6 +280,21 @@ class OutputManager:
         """
         return self.save_data(dataframe, filename, output_dir, format='csv')
     
+    def save_results(self, results: Dict[str, Any], filename: str, 
+                    output_dir: Optional[str] = None) -> str:
+        """
+        Save evaluation results to JSON file.
+        
+        Args:
+            results: Results dictionary to save
+            filename: Filename (with or without .json extension)
+            output_dir: Output directory (uses default if None)
+            
+        Returns:
+            Full path to saved file
+        """
+        return self.save_data(results, filename, output_dir, format='json')
+
     def _ensure_directory_exists(self, directory: str) -> None:
         """Ensure directory exists, create if it doesn't."""
         Path(directory).mkdir(parents=True, exist_ok=True)
