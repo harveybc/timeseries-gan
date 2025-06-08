@@ -86,13 +86,28 @@ class EncoderHandler:
             
             self.model_path = model_path
             
-            # Get model input/output shapes
-            self.expected_input_shape = self.model.input_shape[1:]
-            self.expected_output_shape = self.model.output_shape[1:]
+            # Handle multiple inputs/outputs properly
+            if hasattr(self.model, 'inputs') and len(self.model.inputs) > 1:
+                # Multiple inputs - store first input shape for compatibility
+                self.expected_input_shape = self.model.inputs[0].shape[1:]
+                logger.info(f"Model has {len(self.model.inputs)} inputs, using first: {self.expected_input_shape}")
+            else:
+                # Single input
+                self.expected_input_shape = self.model.input_shape[1:]
             
-            # Update latent dimension from model
-            if len(self.expected_output_shape) == 1:
-                self.latent_dim = self.expected_output_shape[0]
+            if hasattr(self.model, 'outputs') and len(self.model.outputs) > 1:
+                # Multiple outputs - store first output shape for compatibility
+                self.expected_output_shape = self.model.outputs[0].shape[1:]
+                logger.info(f"Model has {len(self.model.outputs)} outputs, using first: {self.expected_output_shape}")
+                
+                # For VAE encoder, use the latent dimension from first output (z_mean)
+                if len(self.expected_output_shape) >= 2:
+                    self.latent_dim = self.expected_output_shape[-1]  # Last dimension is latent dim
+            else:
+                # Single output
+                self.expected_output_shape = self.model.output_shape[1:]
+                if len(self.expected_output_shape) == 1:
+                    self.latent_dim = self.expected_output_shape[0]
             
             self.model_loaded = True
             logger.info(f"Encoder model loaded successfully from {model_path}")
@@ -116,21 +131,48 @@ class EncoderHandler:
             return False
         
         try:
-            # Create dummy input matching expected shape
-            # Ensure shape is properly handled for numpy
-            if isinstance(self.expected_input_shape, (list, tuple)):
-                input_shape = tuple(self.expected_input_shape)
+            # Handle multiple inputs for encoder model
+            if hasattr(self.model, 'inputs') and len(self.model.inputs) > 1:
+                # Multiple inputs - create dummy data for each input
+                dummy_inputs = []
+                for input_layer in self.model.inputs:
+                    input_shape = input_layer.shape[1:]  # Remove batch dimension
+                    dummy_input = np.random.randn(1, *input_shape)
+                    dummy_inputs.append(dummy_input)
+                
+                # Test encoding with multiple inputs
+                encoded = self.model.predict(dummy_inputs, verbose=0)
             else:
-                input_shape = (self.expected_input_shape,)
+                # Single input - original logic
+                if isinstance(self.expected_input_shape, (list, tuple)):
+                    input_shape = tuple(self.expected_input_shape)
+                else:
+                    input_shape = (self.expected_input_shape,)
+                
+                dummy_input = np.random.randn(1, *input_shape)
+                encoded = self.model.predict(dummy_input, verbose=0)
             
-            dummy_input = np.random.randn(1, *input_shape)
-            
-            # Test encoding
-            encoded = self.model.predict(dummy_input, verbose=0)
-            
-            if encoded.shape[1:] != self.expected_output_shape:
-                logger.error(f"Model output shape mismatch: expected {self.expected_output_shape}, got {encoded.shape[1:]}")
-                return False
+            # Validate output shapes
+            if hasattr(self.model, 'outputs') and len(self.model.outputs) > 1:
+                # Multiple outputs - check if encoded is a list
+                if not isinstance(encoded, list):
+                    logger.error(f"Expected list of outputs, got {type(encoded)}")
+                    return False
+                
+                if len(encoded) != len(self.model.outputs):
+                    logger.error(f"Output count mismatch: expected {len(self.model.outputs)}, got {len(encoded)}")
+                    return False
+                
+                # Check each output shape (just log for now, don't fail)
+                for i, output in enumerate(encoded):
+                    expected_shape = self.model.outputs[i].shape[1:]
+                    if output.shape[1:] != expected_shape:
+                        logger.warning(f"Output {i} shape mismatch: expected {expected_shape}, got {output.shape[1:]}")
+            else:
+                # Single output - original logic
+                if self.expected_output_shape and encoded.shape[1:] != self.expected_output_shape:
+                    logger.error(f"Model output shape mismatch: expected {self.expected_output_shape}, got {encoded.shape[1:]}")
+                    return False
             
             logger.info("Model validation successful")
             return True

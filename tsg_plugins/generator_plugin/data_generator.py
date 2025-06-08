@@ -371,17 +371,28 @@ class DataGenerator:
         
         # Get feature names from params
         full_feature_names = self.params.get("full_feature_names_ordered", [])
-        num_features = len(full_feature_names) if full_feature_names else self.params.get("num_features", 51)
+        
+        # Filter out datetime columns for data generation
+        if full_feature_names:
+            # Remove datetime column if present
+            datetime_cols = ['DATE_TIME', 'date_time', 'datetime']
+            feature_names_for_gen = [name for name in full_feature_names if name not in datetime_cols]
+            num_features = len(feature_names_for_gen)
+        else:
+            # Use the specified number of features from config
+            num_features = self.params.get("num_features", 51)
+            feature_names_for_gen = []
         
         print(f"DataGenerator: Generating {n_samples} samples with {num_features} features")
+        print(f"DataGenerator: Full feature list length: {len(full_feature_names)}, filtered: {num_features}")
         
         # Generate random data as placeholder
         # Shape: (n_samples, num_features) - one tick per sample, not sequences
         synthetic_data_2d = np.random.randn(n_samples, num_features)
         
         # Create column names
-        if full_feature_names and len(full_feature_names) == num_features:
-            columns = full_feature_names
+        if feature_names_for_gen and len(feature_names_for_gen) == num_features:
+            columns = feature_names_for_gen
         else:
             columns = [f"feature_{i}" for i in range(num_features)]
         

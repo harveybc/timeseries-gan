@@ -252,8 +252,12 @@ class ConditionManager:
                 logger.warning(f"Timestamp column '{timestamp_col}' not found")
                 return None
             
-            # Convert to datetime if needed
-            timestamps = pd.to_datetime(data[timestamp_col])
+            # Convert to datetime if needed and ensure we have a pandas Series
+            timestamp_data = data[timestamp_col]
+            if isinstance(timestamp_data, np.ndarray):
+                timestamps = pd.Series(pd.to_datetime(timestamp_data))
+            else:
+                timestamps = pd.to_datetime(timestamp_data)
             
             # Extract temporal features
             temporal_data = []
@@ -261,17 +265,17 @@ class ConditionManager:
             # Hour (0-23) normalized to [0, 1]
             if 'hour' in self.temporal_features:
                 hours = timestamps.dt.hour / 23.0
-                temporal_data.append(hours.values)
+                temporal_data.append(hours.values if hasattr(hours, 'values') else hours)
             
             # Day of month (1-31) normalized to [0, 1]
             if 'day' in self.temporal_features:
                 days = (timestamps.dt.day - 1) / 30.0
-                temporal_data.append(days.values)
+                temporal_data.append(days.values if hasattr(days, 'values') else days)
             
             # Month (1-12) normalized to [0, 1]
             if 'month' in self.temporal_features:
                 months = (timestamps.dt.month - 1) / 11.0
-                temporal_data.append(months.values)
+                temporal_data.append(months.values if hasattr(months, 'values') else months)
             
             # Year (relative to minimum year)
             if 'year' in self.temporal_features:
@@ -281,12 +285,12 @@ class ConditionManager:
                     years = (timestamps.dt.year - min_year) / (max_year - min_year)
                 else:
                     years = np.zeros(len(timestamps))
-                temporal_data.append(years.values)
+                temporal_data.append(years.values if hasattr(years, 'values') else years)
             
             # Weekday (0-6) normalized to [0, 1]
             if 'weekday' in self.temporal_features:
                 weekdays = timestamps.dt.weekday / 6.0
-                temporal_data.append(weekdays.values)
+                temporal_data.append(weekdays.values if hasattr(weekdays, 'values') else weekdays)
             
             if temporal_data:
                 result = np.column_stack(temporal_data).astype(np.float32)

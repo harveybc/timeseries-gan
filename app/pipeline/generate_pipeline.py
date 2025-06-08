@@ -80,7 +80,7 @@ class GeneratePipeline:
                 return
 
             real_data_segment_df = self._process_real_data()
-            combined_data_df = self._combine_data(synthetic_data_df, real_data_segment_df)
+            combined_data_df = self._combine_and_save_data(synthetic_data_df, real_data_segment_df)
 
             if self.evaluator_plugin:
                 self._evaluate_data(combined_data_df, real_data_segment_df, evaluation_stage)
