@@ -35,6 +35,20 @@ The system combines three key machine learning components in a sequential pipeli
 2.  **Conditional Generation**: Date/time features and previous step's synthetic output for temporal conditioning.
 3.  **Generative Adversarial Network (GAN)**: Adversarial training for improved synthetic data quality, where the generator is a composite model.
 
+### Training Process Enhancements and Regularization Strategy
+
+To provide better insights during training and to adhere to specific architectural choices, the GAN training process incorporates the following features:
+
+*   **Model Summaries**: Upon compilation, detailed summaries of both the Generator and Discriminator Keras models are printed to the console. This allows for immediate verification of the model architectures, layer configurations, and parameter counts.
+*   **Epoch-wise Progress Reporting**: During training, the system provides epoch-wise updates, including the current epoch number relative to the total number of epochs (e.g., "Epoch X/N"). Key loss metrics for both the generator (G\_loss) and the discriminator (D\_loss) are reported at the end of each epoch or at specified logging intervals, offering a clear view of the training dynamics.
+*   **Dynamic Learning Rate Adjustment**: The `ReduceLROnPlateau` Keras callback is integrated into the training loop.
+    *   It monitors specified loss metrics (e.g., `g_loss` for the generator, `d_loss` for the discriminator, configurable via `lr_monitor_metric_g` and `lr_monitor_metric_d`).
+    *   If a monitored metric stops improving for a defined number of epochs (`lr_patience`), the learning rate for the respective model's optimizer is reduced by a configurable factor (`lr_reduction_factor`).
+    *   This helps in navigating plateaus in the loss landscape and can lead to more refined convergence. The minimum learning rate (`min_lr_g`, `min_lr_d`) and minimum change (`lr_min_delta`) are also configurable.
+*   **Specific Regularization Strategy**:
+    *   **Generator**: To encourage smoother and more generalizable synthetic data, L2 regularization is applied exclusively to the kernel and bias terms of its `Dense`, `Conv1D`, and `LSTM` layers (including those within `Bidirectional` wrappers). The L2 regularization factor is configurable (e.g., `generator_l2_reg`). No `Dropout` or `BatchNormalization` layers are intentionally added to the newly constructed parts of the generator (e.g., the BiLSTM Z-generator). The pre-trained VAE decoder, when set to `trainable=True` as part of the composite generator, will also have L2 regularization applied to its trainable layers during GAN training.
+    *   **Discriminator**: The discriminator is designed *without any explicit regularization techniques*. This means no `Dropout`, no `BatchNormalization`, and no `L2 regularization` (kernel or bias) are applied to its layers. Furthermore, label smoothing is not used during the training of the discriminator. This approach allows the discriminator to learn the complex decision boundary between real and fake data as effectively as possible, potentially making it a stronger adversary for the generator.
+
 ### Feature Engineering and Consistency
 
 A critical aspect of the SC-VAE-GAN's training stability is ensuring feature consistency between the synthetic data produced by the generator and the real data used to train the discriminator. Both data streams must present the same number and order of features to the discriminator.
