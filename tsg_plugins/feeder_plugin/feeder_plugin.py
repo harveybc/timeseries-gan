@@ -428,8 +428,40 @@ class FeederPlugin:
     
     def set_params(self, **kwargs):
         """Update plugin parameters with provided configuration."""
+        # Store old values for change detection
+        old_encoder_path = self.params.get('encoder_model_path')
+        old_x_train_file = self.params.get('x_train_file')
+        
+        # Update parameters
         for key, value in kwargs.items():
             self.params[key] = value
+        
+        # Check for encoder path and attempt initialization
+        encoder_path = self.params.get('encoder_model_path') or kwargs.get('encoder_model_path')
+        x_train_file = self.params.get('x_train_file') or kwargs.get('x_train_file')
+        
+        # Initialize if we have an encoder path and it's different from before, or if we're not initialized yet
+        if encoder_path and (encoder_path != old_encoder_path or not self.is_initialized):
+            logger.info(f"FeederPlugin: Initializing with encoder path: {encoder_path}")
+            
+            # Load sample data if available for condition manager initialization
+            sample_data = None
+            if x_train_file and os.path.exists(x_train_file):
+                try:
+                    logger.info(f"FeederPlugin: Loading sample data from: {x_train_file}")
+                    sample_data = pd.read_csv(x_train_file)
+                    logger.info(f"FeederPlugin: Sample data loaded with shape: {sample_data.shape}")
+                except Exception as e:
+                    logger.warning(f"FeederPlugin: Failed to load sample data from {x_train_file}: {e}")
+                    sample_data = None
+            
+            # Initialize the feeder plugin
+            if not self.initialize(encoder_path, sample_data):
+                logger.error("FeederPlugin: Initialization failed")
+            else:
+                logger.info("FeederPlugin: Initialization completed successfully")
+        elif not encoder_path:
+            logger.warning("FeederPlugin: No encoder_model_path provided, cannot initialize")
 
     def get_debug_info(self):
         """Return debug information for the plugin."""

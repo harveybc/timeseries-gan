@@ -351,6 +351,21 @@ class GeneratorPlugin:
             self.composite_model = None # Ensure it's None on any exception
             raise IOError(f"Failed to build composite generator model: {e}")
 
+    @property
+    def model(self) -> Optional[Model]:
+        """
+        Property to access the generator model with fallback logic.
+        
+        Returns:
+            Optional[Model]: The generator model if available
+        """
+        # Check for generator_model_composite first (if set by training or other processes)
+        if hasattr(self, 'generator_model_composite') and self.generator_model_composite is not None:
+            return self.generator_model_composite
+            
+        # Fall back to get_model() which has comprehensive fallback logic
+        return self.get_model()
+
     def get_model(self) -> Optional[Model]:
         """
         Get the composite generator model.
