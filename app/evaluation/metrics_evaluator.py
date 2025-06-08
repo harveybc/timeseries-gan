@@ -17,6 +17,8 @@ from sklearn.preprocessing import StandardScaler
 from scipy import stats
 from scipy.spatial.distance import jensenshannon
 import warnings
+import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -369,3 +371,99 @@ class MetricsEvaluator:
             
         except Exception as e:
             logger.error(f"Failed to save evaluation report: {str(e)}")
+    
+    def evaluate(self, synthetic_data: pd.DataFrame, real_data_path: Optional[str] = None, 
+                stage_name: str = "default") -> Dict[str, Any]:
+        """
+        Evaluate synthetic data against real data.
+        
+        Args:
+            synthetic_data: Generated synthetic data as DataFrame
+            real_data_path: Path to real data file for comparison (optional)
+            stage_name: Name of the evaluation stage
+            
+        Returns:
+            Dictionary containing evaluation results
+        """
+        logger.info(f"Starting evaluation for stage: {stage_name}")
+        
+        # Convert synthetic data to numpy for evaluation
+        if isinstance(synthetic_data, pd.DataFrame):
+            # Filter out datetime columns to avoid Timestamp issues
+            numeric_columns = synthetic_data.select_dtypes(include=[np.number]).columns
+            if len(numeric_columns) > 0:
+                synthetic_array = synthetic_data[numeric_columns].values
+                logger.info(f"Using {len(numeric_columns)} numeric columns for evaluation")
+            else:
+                logger.warning("No numeric columns found in synthetic data")
+                synthetic_array = np.array([])
+        else:
+            synthetic_array = synthetic_data
+        
+        # Load real data if path provided
+        real_array = None
+        if real_data_path and os.path.exists(real_data_path):
+            try:
+                if real_data_path.endswith('.csv'):
+                    real_df = pd.read_csv(real_data_path)
+                    # Remove datetime columns if present
+                    datetime_cols = ['DATE_TIME', 'date_time', 'datetime']
+                    for col in datetime_cols:
+                        if col in real_df.columns:
+                            real_df = real_df.drop(columns=[col])
+                    real_array = real_df.values
+                elif real_data_path.endswith('.npy'):
+                    real_array = np.load(real_data_path)
+                
+                logger.info(f"Loaded real data with shape: {real_array.shape}")
+            except Exception as e:
+                logger.warning(f"Could not load real data from {real_data_path}: {e}")
+        
+        # Perform evaluation
+        if real_array is not None:
+            # Full evaluation with real data comparison
+            results = self.evaluate_synthetic_data(real_array, synthetic_array)
+        else:
+            # Limited evaluation without real data
+            results = self._evaluate_synthetic_only(synthetic_array)
+        
+        # Add metadata
+        results['stage_name'] = stage_name
+        results['evaluation_timestamp'] = datetime.now().isoformat()
+        results['synthetic_data_shape'] = synthetic_array.shape
+        
+        logger.info(f"Evaluation completed for stage: {stage_name}")
+        return results
+    
+    def _evaluate_synthetic_only(self, synthetic_data: np.ndarray) -> Dict[str, Any]:
+        """
+        Evaluate synthetic data without real data comparison.
+        
+        Args:
+            synthetic_data: Generated synthetic data
+            
+        Returns:
+            Dictionary containing basic evaluation metrics
+        """
+        logger.info("Performing synthetic-only evaluation (no real data comparison)")
+        
+        return {
+            'data_info': {
+                'synthetic_shape': synthetic_data.shape,
+                'synthetic_features': synthetic_data.shape[1] if len(synthetic_data.shape) > 1 else 1,
+            },
+            'basic_statistics': {
+                'mean': np.mean(synthetic_data, axis=0).tolist(),
+                'std': np.std(synthetic_data, axis=0).tolist(),
+                'min': np.min(synthetic_data, axis=0).tolist(),
+                'max': np.max(synthetic_data, axis=0).tolist(),
+                'median': np.median(synthetic_data, axis=0).tolist()
+            },
+            'data_quality': {
+                'has_nan': bool(np.isnan(synthetic_data).any()),
+                'has_inf': bool(np.isinf(synthetic_data).any()),
+                'finite_ratio': float(np.isfinite(synthetic_data).mean())
+            },
+            'overall_score': 0.5,  # Neutral score without comparison
+            'evaluation_type': 'synthetic_only'
+        }
