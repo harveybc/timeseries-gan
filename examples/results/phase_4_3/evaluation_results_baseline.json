@@ -18,7 +18,7 @@
   "ml_metrics": {},
   "error": "operands could not be broadcast together with shapes (44,) (47,) ",
   "stage_name": "baseline",
-  "evaluation_timestamp": "2025-06-08T14:04:03.660708",
+  "evaluation_timestamp": "2025-06-08T14:18:04.816629",
   "synthetic_data_shape": [
     1000,
     47

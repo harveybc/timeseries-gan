@@ -7,6 +7,7 @@ configurations, initializes plugins, then dispatches to the unified pipeline.
 """
 
 import sys
+import os
 import traceback
 from typing import Dict, Any
 
@@ -16,6 +17,11 @@ from app.config_handler import load_config, remote_load_config, save_config
 from app.plugin_loader import load_plugin
 from app.config_merger import merge_config, process_unknown_args
 from app.data_processor import run_pipeline
+
+# Add the project root directory to sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 
 def main():

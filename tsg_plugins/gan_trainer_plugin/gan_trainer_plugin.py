@@ -17,6 +17,8 @@ Author: TimeSeries-GAN Team
 
 import os
 import logging
+import time
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.callbacks import ReduceLROnPlateau # Import ReduceLROnPlateau
 from tensorflow.keras import backend as K # Import Keras backend
@@ -29,7 +31,10 @@ from .training_coordinator import TrainingCoordinator
 # from ..discriminator_plugin.discriminator_plugin import DiscriminatorPlugin # Example
 # from ..feeder_plugin.feeder_plugin import FeederPlugin # Example
 
-class GANTrainerPlugin:
+from app.utils.logging_utils import get_logger
+from tsg_plugins.plugin_base import PluginBase
+
+class GANTrainerPlugin(PluginBase):
     """
     Main GAN Trainer Plugin following extreme separation of concerns.
     
@@ -330,6 +335,37 @@ class GANTrainerPlugin:
              self.training_coordinator.set_params(**self.params)
 
         try:
+            # Initialize ReduceLROnPlateau callback
+            # Ensure that the monitored value 'val_loss' is available from the validation step if used.
+            # If not using validation data in the same way, this might need adjustment,
+            # or monitor 'd_loss' or 'g_loss' if more appropriate and available.
+            # For now, let's assume we want to monitor a general loss, e.g., G_loss.
+            # We will pass G_loss to the callback at the end of each epoch.
+            reduce_lr_g = ReduceLROnPlateau(
+                monitor='g_loss',  # Monitor G_loss
+                factor=self.config.get("reduce_lr_factor", 0.2),
+                patience=self.config.get("reduce_lr_patience", 5),
+                verbose=1,
+                mode='min', # Assuming lower G_loss is better
+                min_delta=self.config.get("reduce_lr_min_delta", 0.0001),
+                cooldown=self.config.get("reduce_lr_cooldown", 0),
+                min_lr=self.config.get("reduce_lr_min_lr", 0)
+            )
+            reduce_lr_d = ReduceLROnPlateau(
+                monitor='d_loss', # Monitor D_loss
+                factor=self.config.get("reduce_lr_factor", 0.2),
+                patience=self.config.get("reduce_lr_patience", 5),
+                verbose=1,
+                mode='min', # Assuming lower D_loss is better
+                min_delta=self.config.get("reduce_lr_min_delta", 0.0001),
+                cooldown=self.config.get("reduce_lr_cooldown", 0),
+                min_lr=self.config.get("reduce_lr_min_lr", 0)
+            )
+
+            # Set the models for the callbacks
+            reduce_lr_g.set_model(self.generator_model)
+            reduce_lr_d.set_model(self.discriminator_model)
+
             history = self.training_coordinator.train(
                 training_data=training_data,
                 generator=self.generator_model,

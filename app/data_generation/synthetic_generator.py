@@ -149,7 +149,9 @@ class SyntheticDataGenerator:
     def _generate_target_datetimes(self, n_samples: int) -> pd.Series:
         """
         Generate target datetime sequence for synthetic data.
-        
+        If x_train_file is available, the sequence will lead up to the first datetime in x_train_file.
+        Otherwise, it will lead up to the current time.
+
         Args:
             n_samples: Number of datetime samples to generate
             
@@ -157,25 +159,80 @@ class SyntheticDataGenerator:
             pd.Series: Generated datetime sequence
         """
         try:
-            # Get datetime configuration
             dataset_periodicity = self.config.get("dataset_periodicity", "1h")
-            start_dt_str = self.config.get("start_datetime", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            datetime_col_name = self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")
+            x_train_file_path = self.config.get("x_train_file")
             
-            # Generate datetime sequence
-            datetimes = self._generate_datetime_sequence(start_dt_str, n_samples, dataset_periodicity)
+            end_datetime = None
+            if x_train_file_path:
+                try:
+                    # Read only the first few rows to get the first datetime
+                    real_data_first_row = pd.read_csv(x_train_file_path, nrows=1)
+                    if datetime_col_name in real_data_first_row.columns:
+                        end_datetime = pd.to_datetime(real_data_first_row[datetime_col_name].iloc[0])
+                        print(f"Target end datetime for synthetic data (from x_train_file): {end_datetime}")
+                    else:
+                        print(f"Warning: Datetime column '{datetime_col_name}' not found in '{x_train_file_path}'. Defaulting end time.")
+                except Exception as e:
+                    print(f"Warning: Could not read first datetime from '{x_train_file_path}': {e}. Defaulting end time.")
+
+            if end_datetime is None:
+                end_datetime = pd.to_datetime(datetime.now().replace(microsecond=0))
+                print(f"Target end datetime for synthetic data (current time): {end_datetime}")
+
+            # Calculate start_datetime based on n_samples, periodicity, and end_datetime, skipping weekends
+            # This is an iterative process because of weekend skipping.
             
-            return pd.Series(pd.to_datetime(datetimes))
+            time_delta_map = {
+                "1h": timedelta(hours=1), "1H": timedelta(hours=1),
+                "15min": timedelta(minutes=15), "15T": timedelta(minutes=15), "15m": timedelta(minutes=15),
+                "1min": timedelta(minutes=1), "1T": timedelta(minutes=1), "1m": timedelta(minutes=1),
+                "daily": timedelta(days=1), "1D": timedelta(days=1)
+            }
+            time_step = time_delta_map.get(dataset_periodicity, timedelta(hours=1))
+
+            generated_datetimes = []
+            current_dt = end_datetime
+            
+            # Generate datetimes backwards from end_datetime, then reverse
+            # This makes weekend skipping logic more straightforward when calculating the start
+            temp_datetimes_reversed = []
+            for _ in range(n_samples):
+                # Move backwards, skipping weekends if not daily
+                current_dt -= time_step
+                if dataset_periodicity != "daily" and dataset_periodicity != "1D":
+                    while current_dt.weekday() >= 5: # Saturday or Sunday
+                        current_dt -= timedelta(days=1) # Move to Friday
+                        # Adjust time if necessary, e.g., if time_step is hourly, ensure it's end of Friday
+                        if time_step < timedelta(days=1):
+                             current_dt = current_dt.replace(hour=23 if time_step.seconds // 3600 == 1 else (23 - (24 - time_step.seconds // 3600)), minute=59 if time_step.seconds % 3600 // 60 > 0 else 0, second=59 if time_step.seconds % 60 > 0 else 0)
+
+
+                temp_datetimes_reversed.append(current_dt)
+            
+            # Reverse to get chronological order
+            generated_datetimes = [dt.strftime('%Y-%m-%d %H:%M:%S') for dt in reversed(temp_datetimes_reversed)]
+            
+            # Ensure the first synthetic datetime is exactly one time_step before the end_datetime (or real data start)
+            # after accounting for weekends.
+            # The logic above should handle this by generating backwards.
+
+            print(f"Generated {len(generated_datetimes)} datetimes. First: {generated_datetimes[0]}, Last: {generated_datetimes[-1]}")
+            return pd.Series(pd.to_datetime(generated_datetimes))
             
         except Exception as e:
-            print(f"Warning: Failed to generate target datetimes: {e}")
-            # Fallback to simple sequence
-            return pd.Series([datetime.now() + timedelta(hours=i) for i in range(n_samples)])
+            print(f"Warning: Failed to generate target datetimes: {e}. Falling back to simple sequence.")
+            # Fallback to simple sequence leading up to now (original fallback)
+            return pd.Series([datetime.now() - timedelta(hours=(n_samples - 1 - i)) for i in range(n_samples)])
     
     def _generate_datetime_sequence(self, start_datetime_str: str, num_samples: int, 
                                    periodicity_str: str) -> list:
         """
         Generate datetime sequence based on periodicity.
-        
+        This method is now primarily a helper or can be deprecated if the logic in 
+        _generate_target_datetimes fully covers its use cases.
+        The new logic in _generate_target_datetimes is more robust for prepending.
+
         Args:
             start_datetime_str: Starting datetime as string
             num_samples: Number of samples to generate
@@ -192,7 +249,6 @@ class SyntheticDataGenerator:
         except Exception:
             current_dt = pd.to_datetime(datetime.now().replace(microsecond=0))
         
-        # Define time step mapping
         time_delta_map = {
             "1h": timedelta(hours=1), "1H": timedelta(hours=1),
             "15min": timedelta(minutes=15), "15T": timedelta(minutes=15), "15m": timedelta(minutes=15),
@@ -203,86 +259,23 @@ class SyntheticDataGenerator:
         time_step = time_delta_map.get(periodicity_str, timedelta(hours=1))
         datetimes = []
         
-        for i in range(num_samples):
+        for _ in range(num_samples):
             # Skip weekends for non-daily data
-            if periodicity_str != "daily":
+            if periodicity_str not in ["daily", "1D"]: # Check against "daily" and "1D"
                 while current_dt.weekday() >= 5:  # Saturday or Sunday
-                    current_dt += timedelta(days=1)
+                    current_dt += timedelta(days=1) # Move to Monday
+                    # If hourly, set to start of Monday, e.g. 00:00, or a specific market open time
+                    if time_step < timedelta(days=1):
+                        current_dt = current_dt.replace(hour=0, minute=0, second=0) 
             
             datetimes.append(current_dt.strftime('%Y-%m-%d %H:%M:%S'))
             current_dt += time_step
         
         return datetimes
-    
-    def _convert_to_numpy(self, data) -> np.ndarray:
-        """
-        Convert data to numpy array with proper dtype.
-        
-        Args:
-            data: Data to convert (DataFrame or array)
-            
-        Returns:
-            np.ndarray: Converted data
-        """
-        if isinstance(data, pd.DataFrame):
-            data_np = data.values.astype(np.float32)
-        else:
-            data_np = data.astype(np.float32)
-        
-        # Handle 3D to 2D conversion if needed
-        if data_np.ndim == 3:
-            data_np = data_np[:, -1, :]
-        
-        return data_np
-    
-    def _extract_previous_close(self, X_train_np: np.ndarray, all_processed_datasets: Dict, 
-                               decoder_input_window_size: int) -> Optional[float]:
-        """
-        Extract previous close value for log return calculations.
-        
-        Args:
-            X_train_np: Training data array
-            all_processed_datasets: Processed datasets dictionary
-            decoder_input_window_size: Size of decoder input window
-            
-        Returns:
-            Previous close value or None if not available
-        """
-        try:
-            feature_names = all_processed_datasets.get("feature_names", [])
-            if 'CLOSE' in feature_names and X_train_np.shape[0] > decoder_input_window_size:
-                close_idx = feature_names.index('CLOSE')
-                return float(X_train_np[-(decoder_input_window_size + 1), close_idx])
-        except Exception as e:
-            print(f"Warning: Could not extract previous close: {e}")
-        
-        return None
-    
-    def _extract_initial_datetimes(self, datetimes_train_processed, 
-                                  decoder_input_window_size: int) -> Optional[pd.Series]:
-        """
-        Extract initial datetime sequence for window.
-        
-        Args:
-            datetimes_train_processed: Processed datetime data
-            decoder_input_window_size: Size of decoder input window
-            
-        Returns:
-            Initial datetime series or None if not available
-        """
-        try:
-            if datetimes_train_processed is not None:
-                dt_series = pd.Series(pd.to_datetime(datetimes_train_processed))
-                if len(dt_series) >= decoder_input_window_size:
-                    return dt_series.iloc[-decoder_input_window_size:].reset_index(drop=True)
-        except Exception as e:
-            print(f"Warning: Could not extract initial datetimes: {e}")
-        
-        return None
-    
+
     def _convert_to_dataframe(self, generated_values, target_datetimes: pd.Series) -> pd.DataFrame:
         """
-        Convert generated values to DataFrame with proper column names.
+        Convert generated values to DataFrame with proper column names and datetime format.
         
         Args:
             generated_values: Generated values from generator plugin
@@ -293,34 +286,72 @@ class SyntheticDataGenerator:
         """
         try:
             # Get feature names from generator configuration
-            feature_names = self.generator_plugin.params.get("full_feature_names_ordered", [])
-            datetime_col_name = self.config.get("datetime_col_name", "DATE_TIME")
+            # Ensure 'DATE_TIME' is NOT in these feature_names if it's handled separately
+            feature_names = self.config.get("generator_full_feature_names_ordered", [])
+            # Remove 'DATE_TIME' if it exists in the feature list, as it's added separately
+            if "DATE_TIME" in feature_names:
+                feature_names = [name for name in feature_names if name != "DATE_TIME"]
+
+            datetime_col_name = self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")
             
             # Handle different generated_values formats
-            if isinstance(generated_values, list) and len(generated_values) == 1:
-                generated_values = generated_values[0]
+            if isinstance(generated_values, list) and len(generated_values) > 0 and isinstance(generated_values[0], np.ndarray):
+                 # Assuming list of arrays, common in some Keras model outputs for multiple outputs
+                 # We are interested in the primary output, usually the first one.
+                generated_values = generated_values[0] 
             
             if isinstance(generated_values, np.ndarray) and generated_values.ndim == 3:
-                generated_values = generated_values[0]
-            
+                # If shape is (1, n_samples, n_features) or (batch_size, n_samples, n_features)
+                # and we expect (n_samples, n_features)
+                if generated_values.shape[0] == 1 and generated_values.shape[1] == len(target_datetimes):
+                    generated_values = generated_values[0] 
+                elif generated_values.shape[0] == len(target_datetimes) and generated_values.ndim == 3: # (n_samples, 1, n_features)
+                     generated_values = generated_values.reshape(generated_values.shape[0], generated_values.shape[2])
+
+
+            # Ensure generated_values has the correct number of features
+            num_expected_features = len(feature_names)
+            if generated_values.shape[1] != num_expected_features:
+                print(f"Warning: Number of generated features ({generated_values.shape[1]}) does not match expected ({num_expected_features}). Adjusting columns.")
+                if generated_values.shape[1] < num_expected_features:
+                    # Pad with NaNs or zeros if fewer features are generated
+                    padding = np.full((generated_values.shape[0], num_expected_features - generated_values.shape[1]), np.nan)
+                    generated_values = np.hstack((generated_values, padding))
+                else:
+                    # Truncate if more features are generated
+                    generated_values = generated_values[:, :num_expected_features]
+
             # Create DataFrame
-            if feature_names and len(feature_names) > 0:
+            if feature_names: # Check if feature_names is not empty
                 synthetic_data = pd.DataFrame(generated_values, columns=feature_names)
             else:
-                # Fallback to generic column names
+                # Fallback to generic column names if feature_names is empty
                 n_features = generated_values.shape[1] if generated_values.ndim > 1 else 1
                 synthetic_data = pd.DataFrame(generated_values, 
                                             columns=[f"feature_{i}" for i in range(n_features)])
             
-            # Add datetime column
-            synthetic_data[datetime_col_name] = target_datetimes.values
+            # Add datetime column and format it
+            synthetic_data[datetime_col_name] = pd.to_datetime(target_datetimes.values).strftime('%Y-%m-%d %H:%M:%S')
             
+            # Reorder columns to have datetime_col_name first, then others as per generator_full_feature_names_ordered
+            final_ordered_columns = [datetime_col_name] + feature_names
+            synthetic_data = synthetic_data[final_ordered_columns]
+
             return synthetic_data
             
         except Exception as e:
             print(f"Warning: DataFrame conversion failed, using basic format: {e}")
             # Fallback to simple DataFrame
-            return pd.DataFrame({
-                'generated_data': generated_values.flatten() if hasattr(generated_values, 'flatten') else [0],
-                self.config.get("datetime_col_name", "DATE_TIME"): target_datetimes.values
-            })
+            df = pd.DataFrame()
+            df[self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")] = pd.to_datetime(target_datetimes.values).strftime('%Y-%m-%d %H:%M:%S')
+            # Add generated data, ensuring it's 2D
+            if hasattr(generated_values, 'ndim'):
+                if generated_values.ndim == 1:
+                    df['generated_data'] = generated_values
+                elif generated_values.ndim > 1:
+                    for i in range(generated_values.shape[1]):
+                         df[f'feature_{i}'] = generated_values[:, i]
+            else: # if it's a list or other non-array type
+                 df['generated_data'] = generated_values
+
+            return df

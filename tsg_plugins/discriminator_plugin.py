@@ -13,7 +13,8 @@ import traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Conv1D, LeakyReLU, LSTM, Bidirectional, Dense, Flatten # Removed BatchNormalization, Dropout
+from tensorflow.keras.layers import (Input, Dense, LSTM, Conv1D, Bidirectional, 
+                                     Concatenate, Flatten, LeakyReLU, ReLU) # Removed BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from typing import Dict, Any, List, Optional, Tuple
@@ -43,17 +44,13 @@ class DiscriminatorPlugin:
         "conv_kernel_sizes": [7, 5, 3],  # Multi-scale temporal patterns
         "conv_strides": [1, 1, 1],       # Stride for each conv layer
         "conv_activation": "leaky_relu",
-        "conv_dropout_rate": 0.3,
         
         # LSTM configuration
         "lstm_units": 128,
-        "lstm_dropout": 0.3,
-        "lstm_recurrent_dropout": 0.3,
         "use_bidirectional_lstm": True,
         
         # Dense layers
         "dense_units": [64, 32],
-        "dense_dropout_rate": 0.5,
         "final_activation": "sigmoid",
         
         # Training parameters
@@ -62,7 +59,6 @@ class DiscriminatorPlugin:
         "beta_2": 0.999,         # Adam optimizer beta_2
         "loss_function": "binary_crossentropy",
         "metrics": ["accuracy"],
-        "use_batch_normalization": True,
         "leaky_relu_alpha": 0.2,
         "label_smoothing": 0.1,
         "model_save_path": None,
@@ -157,15 +153,11 @@ class DiscriminatorPlugin:
         conv_kernel_sizes = self.params.get("conv_kernel_sizes", [7,5,3]) # Allow multiple kernel sizes
         conv_strides = self.params.get("conv_strides", [1,1,1]) # Allow multiple strides
         conv_activation = self.params.get("conv_activation", "leaky_relu")
-        # conv_dropout_rate = self.params.get("conv_dropout_rate", 0.3) # Removed
         
         lstm_units = self.params.get("lstm_units", 128)
-        # lstm_dropout = self.params.get("lstm_dropout", 0.3) # Removed
-        # lstm_recurrent_dropout = self.params.get("lstm_recurrent_dropout", 0.3) # Removed
         use_bidirectional_lstm = self.params.get("use_bidirectional_lstm", True)
         
         dense_units = self.params.get("dense_units", [64, 32])
-        # dense_dropout_rate = self.params.get("dense_dropout_rate", 0.5) # Removed
         final_activation = self.params.get("final_activation", "sigmoid")
         # leaky_relu_alpha = self.params.get("leaky_relu_alpha", 0.2) # Used by LeakyReLU layer directly
 
@@ -209,7 +201,7 @@ class DiscriminatorPlugin:
         output_layer = Dense(1, activation=final_activation)(x)
         
         model = Model(input_layer, output_layer, name="discriminator")
-        self.add_debug_info("Discriminator model built.", True)
+        self.logger.info("Discriminator model built.") # Changed from self.add_debug_info
         return model
 
     def _compile_model(self) -> None:
@@ -219,14 +211,14 @@ class DiscriminatorPlugin:
         optimizer = tf.keras.optimizers.Adam(
             learning_rate=self.params.get("learning_rate"),
             beta_1=self.params.get("beta_1") 
-            # beta_2 is also a common Adam param, ensure it's in defaults if used
+            # beta_2 is also a common Adam param, ensure it\'s in defaults if used
         )
         self.model.compile(
             optimizer=optimizer,
-            loss=self.params.get("loss_function"), # e.g., 'binary_crossentropy'
+            loss=self.params.get("loss_function"), # e.g., \'binary_crossentropy\'
             metrics=self.params.get("metrics", ["accuracy"])
         )
-        self.add_debug_info("Discriminator model compiled.", True)
+        self.logger.info("Discriminator model compiled.") # Changed from self.add_debug_info
 
     def get_model(self) -> Optional[Model]:
         """

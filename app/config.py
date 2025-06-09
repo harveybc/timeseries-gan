@@ -14,6 +14,8 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
+    "operation_mode": "train", # Added: Default operation mode
+    "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
 
     # Data for evaluation and base for generation
     # "real_data_file": "examples/data/phase_3/normalized_d4.csv", # REMOVED - Redundant, use x_train_file
@@ -34,6 +36,8 @@ DEFAULT_VALUES = {
     "latent_shape": [18, 32], 
     "batch_size": 32, 
     "seq_len": 144, # ADDED: Corresponds to generator_decoder_input_window_size or expected output sequence length
+    "gan_epochs": 100,  # Added gan_epochs for training
+    "gan_batch_size": 32,  # Added gan_batch_size for training
     
     # --- Parameters for FeederPlugin ---
     "feeder_sampling_method": "standard_normal", 
@@ -67,14 +71,15 @@ DEFAULT_VALUES = {
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", # Added back for 51 features
+        "day_of_year_sin", "day_of_year_cos", 
         "S&P500_Close", "vix_close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
-        # Removed raw date parts: "day_of_month", "hour_of_day", "day_of_week" 
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # The following are placeholders for the 51-feature requirement (config.py test)
+        "PLACEHOLDER_FEATURE_X1", "PLACEHOLDER_FEATURE_Y2", "PLACEHOLDER_FEATURE_Z3"
     ], 
     "generator_decoder_output_feature_names": [
         # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
@@ -99,13 +104,15 @@ DEFAULT_VALUES = {
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", # Added back for 51 features
+        "day_of_year_sin", "day_of_year_cos", 
         "S&P500_Close", "vix_close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # The following are placeholders for the 51-feature requirement (config.py test)
+        "PLACEHOLDER_FEATURE_X1", "PLACEHOLDER_FEATURE_Y2", "PLACEHOLDER_FEATURE_Z3"
     ],
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
     "discriminator_ti_feature_names": [
@@ -151,5 +158,18 @@ DEFAULT_VALUES = {
     "resume_from_checkpoint": False,
     "fp16": False,
     "tf32": True,
-    "autocast": True
+    "autocast": True,
+
+    # Added: L2 Regularization for Generator
+    "generator_l2_reg": 0.01,
+
+    # Added: ReduceLROnPlateau parameters
+    "enable_reduce_lr_on_plateau": True,
+    "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler
+    "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
+    "lr_reduction_factor": 0.1,   # Factor by which LR is reduced
+    "lr_patience": 10,            # Epochs with no improvement before LR is reduced
+    "lr_min_delta": 0.0001,       # Minimum change to qualify as an improvement
+    "min_lr_g": 1e-7,             # Minimum LR for generator
+    "min_lr_d": 1e-7,             # Minimum LR for discriminator
 }

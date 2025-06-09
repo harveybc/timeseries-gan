@@ -38,6 +38,7 @@ def run_pipeline(config: Dict[str, Any],
     """
     Run the appropriate pipeline based on the operation mode.
     Passes necessary plugin instances to the specific pipeline constructors.
+    Implements "train then generate" workflow if operation_mode is 'train_then_generate'.
     """
     operation_mode = config.get("operation_mode", "generate")  # Default to generate if not specified
     logger.info(f"DataProcessor: Dispatching to pipeline for operation mode: {operation_mode}")
@@ -45,26 +46,51 @@ def run_pipeline(config: Dict[str, Any],
     if operation_mode == "train":
         if not trainer_plugin:
             raise ValueError("Trainer plugin is required for train operation mode")
-        pipeline = TrainPipeline(config, trainer_plugin)
+        train_pipeline = TrainPipeline(config, trainer_plugin)
+        logger.info("Executing train pipeline...")
+        train_pipeline.execute()
+        logger.info("Finished executing train pipeline.")
         
     elif operation_mode == "generate":
-        if not generator_plugin: # Should also check for feeder_plugin
-            raise ValueError("Generator plugin is required for generate operation mode")
-        if not feeder_plugin:
-            raise ValueError("Feeder plugin is required for generate operation mode")
-        pipeline = GeneratePipeline(config, feeder_plugin, generator_plugin, evaluator_plugin)
+        if not generator_plugin or not feeder_plugin:
+            raise ValueError("Generator and Feeder plugins are required for generate operation mode")
+        generate_pipeline = GeneratePipeline(config, feeder_plugin, generator_plugin, evaluator_plugin)
+        logger.info("Executing generate pipeline...")
+        generate_pipeline.execute()
+        logger.info("Finished executing generate pipeline.")
+
+    elif operation_mode == "train_then_generate":
+        # Train first
+        if not trainer_plugin:
+            raise ValueError("Trainer plugin is required for train operation mode in 'train_then_generate'")
+        train_pipeline = TrainPipeline(config, trainer_plugin)
+        logger.info("Executing train pipeline (part of train_then_generate)...")
+        train_pipeline.execute()
+        logger.info("Finished executing train pipeline (part of train_then_generate).")
+
+        # Then generate
+        if not generator_plugin or not feeder_plugin:
+            raise ValueError("Generator and Feeder plugins are required for generate operation mode in 'train_then_generate'")
+        
+        # Potentially update config for generation if needed, e.g., load trained model paths
+        # This might involve the trainer saving model paths to the config or a shared context
+        # For now, assume generator_plugin is aware of trained models or config points to them.
+
+        generate_pipeline = GeneratePipeline(config, feeder_plugin, generator_plugin, evaluator_plugin)
+        logger.info("Executing generate pipeline (part of train_then_generate)...")
+        generate_pipeline.execute()
+        logger.info("Finished executing generate pipeline (part of train_then_generate).")
         
     elif operation_mode == "optimize":
         if not optimizer_plugin:
             raise ValueError("Optimizer plugin is required for optimize operation mode")
-        pipeline = OptimizePipeline(config, optimizer_plugin)
+        optimize_pipeline = OptimizePipeline(config, optimizer_plugin)
+        logger.info(f"Executing {operation_mode} pipeline...")
+        optimize_pipeline.execute()
+        logger.info(f"Finished executing {operation_mode} pipeline.")
         
     else:
         raise ValueError(f"Unknown operation mode: {operation_mode}")
-
-    logger.info(f"Executing {operation_mode} pipeline...")
-    pipeline.execute()
-    logger.info(f"Finished executing {operation_mode} pipeline.")
 
 
 # Legacy function maintained for backward compatibility

@@ -14,22 +14,17 @@ import traceback # Added traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Reshape, LSTM, Bidirectional, Conv1D, Concatenate, TimeDistributed
+from tensorflow.keras.layers import (Dense, LSTM, RepeatVector, TimeDistributed, Input, 
+                                     Bidirectional, Conv1D, BatchNormalization, Dropout,
+                                     Concatenate, Reshape, Flatten, LeakyReLU, ReLU, Add) # Added Add
 from tensorflow.keras.models import Model
-from tensorflow.keras.regularizers import l2 # Import l2 regularizer
+from tensorflow.keras.regularizers import l2 # Added l2
+from tsg_plugins.plugin_base import PluginBase
+from app.utils.logging_utils import get_logger
 
-# Import modularized components
-from .model_loader import ModelLoader
-from .model_saver import ModelSaver # Added import for ModelSaver
-from .normalization_handler import NormalizationHandler
-from .initial_data_handler import InitialDataHandler
-from .feature_validator import FeatureValidator
-from .data_generator import DataGenerator
-from .sequence_builder import SequenceBuilder
-from .technical_indicator_calculator import TechnicalIndicatorCalculator
+logger = get_logger(__name__)
 
-
-class GeneratorPlugin:
+class GeneratorPlugin(PluginBase):
     """
     Main generator plugin interface following extreme separation of concerns.
     Orchestrates specialized modules for focused functionality.
@@ -347,509 +342,231 @@ class GeneratorPlugin:
             self.composite_model = None # Ensure it's None on any exception
             raise IOError(f"Failed to build composite generator model: {e}")
 
-    @property
-    def model(self) -> Optional[Model]:
-        """
-        Property to access the generator model with fallback logic.
+    def _build_bilstm_z_generator(self, input_dim_z, input_dim_c, output_dim, seq_len):
+        logger.info(f"Building BiLSTM Z-Generator with Z_input_dim={input_dim_z}, C_input_dim={input_dim_c}, output_dim={output_dim}, seq_len={seq_len}")
         
-        Returns:
-            Optional[Model]: The generator model if available
-        """
-        # Check for generator_model_composite first (if set by training or other processes)
-        if hasattr(self, 'generator_model_composite') and self.generator_model_composite is not None:
-            return self.generator_model_composite
-            
-        # Fall back to get_model() which has comprehensive fallback logic
-        return self.get_model()
-
-    def get_model(self) -> Optional[Model]:
-        """
-        Get the composite generator model.
-        
-        Returns:
-            Optional[Model]: The composite generator model if available, None otherwise
-        """
-        # First check if model was loaded via _load_model()
-        if hasattr(self, 'sequential_model') and self.sequential_model is not None:
-            return self.sequential_model
-            
-        # Check if we have a composite model built separately
-        if hasattr(self, 'composite_model') and self.composite_model is not None:
-            return self.composite_model
-            
-        # Try to build a simple generator model for testing/fallback
-        self.logger.warning("No pre-loaded or pre-built composite model available. Attempting to build fallback generator...")
-        try:
-            # Attempt to build using _build_composite_generator
-            # It might load VAE if path is in params and vae_decoder_model is None
-            vae_path = self.params.get("sequential_model_file")
-            vae_decoder_for_fallback = None
-            if vae_path and os.path.exists(vae_path): 
-                self.logger.info(f"Found VAE decoder path for fallback: {vae_path}")
-                vae_decoder_for_fallback = self.model_loader.load_model_from_path(vae_path)
-                if vae_decoder_for_fallback:
-                    vae_decoder_for_fallback.trainable = True 
-            
-            # _build_composite_generator sets self.composite_model
-            self._build_composite_generator(vae_decoder_model=vae_decoder_for_fallback) 
-            return self.composite_model # Return the potentially newly built model
-        except Exception as e:
-            self.logger.error(f"Failed to build fallback generator: {e}", exc_info=True) # Use exc_info
-            return None
-
-    def _post_process_to_target_features(self, vae_output_features: tf.Tensor, target_num_features: int) -> tf.Tensor:
-        """
-        Transforms VAE output features (e.g., 23 from VAE decoder) to the target 
-        number of features for the GAN (e.g., 51).
-        This uses a Dense layer for the transformation.
-        
-        Args:
-            vae_output_features: Tensor from VAE decoder (shape: (batch, num_vae_features)).
-            target_num_features: The desired number of output features (e.g., 51).
-            
-        Returns:
-            Tensor with shape (batch, target_num_features).
-        """
-        current_features = vae_output_features.shape[-1]
-        self.logger.info(f"Post-processing VAE output from {current_features} to {target_num_features} features.")
-        
-        if current_features == target_num_features:
-            self.logger.info("VAE output features already match target. No expansion needed.")
-            return vae_output_features
-        
-        # Use a Dense layer to expand or contract features.
-        # Activation can be None (linear) or 'tanh' if outputs are normalized to [-1, 1].
-        # Using None for now, assuming normalization is handled elsewhere or features are raw.
-        expanded_features = Dense(target_num_features, activation=None, name="feature_expansion_layer")(vae_output_features)
-        self.logger.info(f"Feature expansion layer output shape: {expanded_features.shape}")
-        return expanded_features
-
-    def _build_composite_generator(self, vae_decoder_model=None) -> Optional[Model]:
-        """
-        Build the composite generator model combining BiLSTM Z-generator + VAE decoder.
-        Based on REFERENCE.md Sequential Conditional VAE-GAN Architecture.
-        
-        The generator must output sequences of shape (batch_size, 144, self.params.get("num_features", 51)) to match discriminator input.
-        
-        Args:
-            vae_decoder_model: Optional pre-trained VAE decoder model to integrate
-            
-        Returns:
-            Model: The built composite generator model
-        """
-        try:
-            self.logger.info("Building composite generator model...")
-            
-            # Get configuration parameters
-            seq_len = self.params.get("decoder_input_window_size", 144)
-            # Use the num_features param from plugin_params, defaulting to 51
-            num_output_features = self.params.get("num_features", 51) 
-            noise_dim = self.params.get("feeder_noise_dim", 32) # Aligned with plugin_params
-            conditional_features_dim = self.params.get("conditional_features_dim", 10)
-            context_vector_dim = self.params.get("context_vector_dim", 64)
-            
-            self.logger.info(f"Building generator with seq_len={seq_len}, num_output_features={num_output_features}, noise_dim={noise_dim}")
-            
-            # Build generator inputs - per REFERENCE.md, VAE decoder needs 3 inputs
-            noise_input = Input(shape=(noise_dim,), name="noise_input")
-            conditions_input = Input(shape=(conditional_features_dim,), name="conditions_input")
-            context_input = Input(shape=(context_vector_dim,), name="context_input")
-            
-            if vae_decoder_model is not None:
-                # Use pre-trained VAE decoder - implement BiLSTM Z-generator as per REFERENCE.md
-                self.logger.info("Building composite model with pre-trained VAE decoder")
-                self.logger.info(f"VAE decoder expects {len(vae_decoder_model.inputs)} inputs")
-                
-                # BiLSTM Z-generator architecture: Dense(576) → Reshape(18,32) → Bidirectional(LSTM(64)) → Conv1D(32)
-                z_dense = Dense(576, activation='relu', name="z_dense")(noise_input)
-                z_reshape = Reshape((self.params.get("internal_z_sequence_length", 18), 
-                                     self.params.get("internal_z_latent_dim", 32)), name="z_reshape")(z_dense)
-                z_bilstm = Bidirectional(LSTM(64, return_sequences=True), name="z_bilstm")(z_reshape)
-                z_latent_seq = Conv1D(self.params.get("internal_z_latent_dim", 32), kernel_size=3, padding='same', activation='relu', name="z_conv")(z_bilstm)
-                
-                # Call VAE decoder once to get base features (batch, 23)
-                # VAE decoder expects: [z_latent_seq, context_input, conditions_input] as per REFERENCE.md  
-                # Ensure vae_decoder_model.inputs matches this expectation
-                if not hasattr(vae_decoder_model, 'inputs') or vae_decoder_model.inputs is None: # Check against None
-                    self.logger.error("Provided VAE decoder model has no inputs defined or inputs is None.")
-                    self.composite_model = None # Ensure reset before returning
-                    return None
-
-                if len(vae_decoder_model.inputs) == 3:
-                    vae_base_features = vae_decoder_model([z_latent_seq, context_input, conditions_input]) 
-                elif len(vae_decoder_model.inputs) == 2: 
-                    self.logger.warning("VAE decoder expects 2 inputs, providing z_latent_seq and conditions_input.")
-                    vae_base_features = vae_decoder_model([z_latent_seq, conditions_input])
-                elif len(vae_decoder_model.inputs) == 1: 
-                    self.logger.warning("VAE decoder expects 1 input, providing z_latent_seq.")
-                    vae_base_features = vae_decoder_model(z_latent_seq)
-                else:
-                    self.logger.error(f"VAE decoder has an unexpected number of inputs: {len(vae_decoder_model.inputs)}. Expected 1, 2 or 3.")
-                    self.composite_model = None # Ensure reset
-                    return None
-                
-                # Post-process VAE base features to target number of output features
-                expanded_features = self._post_process_to_target_features(vae_base_features, num_output_features)
-                
-                # Replicate single timestep across sequence length to create (batch, seq_len, num_output_features)
-                def replicate_across_time(features_input_tuple): # Modified to accept tuple
-                    features, target_seq_len, target_num_features = features_input_tuple
-                    """Replicate features across time dimension."""
-                    # Expand dims to add time dimension: (batch, target_num_features) -> (batch, 1, target_num_features)
-                    expanded = tf.expand_dims(features, axis=1)
-                    # Tile across time dimension: (batch, 1, target_num_features) -> (batch, target_seq_len, target_num_features)
-                    return tf.tile(expanded, [1, target_seq_len, 1])
-                
-                # Apply replication with explicit output shape
-                expanded_output = tf.keras.layers.Lambda(
-                    lambda x: replicate_across_time((x, seq_len, num_output_features)), # Pass seq_len and num_output_features
-                    output_shape=(seq_len, num_output_features),
-                    name="sequence_replicator"
-                )(expanded_features)
-                    
-            else:
-                # Build simple generator from scratch for testing
-                self.logger.info("Building simple generator from scratch")
-                
-                # Combine inputs (noise, conditions, and context)
-                combined_inputs = Concatenate(name="combined_inputs")([noise_input, conditions_input, context_input])
-                
-                # Generate sequence directly
-                hidden1 = Dense(256, activation='relu', name="hidden1")(combined_inputs)
-                hidden2 = Dense(512, activation='relu', name="hidden2")(hidden1)
-                hidden3 = Dense(1024, activation='relu', name="hidden3")(hidden2)
-                
-                # Output full sequence: seq_len * num_output_features features
-                sequence_flat = Dense(seq_len * num_output_features, activation='tanh', name="sequence_flat")(hidden3)
-                
-                # Reshape to sequence format: (batch_size, seq_len, num_output_features)
-                expanded_output = Reshape((seq_len, num_output_features), name="output_reshape")(sequence_flat)
-            
-            # Create composite model with 3 inputs as per REFERENCE.md
-            composite_model = Model(
-                inputs=[noise_input, conditions_input, context_input],
-                outputs=expanded_output,
-                name="composite_generator"
-            )
-            
-            self.logger.info(f"Composite generator built with {composite_model.count_params()} parameters")
-            if hasattr(composite_model, 'output') and composite_model.output is not None: # Check against None
-                self.logger.info(f"Generator output shape: {composite_model.output.shape}")
-            else:
-                self.logger.warning("Built composite model has no output attribute or output is None.")
-            
-            # Store the model internally
-            self.composite_model = composite_model # Set the class attribute
-            
-            return composite_model # Return the built model
-            
-        except Exception as e:
-            self.logger.error(f"Error building composite generator: {e}")
-            self.logger.error(traceback.format_exc()) # Log full traceback
-            self.composite_model = None # Ensure it's None on failure
-            return None
-
-    def prepare_features_for_discriminator(self, data_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Prepares a raw DataFrame to have the features expected by the discriminator.
-        Calculates technical indicators and cyclical date/time features.
-        Orders features according to 'full_feature_names_ordered'.
-        The number of output features should align with self.params.get("num_features", 51).
-        """
-        self.logger.info("Preparing real data features for discriminator input...")
-        processed_df = data_df.copy()
-        
-        target_num_features = self.params.get("num_features", 51)
-        datetime_col_name = self.main_config.get("datetime_col_name", "DATE_TIME")
-
-        if datetime_col_name not in processed_df.columns:
-            raise ValueError(f"Datetime column '{datetime_col_name}' not found in input data for feature preparation.")
-        processed_df[datetime_col_name] = pd.to_datetime(processed_df[datetime_col_name])
-
-        # 1. Calculate Technical Indicators
-        if not hasattr(self, 'ti_calculator') or self.ti_calculator is None:
-            self.logger.warning("TI calculator not found, attempting to initialize feature-dependent modules.")
-            self._initialize_feature_dependent_modules()
-        if not hasattr(self, 'ti_calculator') or self.ti_calculator is None:
-            raise RuntimeError("TechnicalIndicatorCalculator not initialized in GeneratorPlugin.")
-        
-        ohlc_features = self.params.get("ohlc_feature_names", ["OPEN", "HIGH", "LOW", "CLOSE"])
-        missing_ohlc = [f for f in ohlc_features if f not in processed_df.columns]
-        if missing_ohlc:
-            raise ValueError(f"Missing OHLC columns for TI calculation: {missing_ohlc}. Available: {processed_df.columns.tolist()}")
-
-        self.logger.info(f"Calculating TIs using ohlc_features: {ohlc_features}")
-        # Pass a copy of processed_df to ensure ti_calculator doesn't modify it in a way that affects original data if it operates in-place on parts.
-        ti_df = self.ti_calculator.calculate_technical_indicators(
-            processed_df.copy(), 
-            ohlc_feature_names=ohlc_features,
-            return_last_row_only=False
-        )
-        
-        self.logger.info(f"Shape of processed_df before TI merge: {processed_df.shape}")
-        self.logger.info(f"Columns of processed_df before TI merge: {processed_df.columns.tolist()}")
-        self.logger.info(f"Shape of ti_df from calculator: {ti_df.shape}")
-        ti_cols_produced_by_calculator = ti_df.columns.tolist()
-        self.logger.info(f"Columns of ti_df from calculator: {ti_cols_produced_by_calculator}")
-
-        # Before merging, remove any columns from processed_df that have the same names
-        # as the TIs we are about to merge from ti_df.
-        # This ensures the newly calculated TIs from ti_df take precedence and avoids suffixed columns.
-        cols_to_drop_from_processed_df = [col for col in ti_cols_produced_by_calculator if col in processed_df.columns]
-        if cols_to_drop_from_processed_df:
-            self.logger.info(f"Dropping pre-existing columns from input data to avoid TI merge conflicts: {cols_to_drop_from_processed_df}")
-            processed_df.drop(columns=cols_to_drop_from_processed_df, inplace=True)
-        
-        # Merge the newly calculated TIs.
-        processed_df = pd.merge(processed_df, ti_df, left_index=True, right_index=True, how='left')
-        self.logger.info(f"Columns after TI merge: {processed_df.columns.tolist()}")
-        self.logger.info(f"Shape of processed_df after TI merge: {processed_df.shape}")
-        
-        # Check for NaNs introduced by TIs (especially at the beginning of the series)
-        # Use ti_cols_produced_by_calculator for checking NaNs in the TIs that were just added.
-        ti_cols_in_processed_after_merge = [col for col in ti_cols_produced_by_calculator if col in processed_df.columns]
-        if ti_cols_in_processed_after_merge:
-            nan_counts_in_tis = processed_df[ti_cols_in_processed_after_merge].isnull().sum()
-            if nan_counts_in_tis.any():
-                 self.logger.info(f"NaN counts in TI columns after merge (expected at start of series):\\n{nan_counts_in_tis[nan_counts_in_tis > 0]}")
+        l2_reg = self.config.get("generator_l2_reg", 0.01) if self.config.get("use_generator_l2_reg", False) else None
+        if l2_reg is not None:
+            logger.info(f"Applying L2 regularization with lambda={l2_reg} to Dense, Conv1D, LSTM layers in BiLSTM Z-Generator.")
         else:
-            self.logger.warning("No TI columns (as produced by calculator) found in processed_df after merge for NaN check.")
+            logger.info("No L2 regularization will be applied to BiLSTM Z-Generator.")
 
-
-        # 2. Calculate Cyclical Date/Time Features
-        if not hasattr(self, 'data_generator') or self.data_generator is None:
-            self.logger.warning("Data generator not found, attempting to initialize feature-dependent modules.")
-            self._initialize_feature_dependent_modules()
-        if not hasattr(self, 'data_generator') or self.data_generator is None:
-            raise RuntimeError("DataGenerator not initialized in GeneratorPlugin.")
-
-        # Use 'feeder_date_features_for_conditioning' from main_config to determine which cyclical features to generate.
-        # This ensures alignment with what the FeederPlugin might provide for conditions.
-        # The desired final list of features should NOT include day_of_year_sin/cos if not intended.
-        date_features_to_make_cyclical = self.main_config.get('feeder_date_features_for_conditioning', [])
-        # Example: if date_features_to_make_cyclical = ["day_of_month", "hour_of_day", "day_of_week"]
-        # then only sin/cos for these three will be generated.
+        # Latent space Z input
+        z_input = Input(shape=(input_dim_z,), name="generator_z_input")
         
-        self.logger.info(f"Base date features for cyclical generation: {date_features_to_make_cyclical}")
+        # Conditional input C
+        c_input = Input(shape=(input_dim_c,), name="generator_c_input")
 
-        cyclical_feature_specs = []
-        # Ensure default_max_map covers all features in feeder_date_features_for_conditioning from config
-        default_max_map = {
-            'day_of_month': 31, 
-            'hour_of_day': 23, # Max value is 23 for 0-23 hours
-            'day_of_week': 6,  # Max value is 6 for 0-6 days
-            # 'day_of_year': 365, # Removed as per Scenario B - day_of_year cyclical features are not desired
-            'month_of_year': 12, 
-            'week_of_year': 52
-        }
+        # Process Z
+        z_processed = Dense(128, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(z_input)
+        z_processed = RepeatVector(seq_len)(z_processed)
+
+        # Process C (make it compatible for concatenation with Z sequence)
+        # Assuming c_input might represent static features or a summary that needs to be expanded
+        c_processed = Dense(64, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(c_input) # Apply L2 if configured
+        c_processed = RepeatVector(seq_len)(c_processed)
+
+        # Concatenate processed Z and C
+        merged_input = Concatenate(axis=-1)([z_processed, c_processed])
         
-        for base_feature_name in date_features_to_make_cyclical:
-            if base_feature_name in default_max_map:
-                cyclical_feature_specs.append({
-                    "feature_name": base_feature_name,
-                    "max_value": default_max_map[base_feature_name]
-                })
-            else:
-                self.logger.warning(f"Max value for date feature '{base_feature_name}' not defined in default_max_map. Skipping cyclical generation for it.")
+        # Bidirectional LSTM layers
+        # First BiLSTM layer
+        lstm_out1 = Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=l2(l2_reg) if l2_reg else None, recurrent_regularizer=l2(l2_reg) if l2_reg else None))(merged_input)
+        # Apply BatchNormalization and Dropout if configured (currently not, as per requirements)
+        # lstm_out1 = BatchNormalization()(lstm_out1) # Example if needed
+        # lstm_out1 = Dropout(0.2)(lstm_out1)      # Example if needed
+
+        # Second BiLSTM layer (optional, depending on complexity needed)
+        lstm_out2 = Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(l2_reg) if l2_reg else None, recurrent_regularizer=l2(l2_reg) if l2_reg else None))(lstm_out1)
+        # lstm_out2 = BatchNormalization()(lstm_out2) # Example if needed
+        # lstm_out2 = Dropout(0.2)(lstm_out2)      # Example if needed
         
-        if cyclical_feature_specs:
-            self.logger.info(f"Generating cyclical features using specs: {cyclical_feature_specs}")
-            processed_df = self.data_generator.add_cyclical_date_features(processed_df, datetime_col_name, cyclical_feature_specs)
-            self.logger.info(f"Columns after cyclical feature generation: {processed_df.columns.tolist()}")
-        else:
-            self.logger.info("No cyclical features specified or to be generated based on 'feeder_date_features_for_conditioning'.")
+        # TimeDistributed Dense layer to get the desired output_dim for each time step
+        output = TimeDistributed(Dense(output_dim, activation='sigmoid', kernel_regularizer=l2(l2_reg) if l2_reg else None))(lstm_out2) # Sigmoid for normalized data [0,1]
 
-        # 3. Final Feature Selection and Ordering
-        all_expected_features_ordered = self.main_config.get("generator_full_feature_names_ordered", [])
-        if not all_expected_features_ordered:
-            self.logger.error("'generator_full_feature_names_ordered' not found in config. Cannot finalize features.")
-            raise ValueError("'generator_full_feature_names_ordered' is crucial and not found in configuration.")
+        model = Model(inputs=[z_input, c_input], outputs=output, name="BiLSTM_Z_Generator")
+        logger.info("BiLSTM Z-Generator built successfully.")
+        return model
 
-        numeric_features_ordered = [f for f in all_expected_features_ordered if f != datetime_col_name]
-        self.logger.info(f"Target numeric features ordered ({len(numeric_features_ordered)}): {numeric_features_ordered}")
-
-
-        missing_features = [f for f in numeric_features_ordered if f not in processed_df.columns]
-        if missing_features:
-            self.logger.error(f"Missing expected numeric features after all processing steps: {missing_features}")
-            self.logger.error(f"Available columns in processed_df: {processed_df.columns.tolist()}")
-            raise ValueError(f"Could not produce all expected numeric features. Missing: {missing_features}. Please check TI and cyclical feature generation.")
-
+    def _build_vae_generator(self, vae_model_path, latent_dim, condition_dim, output_dim, seq_len):
+        logger.info(f"Building VAE-based Generator. Loading VAE from: {vae_model_path}")
         try:
-            final_df = processed_df[numeric_features_ordered].copy()
-        except KeyError as e:
-            self.logger.error(f"KeyError during final numeric feature selection: {e}. One or more expected features not found.")
-            self.logger.error(f"Expected numeric features: {numeric_features_ordered}")
-            self.logger.error(f"Available columns: {processed_df.columns.tolist()}")
+            vae = tf.keras.models.load_model(vae_model_path, compile=False) # Set compile=False
+            decoder = vae.decoder 
+            logger.info("VAE model and decoder loaded successfully.")
+        except Exception as e:
+            logger.error(f"Error loading VAE model from {vae_model_path}: {e}")
             raise
 
-        if final_df.shape[1] != target_num_features:
-            self.logger.error(
-                f"Final numeric feature count ({final_df.shape[1]}) does not match target_num_features ({target_num_features})."
-            )
-            self.logger.error(f"Selected features: {final_df.columns.tolist()}")
-            self.logger.error(f"Expected from config (numeric part of generator_full_feature_names_ordered): {numeric_features_ordered}")
-            raise ValueError(f"Final numeric feature count mismatch: expected {target_num_features}, got {final_df.shape[1]}. Check 'generator_full_feature_names_ordered' and feature generation steps.")
-        
-        self.logger.info(f"Successfully prepared {final_df.shape[1]} numeric features for discriminator. Shape: {final_df.shape}")
-        self.logger.info(f"Final numeric feature columns for discriminator: {final_df.columns.tolist()}")
-        
-        if final_df.isnull().values.any():
-            nan_counts_final = final_df.isnull().sum()
-            self.logger.warning(f"NaNs found in final numeric feature set for discriminator:\\n{nan_counts_final[nan_counts_final > 0]}")
-            final_df = final_df.fillna(0) 
-            self.logger.warning("Filled NaNs with 0 in the final numeric feature set. Review if this is the desired strategy.")
+        # Apply L2 regularization to the decoder's layers if configured
+        l2_reg = self.config.get("generator_l2_reg", 0.01) if self.config.get("use_generator_l2_reg", False) else None
+        if l2_reg:
+            logger.info(f"Applying L2 regularization with lambda={l2_reg} to VAE decoder's Dense, Conv1D, LSTM layers.")
+            for layer in decoder.layers:
+                if isinstance(layer, (Dense, Conv1D, LSTM)):
+                    logger.info(f"Applying L2 to VAE decoder layer: {layer.name}")
+                    layer.kernel_regularizer = l2(l2_reg)
+                    if hasattr(layer, 'recurrent_regularizer') and isinstance(layer, LSTM): # Apply to recurrent kernel for LSTMs
+                         layer.recurrent_regularizer = l2(l2_reg)
+                elif isinstance(layer, Bidirectional):
+                    logger.info(f"Applying L2 to VAE decoder Bidirectional layer: {layer.name}")
+                    # For Bidirectional, apply to the wrapped LSTM layer
+                    if isinstance(layer.forward_layer, LSTM):
+                        layer.forward_layer.kernel_regularizer = l2(l2_reg)
+                        layer.forward_layer.recurrent_regularizer = l2(l2_reg)
+                    if isinstance(layer.backward_layer, LSTM):
+                        layer.backward_layer.kernel_regularizer = l2(l2_reg)
+                        layer.backward_layer.recurrent_regularizer = l2(l2_reg)
             
-        return final_df
+            # Re-instantiate the decoder model with the modified layers if necessary.
+            # This is crucial if the regularizers are not applied by modifying layers in-place effectively.
+            # For functional models, rebuilding the model with new layer configs is safer.
+            # However, Keras often allows direct modification of layer attributes before model compilation/use.
+            # Let's assume direct modification works for now. If issues arise, model cloning/rebuilding is the way.
+            logger.info("L2 regularization applied to VAE decoder layers. Note: This assumes direct modification of layer attributes is effective. If not, model re-cloning might be needed.")
 
-    def sample_noise_for_model(self, batch_size: int) -> Dict[str, np.ndarray]:
-        """
-        Generates a batch of noise, conditions, and context vectors for the generator model.
-        This method is intended to be called by the GAN training loop.
 
-        Args:
-            batch_size: The number of samples to generate inputs for.
+        # Define inputs for the new generator model
+        z_input = Input(shape=(latent_dim,), name="generator_z_input") # Latent vector from GAN's noise
+        c_input = Input(shape=(condition_dim,), name="generator_c_input") # Conditional input
 
-        Returns:
-            A dictionary containing 'noise_input', 'conditions_input', and 'context_input'
-            compatible with the generator model's inputs.
-        """
-        noise_dim = self.params.get("feeder_noise_dim", 32)
-        conditional_features_dim = self.params.get("conditional_features_dim", 10) # Example, ensure this matches model
-        context_vector_dim = self.params.get("context_vector_dim", 64) # Example, ensure this matches model
-
-        self.logger.debug(f"Sampling inputs for generator: batch_size={batch_size}, noise_dim={noise_dim}, cond_dim={conditional_features_dim}, ctx_dim={context_vector_dim}")
-
-        noise = np.random.normal(0, 1, (batch_size, noise_dim))
+        # How to use c_input with the VAE decoder?
+        # Option 1: Concatenate c_input with z_input if decoder's first layer can handle it.
+        # Option 2: Process c_input and merge it at a deeper layer (more complex).
+        # Option 3: If VAE was conditional, its decoder might already expect conditional input.
+        # Assuming the VAE decoder takes only a latent vector. We might need to adapt.
+        # For now, let's try concatenating them and adding a Dense layer to match decoder's expected input.
         
-        # Placeholder for actual conditional features and context vectors
-        # These should ideally come from the FeederPlugin or be generated based on some strategy
-        # For now, using random data as a placeholder.
-        # TODO: Integrate with FeederPlugin to get meaningful conditional/context data if available for the batch.
-        conditions = np.random.rand(batch_size, conditional_features_dim) 
-        context = np.random.rand(batch_size, context_vector_dim)
-
-        return {
-            "noise_input": noise,
-            "conditions_input": conditions,
-            "context_input": context
-        }
-    
-    def save_model(self, model_path: Optional[str] = None) -> str:
-        """
-        Save the current generator model to the specified path.
-
-        This method uses the ModelSaver component to handle the actual saving process.
-        It ensures that the model is saved in a way that is compatible with TensorFlow/Keras
-        and can be easily reloaded later.
-
-        Args:
-            model_path: Optional path where the model should be saved.
-                         If not provided, a default path will be used.
-
-        Returns:
-            str: The path where the model was saved.
-        """
-        self.logger.info(f"Saving generator model to path: {model_path}")
-        effective_model_path = self.model_saver.save_model(self.model, model_path)
-        self.logger.info(f"Model saved. Effective path: {effective_model_path}")
-        return effective_model_path
-
-    def generate(self,
-                 n_samples: int,
-                 conditional_features: Optional[np.ndarray] = None,
-                 initial_context_data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-        """
-        Generates synthetic time series data.
-
-        This method delegates the generation task to the internal DataGenerator component.
-        It ensures that the model and its components are initialized before generation.
-
-        Args:
-            n_samples: The number of samples (time steps) to generate.
-            conditional_features: An optional numpy array of conditional features
-                                  (e.g., date/time features) for each sample to be generated.
-                                  Shape should be (n_samples, num_conditional_features).
-            initial_context_data: Optional DataFrame providing an initial window of
-                                  real data to seed the generation process. This is used
-                                  for iterative generation where the previous step's output
-                                  (or real data) becomes context for the next.
-
-        Returns:
-            pd.DataFrame: A DataFrame containing the generated synthetic time series data,
-                          with features as columns and time steps as rows.
+        # This part is speculative and depends heavily on the VAE decoder's architecture.
+        # If the VAE decoder expects input shape (decoder_latent_dim,), we need to map [z_input, c_input] to it.
         
-        Raises:
-            RuntimeError: If the DataGenerator component is not initialized or the model is not available.
-        """
-        self.logger.info(f"GeneratorPlugin: Received request to generate {n_samples} samples.")
-
-        if not hasattr(self, 'data_generator') or self.data_generator is None:
-            self.logger.error("DataGenerator component is not initialized in GeneratorPlugin. "
-                              "Ensure plugin.set_params() which calls _initialize_feature_dependent_modules() has been successfully executed.")
-            raise RuntimeError("GeneratorPlugin's DataGenerator component is not initialized.")
-
-        # self.model here refers to self.generator_model_composite, which should be built/loaded.
-        if self.model is None:
-            self.logger.error("Generator model (self.model / self.generator_model_composite) is not built or loaded in GeneratorPlugin.")
-            raise RuntimeError("GeneratorPlugin's model is not available for generation.")
-
-        self.logger.debug(f"Number of samples to generate: {n_samples}")
-        self.logger.debug(f"Conditional features shape: {conditional_features.shape if conditional_features is not None else 'None'}")
-        self.logger.debug(f"Initial context data shape: {initial_context_data.shape if initial_context_data is not None else 'None'}")
-
+        # Example: Combine z and c, then pass to a Dense layer to match decoder's expected input dim
+        combined_input = Concatenate()([z_input, c_input])
+        # The size of this Dense layer should match the input dimension expected by the VAE's decoder first layer
+        # This requires knowing the VAE decoder's architecture.
+        # Let's assume decoder.input_shape is (None, decoder_latent_dim)
         try:
-            synthetic_data_df = self.data_generator.generate_synthetic_data(
-                n_samples=n_samples,
-                conditional_features=conditional_features,
-                initial_context_data=initial_context_data
-            )
-            self.logger.info(f"GeneratorPlugin: Successfully generated {synthetic_data_df.shape[0]} samples with {synthetic_data_df.shape[1]} features.")
-            return synthetic_data_df
+            decoder_input_dim = decoder.input_shape[-1]
+            logger.info(f"VAE Decoder expected input dimension: {decoder_input_dim}")
         except Exception as e:
-            self.logger.error(f"GeneratorPlugin: Error during synthetic data generation via DataGenerator component: {e}", exc_info=True)
-            # Re-raise as a RuntimeError to be caught by the caller
-            raise RuntimeError(f"GeneratorPlugin failed to generate data: {e}")
+            logger.warning(f"Could not infer VAE decoder input dimension: {e}. Assuming a default or direct pass-through.")
+            # Fallback or raise error if this is critical
+            decoder_input_dim = latent_dim # Defaulting, this might be wrong
 
-# Example usage (for testing or direct invocation, not part of the plugin's core flow in the app)
-if __name__ == '__main__':
-    # Basic testing or demonstration of the GeneratorPlugin usage
-    # This block can be used to quickly test the plugin's functionality
-    # without needing to run the entire application.
-    
-    # Example config - in practice, this would be more detailed and loaded from a file or other source
-    example_config = {
-        "sequential_model_file": "path/to/vae_decoder_model", # Update with a valid model path for testing
-        "decoder_input_window_size": 144,
-        "full_feature_names_ordered": ["OPEN", "HIGH", "LOW", "CLOSE", "TARGET_FEATURE"],
-        "decoder_output_feature_names": ["TARGET_FEATURE"],
-        "ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-        "ti_feature_names": ["SMA", "EMA"], # Example TIs
-        "date_conditional_feature_names": ["year", "month", "day"],
-        "feeder_conditional_feature_names": ["noise"],
-        "ti_calculation_min_lookback": 200,
-        "ti_params": {},
-        "generator_normalization_params_file": "path/to/normalization_params.json",
-        "internal_z_sequence_length": 18,
-        "internal_z_latent_dim": 32,
-        "feeder_noise_dim": 32,
-        "context_vector_dim": 64,
-        "conditional_features_dim": 10,
-        "num_features": 51,
-        "base_feature_names_ordered": []
-    }
-    
-    # Initialize the plugin
-    generator_plugin = GeneratorPlugin(example_config)
-    
-    # Generate some synthetic data
-    try:
-        synthetic_data = generator_plugin.generate(
-            n_samples=10, 
-            conditional_features=np.random.rand(10, 10), # Example conditional features
-            initial_context_data=None # No initial context for now
-        )
-        print("Generated synthetic data:")
-        print(synthetic_data)
-    except Exception as e:
-        print(f"Error during synthetic data generation: {e}")
+        processed_for_decoder = Dense(decoder_input_dim, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(combined_input) # Apply L2 if configured
+        
+        # Get output from the VAE decoder
+        decoder_output = decoder(processed_for_decoder) # This is the generated sequence part
+
+        # The VAE decoder output might be, for example, (batch_size, seq_len, num_features_in_vae)
+        # We need to ensure it matches the GAN's `output_dim` and `seq_len`.
+        # If `output_dim` (from GAN perspective) is different from `num_features_in_vae`,
+        # a final Dense layer (TimeDistributed) might be needed.
+
+        # Let's assume VAE output is (batch_size, seq_len, vae_output_features)
+        # And we need (batch_size, seq_len, output_dim) where output_dim is for the GAN
+        
+        # If the VAE's output_dim already matches the GAN's required output_dim, no extra layer needed.
+        # Otherwise, add a TimeDistributed Dense layer to adjust the feature dimension.
+        current_output_features = decoder_output.shape[-1]
+        if current_output_features != output_dim:
+            logger.info(f"VAE decoder output features ({current_output_features}) != GAN output_dim ({output_dim}). Adding TimeDistributed Dense layer.")
+            final_output = TimeDistributed(Dense(output_dim, activation='sigmoid', kernel_regularizer=l2(l2_reg) if l2_reg else None), name="gan_output_projection")(decoder_output) # Sigmoid for [0,1]
+        else:
+            # If shapes match, but activation is not 'sigmoid', we might need to add it.
+            # However, usually, the decoder's last layer would have the appropriate activation.
+            # For now, assume it's compatible or the VAE is designed for [0,1] outputs.
+            # If VAE output is e.g. tanh, an additional activation layer or rescaling might be needed.
+            logger.info(f"VAE decoder output features ({current_output_features}) == GAN output_dim ({output_dim}). Using decoder output directly.")
+            final_output = decoder_output 
+            # Consider adding a final activation if decoder doesn't ensure [0,1] range, e.g.
+            # final_output = tf.keras.layers.Activation('sigmoid')(decoder_output)
+
+
+        model = Model(inputs=[z_input, c_input], outputs=final_output, name="VAE_GAN_Generator")
+        logger.info("VAE-based Generator built successfully.")
+        # model.summary(print_fn=logger.info) # Optional: print summary here or in trainer
+        return model
+
+    @property
+    def model(self):
+        # This property should ideally return the primary model interface used by the GAN,
+        # which is the composite_model if built, or the sequential_model (VAE decoder) otherwise.
+        # Or, it could be specifically self._model if that's the convention for GANs.
+        # Given the GAN trainer will interact with this, it should be the generator model
+        # that takes (noise, conditions) and outputs sequences.
+        if hasattr(self, '_model') and self._model is not None:
+            return self._model
+        if hasattr(self, 'composite_model') and self.composite_model is not None:
+            # This was the VAE-based composite model, which might be what's intended
+            # if generator_type was 'vae' and it was successfully built.
+            return self.composite_model 
+        # Fallback or initial state before a specific GAN generator is built by self.build()
+        # self.logger.warning("GeneratorPlugin.model accessed but self._model is not set. Check build process.")
+        return None # Or raise an error if a model is always expected after init/build
+
+    @model.setter
+    def model(self, value: Optional[Model]):
+        # This setter should align with what self.model property returns.
+        # It's likely intended to set self._model, which is the common pattern for the GAN's generator.
+        self.logger.info(f"GeneratorPlugin.model being set with: {type(value)}")
+        self._model = value
+        # If self.composite_model was the VAE-based one, and self.model is now the GAN's generator,
+        # this implies a shift in what 'model' refers to, or that self._model is the primary interface.
+
+    def build(self):
+        """
+        Builds the generator model based on the configuration.
+        This method should set self._model.
+        """
+        self.logger.info("GeneratorPlugin: Initiating build process for the generator model...")
+        try:
+            # Ensure essential configurations are present
+            if not self.config.get("num_features") or not self.config.get("seq_len"):
+                self.logger.error("GeneratorPlugin: Missing 'num_features' or 'seq_len' in config for building model.")
+                raise ValueError("Essential configuration for generator model building is missing.")
+
+            # Determine which generator to build based on config
+            generator_type = self.config.get("generator_type", "bilstm_z") # Default to bilstm_z
+            self.logger.info(f"Selected generator type: {generator_type}")
+
+            if generator_type == "bilstm_z":
+                self._model = self._build_bilstm_z_generator(
+                    input_dim_z=self.config.get("latent_dim_z"),
+                    input_dim_c=self.config.get("latent_dim_c"),
+                    output_dim=self.config.get("num_features"), # num_features from data config
+                    seq_len=self.config.get("seq_len")
+                )
+            elif generator_type == "vae":
+                # This implies the VAE decoder itself, or a wrapper around it, will be the generator.
+                # The _build_vae_generator method should return a Keras model.
+                vae_model_path = self.config.get("vae_model_path")
+                if not vae_model_path:
+                    self.logger.error("GeneratorPlugin: 'vae_model_path' not provided for 'vae' generator type.")
+                    raise ValueError("'vae_model_path' is required for VAE generator type.")
+                
+                self._model = self._build_vae_generator(
+                    vae_model_path=vae_model_path,
+                    latent_dim=self.config.get("latent_dim_z"), # GAN's latent space for Z
+                    condition_dim=self.config.get("latent_dim_c"), # GAN's conditional input C
+                    output_dim=self.config.get("num_features"), # Target num_features for GAN output
+                    seq_len=self.config.get("seq_len")
+                )
+            else:
+                error_msg = f"Unsupported generator type: {generator_type}"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            if self._model is None:
+                self.logger.error(f"GeneratorPlugin: Model building returned None for type '{generator_type}'.")
+                raise RuntimeError(f"Failed to build generator model of type '{generator_type}'.")
+            
+            self.logger.info(f"GeneratorPlugin: Successfully built generator model of type '{generator_type}'.")
+            # self._model.summary(print_fn=self.logger.info) # Optional: Log summary after build
+
+        except Exception as e:
+            self.logger.error(f"GeneratorPlugin: Error during build process: {e}", exc_info=True)
+            self._model = None # Ensure model is None if build fails
+            raise # Re-raise the exception to signal failure
+
+        return self._model # Return the built model

@@ -35,19 +35,45 @@ The system combines three key machine learning components in a sequential pipeli
 2.  **Conditional Generation**: Date/time features and previous step's synthetic output for temporal conditioning.
 3.  **Generative Adversarial Network (GAN)**: Adversarial training for improved synthetic data quality, where the generator is a composite model.
 
-### Training Process Enhancements and Regularization Strategy
+### Training Process Enhancements
 
-To provide better insights during training and to adhere to specific architectural choices, the GAN training process incorporates the following features:
+The GAN training process has been significantly enhanced with the following features:
 
-*   **Model Summaries**: Upon compilation, detailed summaries of both the Generator and Discriminator Keras models are printed to the console. This allows for immediate verification of the model architectures, layer configurations, and parameter counts.
-*   **Epoch-wise Progress Reporting**: During training, the system provides epoch-wise updates, including the current epoch number relative to the total number of epochs (e.g., "Epoch X/N"). Key loss metrics for both the generator (G\_loss) and the discriminator (D\_loss) are reported at the end of each epoch or at specified logging intervals, offering a clear view of the training dynamics.
-*   **Dynamic Learning Rate Adjustment**: The `ReduceLROnPlateau` Keras callback is integrated into the training loop.
-    *   It monitors specified loss metrics (e.g., `g_loss` for the generator, `d_loss` for the discriminator, configurable via `lr_monitor_metric_g` and `lr_monitor_metric_d`).
-    *   If a monitored metric stops improving for a defined number of epochs (`lr_patience`), the learning rate for the respective model's optimizer is reduced by a configurable factor (`lr_reduction_factor`).
-    *   This helps in navigating plateaus in the loss landscape and can lead to more refined convergence. The minimum learning rate (`min_lr_g`, `min_lr_d`) and minimum change (`lr_min_delta`) are also configurable.
-*   **Specific Regularization Strategy**:
-    *   **Generator**: To encourage smoother and more generalizable synthetic data, L2 regularization is applied exclusively to the kernel and bias terms of its `Dense`, `Conv1D`, and `LSTM` layers (including those within `Bidirectional` wrappers). The L2 regularization factor is configurable (e.g., `generator_l2_reg`). No `Dropout` or `BatchNormalization` layers are intentionally added to the newly constructed parts of the generator (e.g., the BiLSTM Z-generator). The pre-trained VAE decoder, when set to `trainable=True` as part of the composite generator, will also have L2 regularization applied to its trainable layers during GAN training.
-    *   **Discriminator**: The discriminator is designed *without any explicit regularization techniques*. This means no `Dropout`, no `BatchNormalization`, and no `L2 regularization` (kernel or bias) are applied to its layers. Furthermore, label smoothing is not used during the training of the discriminator. This approach allows the discriminator to learn the complex decision boundary between real and fake data as effectively as possible, potentially making it a stronger adversary for the generator.
+1.  **Model Summaries**: Upon starting the training, Keras model summaries for both the generator and discriminator are printed to the logs. This allows for immediate verification of the model architectures.
+2.  **Detailed Epoch Logging**: During training, progress for each epoch is logged, including:
+    *   Current epoch number and total epochs.
+    *   Time taken for the epoch.
+    *   Discriminator loss (D\_loss).
+    *   Generator loss (G\_loss).
+    *   Current learning rates for both generator and discriminator optimizers.
+3.  **Dynamic Learning Rate Adjustment**: The `ReduceLROnPlateau` Keras callback is integrated for both the generator and discriminator optimizers.
+    *   It monitors `g_loss` for the generator and `d_loss` for the discriminator.
+    *   If the respective loss does not improve for a configured number of epochs (`reduce_lr_patience`), the learning rate is reduced by a factor (`reduce_lr_factor`).
+    *   This helps in navigating plateaus in the loss landscape and can lead to better convergence.
+    *   Configuration parameters for `ReduceLROnPlateau` (e.g., `reduce_lr_factor`, `reduce_lr_patience`, `reduce_lr_min_delta`, `reduce_lr_cooldown`, `reduce_lr_min_lr`) can be set in `app/config.py`.
+
+### Regularization Strategy
+
+A specific regularization strategy has been implemented to improve generalization and training stability:
+
+### Generator Regularization
+
+*   **L2 Regularization**: Applied to the `kernel_regularizer` (and `recurrent_regularizer` for LSTMs) of specific layer types within the generator:
+    *   `Dense` layers
+    *   `Conv1D` layers
+    *   `LSTM` layers (including those wrapped by `Bidirectional` layers)
+*   The L2 regularization factor (`generator_l2_reg`) can be configured in `app/config.py`. L2 regularization is only active if `use_generator_l2_reg` is set to `true` in the configuration.
+*   **No Dropout or BatchNormalization**: Dropout and BatchNormalization layers are explicitly *not* used in the newly constructed parts of the generator models (e.g., the BiLSTM Z-Generator) to ensure the L2 strategy is the primary regularization technique. For the VAE-based generator, L2 is applied to its decoder's trainable layers, while its original architecture regarding Dropout/BatchNormalization is preserved unless those layers are among Dense, Conv1D, or LSTM.
+
+### Discriminator Regularization
+
+*   **No Regularization**: The discriminator is designed *without* any explicit regularization techniques:
+    *   No `L2 regularization`.
+    *   No `Dropout` layers.
+    *   No `BatchNormalization` layers.
+*   **No Label Smoothing**: Label smoothing is not employed. The discriminator is trained with hard labels (0 for fake, 1 for real).
+
+This targeted regularization approach aims to prevent the discriminator from becoming too powerful too quickly and helps the generator learn more effectively.
 
 ### Feature Engineering and Consistency
 
@@ -516,16 +542,6 @@ generator_ti_params = {
 | `cxpb` | float | 0.5 | Crossover probability |
 | `mutpb` | float | 0.2 | Mutation probability |
 | `optimizer_n_samples_per_eval` | int | 1000 | Samples for fitness evaluation |
-
-### Output Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `output_file` | str | "synthetic_data.csv" | Output CSV file path |
-| `metrics_file` | str | "evaluation_metrics.json" | Evaluation metrics output path |
-| `save_config` | str | "" | Configuration save path |
-| `save_log` | str | "" | Log file save path |
-| `quiet_mode` | bool | False | Suppress verbose output |
 
 ---
 
@@ -1054,4 +1070,17 @@ Context Input (64) ────────────────────�
                                                                     ↓
 Conditions Input (10) ──────────────────────────────────────────→ VAE Decoder → Feature Combination → Output (51)
 ```
+
+---
+
+## Synthetic Data Output
+
+The generated synthetic data, when combined with real data, will adhere to the following specifications:
+
+*   **File Format**: CSV (Comma Separated Values)
+*   **Datetime Column**: Named `DATE_TIME` (or as configured by `feeder_datetime_col_in_real_data` in `app/config.py`).
+*   **Datetime Format**: `YYYY-MM-DD HH:MM:SS` (e.g., `2023-01-15 14:00:00`).
+*   **Column Order**: The `DATE_TIME` column will be the first column. Subsequent columns will follow the order specified in `generator_full_feature_names_ordered` from `app/config.py`.
+*   **Feature Set**: The output will contain 51 features as defined in "Scenario B", including the `DATE_TIME` column. The exact feature names are listed in `generator_full_feature_names_ordered`.
+*   **Data Prepending**: When the `operation_mode` includes generation (e.g., `generate` or `train_then_generate`), the newly generated synthetic data is prepended to the existing real data found in the file specified by `x_train_file`. The datetime sequence of the synthetic data is continuous, hourly (respecting `dataset_periodicity`), skips weekends, and leads directly into the first datetime of the `x_train_file` data without gaps or overlaps.
 
