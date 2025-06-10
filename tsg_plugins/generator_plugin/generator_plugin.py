@@ -7,7 +7,7 @@ Maintains mandatory plugin structure while delegating to focused modules.
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple # Added Tuple
 import os
 import traceback # Added traceback
 
