@@ -147,7 +147,10 @@ class TrainingCoordinator:
 
         try:
             processed_df = self.generator_plugin.prepare_features_for_discriminator(training_data_df)
-            self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}, Columns: {processed_df.columns.tolist()}")
+            if isinstance(processed_df, np.ndarray):
+                self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}")
+            else:
+                self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}, Columns: {processed_df.columns.tolist()}")
         except Exception as e:
             self.logger.error(f"Error during generator_plugin.prepare_features_for_discriminator: {e}", exc_info=True)
             raise
@@ -170,11 +173,19 @@ class TrainingCoordinator:
 
 
         if processed_df.shape[1] != expected_features:
-            self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}. Columns: {processed_df.columns.tolist()}")
+            if isinstance(processed_df, np.ndarray):
+                self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}.")
+            else:
+                self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}. Columns: {processed_df.columns.tolist()}")
             raise ValueError(f"Processed data has {processed_df.shape[1]} features, expected {expected_features}.")
         
         self.logger.info(f"Real data successfully prepared with {processed_df.shape[1]} features.")
-        return processed_df.values
+        
+        # Return numpy array regardless of input type
+        if isinstance(processed_df, np.ndarray):
+            return processed_df
+        else:
+            return processed_df.values
     
     def _train_discriminator_step(self, real_data: tf.Tensor, generator: tf.keras.Model,
                                   discriminator: tf.keras.Model, batch_size: int,

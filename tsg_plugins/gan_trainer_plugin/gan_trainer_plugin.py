@@ -343,23 +343,23 @@ class GANTrainerPlugin(PluginBase):
             # We will pass G_loss to the callback at the end of each epoch.
             reduce_lr_g = ReduceLROnPlateau(
                 monitor='g_loss',  # Monitor G_loss
-                factor=self.config.get("reduce_lr_factor", 0.2),
-                patience=self.config.get("reduce_lr_patience", 5),
+                factor=self.params.get("lr_reduction_factor", 0.2),
+                patience=self.params.get("lr_patience", 5),
                 verbose=1,
                 mode='min', # Assuming lower G_loss is better
-                min_delta=self.config.get("reduce_lr_min_delta", 0.0001),
-                cooldown=self.config.get("reduce_lr_cooldown", 0),
-                min_lr=self.config.get("reduce_lr_min_lr", 0)
+                min_delta=self.params.get("lr_min_delta", 0.0001),
+                cooldown=self.params.get("reduce_lr_cooldown", 0),
+                min_lr=self.params.get("min_lr_g", 0)
             )
             reduce_lr_d = ReduceLROnPlateau(
                 monitor='d_loss', # Monitor D_loss
-                factor=self.config.get("reduce_lr_factor", 0.2),
-                patience=self.config.get("reduce_lr_patience", 5),
+                factor=self.params.get("lr_reduction_factor", 0.2),
+                patience=self.params.get("lr_patience", 5),
                 verbose=1,
                 mode='min', # Assuming lower D_loss is better
-                min_delta=self.config.get("reduce_lr_min_delta", 0.0001),
-                cooldown=self.config.get("reduce_lr_cooldown", 0),
-                min_lr=self.config.get("reduce_lr_min_lr", 0)
+                min_delta=self.params.get("lr_min_delta", 0.0001),
+                cooldown=self.params.get("reduce_lr_cooldown", 0),
+                min_lr=self.params.get("min_lr_d", 0)
             )
 
             # Set the models for the callbacks
