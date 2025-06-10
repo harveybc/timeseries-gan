@@ -10,21 +10,25 @@ import numpy as np
 import pandas as pd
 from .pandas_ta_compat import ta, pandas_ta_available
 from typing import Dict, Any, List, Optional
+import logging
 
 
 class TechnicalIndicatorCalculator:
     """Calculates technical indicators from OHLC data using pandas-ta."""
     
-    def __init__(self, ti_feature_names: List[str], ti_params: Dict[str, Any]):
+    def __init__(self, ti_feature_names: List[str], ti_params: Dict[str, Any], logger: logging.Logger): # Add logger argument
         """
         Initialize the calculator with TI configuration.
         
         Args:
             ti_feature_names: List of TI names to calculate
             ti_params: Dictionary of TI parameters (lengths, etc.)
+            logger: Logger instance
         """
         self.ti_feature_names = ti_feature_names
         self.ti_params = ti_params
+        self.logger = logger # Store logger
+        self.logger.debug(f"TechnicalIndicatorCalculator initialized for TIs: {ti_feature_names}") # Use logger
     
     def calculate_technical_indicators(self, ohlc_history_df: pd.DataFrame, 
                                      ohlc_feature_names: List[str],

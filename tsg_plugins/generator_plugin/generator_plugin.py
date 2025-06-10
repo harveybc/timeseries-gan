@@ -113,7 +113,7 @@ class GeneratorPlugin(PluginBase):
             
         self.model_loader = ModelLoader(self.params, self.logger)
         self.model_saver = ModelSaver(self.logger)
-        self.norm_handler = NormalizationHandler(self.logger)
+        self.norm_handler = NormalizationHandler(self.params, self.logger) # Pass self.params
         
         self.initial_data_handler = InitialDataHandler(
             logger=self.logger, 
@@ -131,7 +131,7 @@ class GeneratorPlugin(PluginBase):
             self.logger.warning("Cannot initialize feature-dependent modules: 'full_feature_names_ordered' not in params.")
             return
         
-        self.feature_validator = FeatureValidator(self.params["full_feature_names_ordered"], self.logger)
+        self.feature_validator = FeatureValidator(self.params["full_feature_names_ordered"], self.logger) # Pass self.logger
         
         self.feature_to_idx = self.feature_validator.create_feature_index_mapping()
         self.num_all_features = self.feature_validator.get_num_features()
@@ -144,7 +144,8 @@ class GeneratorPlugin(PluginBase):
         
         if not self.norm_handler:
             self.logger.error("NormalizationHandler not initialized before feature-dependent modules. This is a bug.")
-            self.norm_handler = NormalizationHandler(self.logger)
+            # Ensure params are passed if re-initializing
+            self.norm_handler = NormalizationHandler(self.params, self.logger)
 
         self.data_generator = DataGenerator(
             params=self.params, 

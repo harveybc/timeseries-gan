@@ -78,33 +78,43 @@ class DiscriminatorPlugin:
         Args:
             config: Configuration dictionary
         """
+        # Set up logging first
+        self.logger = logging.getLogger(__name__) 
+        self.logger.debug(f"Initializing DiscriminatorPlugin with config: {config}")
+
         if config is None:
+            self.logger.error("Configuration dictionary ('config') is required.")
             raise ValueError("Configuration dictionary ('config') is required.")
         
         # Initialize parameters
         self.params = self.plugin_params.copy()
         self.main_config = config.copy()
         
-        # Set up logging
-        self.logger = logging.getLogger(__name__)
-        
         # Initialize core attributes
         self.model: Optional[Model] = None
         self.compiled: bool = False
         
         # Update parameters from config
+        self.logger.debug("Updating parameters from config...")
         for key, value in config.items():
             if key in self.plugin_params:
                 self.params[key] = value
+                self.logger.debug(f"Set self.params['{key}'] = {value}")
             elif key.startswith('discriminator_'):
-                # Handle prefixed parameters
                 param_key = key.replace('discriminator_', '')
                 if param_key in self.plugin_params:
                     self.params[param_key] = value
+                    self.logger.debug(f"Set self.params['{param_key}'] = {value} (from {key})")
         
+        self.logger.info(f"DiscriminatorPlugin params after init: {self.params}")
+
         # Build model if we have sufficient configuration
         if self.params.get("num_features") and self.params.get("sequence_length"):
-            self._build_model()
+            self.logger.info("Sufficient configuration found, building model during __init__.")
+            self._build_model() # Call internal build method
+        else:
+            self.logger.warning("Insufficient configuration for initial model build (num_features or sequence_length missing).")
+        self.logger.debug("DiscriminatorPlugin initialized.")
     
     def set_params(self, **kwargs) -> None:
         """
@@ -113,7 +123,7 @@ class DiscriminatorPlugin:
         Args:
             **kwargs: Parameter updates
         """
-        print(f"DiscriminatorPlugin.set_params called with kwargs: {list(kwargs.keys())}")
+        self.logger.debug(f"DiscriminatorPlugin.set_params called with kwargs: {kwargs}")
         
         # Store old architecture values for change detection
         old_num_features = self.params.get("num_features")
@@ -126,32 +136,41 @@ class DiscriminatorPlugin:
         else:
             self.main_config = kwargs.copy()
         
+        self.logger.debug(f"Discriminator params before update: {self.params}")
         # Update plugin parameters (handle both prefixed and non-prefixed)
         for param_key in self.plugin_params.keys():
             prefixed_key = f"discriminator_{param_key}"
             
             if prefixed_key in kwargs:
                 self.params[param_key] = kwargs[prefixed_key]
+                self.logger.debug(f"Updated self.params['{param_key}'] = {kwargs[prefixed_key]} from prefixed key {prefixed_key}")
             elif param_key in kwargs:
                 self.params[param_key] = kwargs[param_key]
+                self.logger.debug(f"Updated self.params['{param_key}'] = {kwargs[param_key]}")
         
+        self.logger.info(f"DiscriminatorPlugin params after update in set_params: {self.params}")
         # Check if architecture changed and rebuild if needed
-        if (self.params.get("num_features") != old_num_features or
+        architecture_changed = (
+            self.params.get("num_features") != old_num_features or
             self.params.get("sequence_length") != old_sequence_length or
-            self.params.get("lstm_units") != old_lstm_units):
+            self.params.get("lstm_units") != old_lstm_units
+        )
+
+        if architecture_changed:
             self.logger.info("DiscriminatorPlugin: Architecture parameters changed. Rebuilding model...")
             self._build_model()
-        elif self.model is None:
+        elif self.model is None: # If model is None but architecture didn't change, still try to build
             self.logger.info("DiscriminatorPlugin: No model exists. Building model...")
             self._build_model()
     
-    def _build_model(self) -> Model:
+    def _build_model(self) -> Model: # Changed: return type hint to Model
         """Builds the discriminator model."""
+        self.logger.info("Building discriminator model...")
         seq_len = self.params.get("sequence_length")
         num_features = self.params.get("num_features")
         conv_filters = self.params.get("conv_filters", [64, 128])
-        conv_kernel_sizes = self.params.get("conv_kernel_sizes", [7,5,3]) # Allow multiple kernel sizes
-        conv_strides = self.params.get("conv_strides", [1,1,1]) # Allow multiple strides
+        conv_kernel_sizes = self.params.get("conv_kernel_sizes", [7,5,3]) 
+        conv_strides = self.params.get("conv_strides", [1,1,1]) 
         conv_activation = self.params.get("conv_activation", "leaky_relu")
         
         lstm_units = self.params.get("lstm_units", 128)
@@ -159,9 +178,10 @@ class DiscriminatorPlugin:
         
         dense_units = self.params.get("dense_units", [64, 32])
         final_activation = self.params.get("final_activation", "sigmoid")
-        # leaky_relu_alpha = self.params.get("leaky_relu_alpha", 0.2) # Used by LeakyReLU layer directly
+        
+        self.logger.debug(f"Discriminator architecture params: seq_len={seq_len}, num_features={num_features}, conv_filters={conv_filters}, conv_kernel_sizes={conv_kernel_sizes}, conv_strides={conv_strides}, lstm_units={lstm_units}, dense_units={dense_units}")
 
-        input_layer = Input(shape=(seq_len, num_features))
+        input_layer = Input(shape=(seq_len, num_features), name="discriminator_input")
         x = input_layer
 
         # Convolutional layers
@@ -172,57 +192,66 @@ class DiscriminatorPlugin:
                 filters=filters, 
                 kernel_size=kernel_size, 
                 strides=strides, 
-                padding="same"
-                # No kernel_regularizer or bias_regularizer
+                padding="same",
+                name=f"conv1d_{i+1}"
             )(x)
             if conv_activation == "leaky_relu":
-                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2))(x)
+                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2), name=f"leaky_relu_conv_{i+1}")(x)
             else:
-                x = tf.keras.layers.Activation(conv_activation)(x)
-            # No BatchNormalization
-            # No Dropout
+                x = tf.keras.layers.Activation(conv_activation, name=f"activation_conv_{i+1}")(x)
 
         # LSTM layer
         if use_bidirectional_lstm:
-            x = Bidirectional(LSTM(lstm_units))(x) # No dropout, recurrent_dropout, regularizers
+            x = Bidirectional(LSTM(lstm_units, name="lstm_core"), name="bidirectional_lstm")(x) 
         else:
-            x = LSTM(lstm_units)(x) # No dropout, recurrent_dropout, regularizers
-        # No Dropout after LSTM
+            x = LSTM(lstm_units, name="lstm_core")(x) 
 
         # Dense layers
-        for units in dense_units:
-            x = Dense(units)(x) # No regularizers
-            if conv_activation == "leaky_relu": # Assuming same activation for dense for consistency
-                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2))(x)
+        for i, units in enumerate(dense_units):
+            x = Dense(units, name=f"dense_{i+1}")(x) 
+            # Assuming same activation for dense for consistency or use a specific 'dense_activation' param
+            dense_activation_type = self.params.get("dense_activation", conv_activation) # Allow separate dense activation
+            if dense_activation_type == "leaky_relu":
+                x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2), name=f"leaky_relu_dense_{i+1}")(x)
             else:
-                x = tf.keras.layers.Activation(conv_activation)(x) # Or a different dense_activation param
-            # No Dropout
+                x = tf.keras.layers.Activation(dense_activation_type, name=f"activation_dense_{i+1}")(x)
 
-        output_layer = Dense(1, activation=final_activation)(x)
+        output_layer = Dense(1, activation=final_activation, name="discriminator_output")(x)
         
         model = Model(input_layer, output_layer, name="discriminator")
-        self.logger.info("Discriminator model built.") # Changed from self.add_debug_info
-        return model
+        self.model = model # Assign to self.model
+        self.logger.info("Discriminator model built successfully.")
+        if self.params.get("print_model_summary", False): 
+            self.logger.info("Discriminator Model Summary:")
+            self.model.summary(print_fn=self.logger.info)
+        return self.model # Return the built model
 
     def _compile_model(self) -> None:
+        self.logger.info("Compiling discriminator model...")
         if self.model is None:
-            self.model = self._build_model()
+            self.logger.warning("Model is None, attempting to build before compiling.")
+            self._build_model() # Ensure model is built
         
+        if self.model is None: # Check again after build attempt
+            self.logger.error("Failed to build model, cannot compile.")
+            raise RuntimeError("Discriminator model could not be built, compilation failed.")
+
         optimizer = tf.keras.optimizers.Adam(
             learning_rate=self.params.get("learning_rate"),
-            beta_1=self.params.get("beta_1") 
-            # beta_2 is also a common Adam param, ensure it\'s in defaults if used
+            beta_1=self.params.get("beta_1"),
+            beta_2=self.params.get("beta_2", 0.999) # Ensure beta_2 is included
         )
         self.model.compile(
             optimizer=optimizer,
-            loss=self.params.get("loss_function"), # e.g., \'binary_crossentropy\'
+            loss=self.params.get("loss_function"), 
             metrics=self.params.get("metrics", ["accuracy"])
         )
-        self.logger.info("Discriminator model compiled.") # Changed from self.add_debug_info
+        self.compiled = True # Set compiled flag
+        self.logger.info(f"Discriminator model compiled with optimizer: {optimizer.get_config()}, loss: {self.params.get('loss_function')}, metrics: {self.params.get('metrics', ['accuracy'])}.")
 
     def get_model(self) -> Optional[Model]:
         """
-        Get the discriminator model.
+        Get the discriminator model. Builds and compiles if not already done.
         
         Returns:
             Optional[Model]: The discriminator model if available, None otherwise
@@ -230,15 +259,27 @@ class DiscriminatorPlugin:
         if self.model is None:
             self.logger.warning("Discriminator model not built. Building model now...")
             try:
-                self._build_model()
+                self._build_model() # This assigns to self.model
             except Exception as e:
-                self.logger.error(f"Failed to build discriminator model: {e}")
+                self.logger.error(f"Failed to build discriminator model in get_model: {e}", exc_info=True)
                 return None
+        
+        if not self.compiled:
+            self.logger.warning("Discriminator model not compiled. Compiling model now...")
+            try:
+                self._compile_model()
+            except Exception as e:
+                self.logger.error(f"Failed to compile discriminator model in get_model: {e}", exc_info=True)
+                return None # Or raise, depending on desired behavior
+                
         return self.model
     
-    def build_model(self) -> None:
-        """Public interface for building the discriminator model."""
+    def build_model(self) -> None: # Public build, ensures compilation too
+        """Public interface for building and compiling the discriminator model."""
+        self.logger.info("Public build_model called.")
         self._build_model()
+        if not self.compiled: # Ensure compilation after build
+             self._compile_model()
     
     def predict(self, sequences: np.ndarray) -> np.ndarray:
         """
@@ -355,23 +396,29 @@ class DiscriminatorPlugin:
         self.model.save(filepath)
         self.logger.info(f"Discriminator model saved to {filepath}")
     
-    def load_model(self) -> None:
+    def load_model(self) -> None: # Keep import local if it's problematic globally
         """
         Load a pre-trained discriminator model.
         """
         pretrained_path = self.params.get("pretrained_model_path")
+        self.logger.info(f"Attempting to load discriminator model from: {pretrained_path}")
         if not pretrained_path:
-            self.logger.warning("No pretrained model path specified")
+            self.logger.warning("No pretrained model path specified in params. Cannot load model.")
             return
         
         try:
-            from tensorflow.keras.models import load_model
-            self.model = load_model(pretrained_path)
-            self.compiled = True
-            self.logger.info(f"Discriminator model loaded from {pretrained_path}")
+            from tensorflow.keras.models import load_model as keras_load_model # Alias to avoid conflict if any
+            self.model = keras_load_model(pretrained_path)
+            self.compiled = True # Assume loaded model was compiled
+            self.logger.info(f"Discriminator model loaded successfully from {pretrained_path}")
+            if self.params.get("print_model_summary", False) and self.model:
+                self.logger.info("Loaded Discriminator Model Summary:")
+                self.model.summary(print_fn=self.logger.info)
         except Exception as e:
-            self.logger.error(f"Failed to load discriminator model: {e}")
-            raise
+            self.logger.error(f"Failed to load discriminator model from {pretrained_path}: {e}", exc_info=True)
+            # Optionally, re-raise or handle (e.g., try to build a new one)
+            # For now, we'll let it fail and self.model will remain None or the old model
+            raise # Re-raise to make the failure clear
     
     def get_debug_info(self) -> Dict[str, Any]:
         """
