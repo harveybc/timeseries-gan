@@ -25,7 +25,6 @@ from app.utils.logging_utils import get_logger
 # Imports for specialized modules
 from .model_loader import ModelLoader
 from .model_saver import ModelSaver
-from .normalization_handler import NormalizationHandler
 from .initial_data_handler import InitialDataHandler
 from .feature_validator import FeatureValidator
 from .data_generator import DataGenerator
@@ -56,7 +55,6 @@ class GeneratorPlugin(PluginBase):
         "decoder_input_name_window": "input_x_window", # This VAE decoder input might not be used by our new composite model directly if we generate z_seq
         "decoder_input_name_conditions": "decoder_input_conditions",
         "decoder_input_name_context": "decoder_input_h_context",
-        "generator_normalization_params_file": None,
         # New params for our internal Z-generator
         "internal_z_sequence_length": 18, # As per your spec (batch_size, 18, 32)
         "internal_z_latent_dim": 32,    # As per your spec
@@ -83,7 +81,6 @@ class GeneratorPlugin(PluginBase):
         self.model: Optional[Model] = None
         self.model_loader: Optional[ModelLoader] = None
         self.model_saver: Optional[ModelSaver] = None
-        self.norm_handler: Optional[NormalizationHandler] = None
         self.initial_data_handler: Optional[InitialDataHandler] = None
         self.feature_validator: Optional[FeatureValidator] = None
         self.data_generator: Optional[DataGenerator] = None
@@ -113,12 +110,10 @@ class GeneratorPlugin(PluginBase):
             
         self.model_loader = ModelLoader(self.params, self.logger)
         self.model_saver = ModelSaver(self.logger)
-        self.norm_handler = NormalizationHandler(self.params, self.logger) # Pass self.params
         
         self.initial_data_handler = InitialDataHandler(
             params=self.params, # Added missing params argument
-            logger=self.logger, 
-            normalization_handler=self.norm_handler
+            logger=self.logger
         )
         
         if self.params.get("full_feature_names_ordered") and not self.feature_validator:
@@ -142,16 +137,10 @@ class GeneratorPlugin(PluginBase):
             ti_params=self.params.get("ti_params", {}),
             logger=self.logger
         )
-        
-        if not self.norm_handler:
-            self.logger.error("NormalizationHandler not initialized before feature-dependent modules. This is a bug.")
-            # Ensure params are passed if re-initializing
-            self.norm_handler = NormalizationHandler(self.params, self.logger)
 
         self.data_generator = DataGenerator(
             params=self.params, 
             feature_to_idx=self.feature_to_idx, 
-            norm_handler=self.norm_handler, 
             ti_calculator=self.ti_calculator,
             logger=self.logger
         )
@@ -160,7 +149,6 @@ class GeneratorPlugin(PluginBase):
             params=self.params, 
             feature_to_idx=self.feature_to_idx, 
             num_all_features=self.num_all_features,
-            norm_handler=self.norm_handler, 
             ti_calculator=self.ti_calculator,
             logger=self.logger
         )
@@ -181,8 +169,8 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"GeneratorPlugin params after super().set_params and potential feature module init: {self.params}")
         
         model_relevant_params_changed = any(k in kwargs for k in [
-            'generator_l2_reg_factor', 'use_generator_l2_reg', 
-            'generator_model_path', 'vae_decoder_model_path', 
+            'generator_l2_reg', 'use_generator_l2_reg', 
+            'generator_model_path', 'sequential_model_file', 
             'internal_z_sequence_length', 'internal_z_latent_dim',
             'noise_dim', 'conditional_features_dim'
         ])
@@ -200,7 +188,7 @@ class GeneratorPlugin(PluginBase):
                     self.logger.error(f"Failed to reload/rebuild model in set_params: {e}", exc_info=True)
             else:
                 self.logger.error("ModelLoader still not available after check in set_params. Cannot load model.")
-        elif not self.model and (self.params.get('vae_decoder_model_path') or self.params.get('generator_model_path')):
+        elif not self.model and (self.params.get('sequential_model_file') or self.params.get('generator_model_path')):
             self.logger.info("Initial model load triggered from set_params as model is None and paths are available.")
             if not self.model_loader:
                 self.logger.warning("ModelLoader not initialized before initial model load. Initializing core modules.")
@@ -218,9 +206,9 @@ class GeneratorPlugin(PluginBase):
         self.logger.info(f"Loading generator model from path: {self.params.get('generator_model_path')}")
         if not self.params.get('generator_model_path'):
             self.logger.warning("Generator model path not provided. Building a new VAE-based generator.")
-            vae_decoder_path = self.params.get('vae_decoder_model_path')
+            vae_decoder_path = self.params.get('sequential_model_file')
             if not vae_decoder_path:
-                self.logger.error("VAE decoder model path ('vae_decoder_model_path') not provided. Cannot build generator.")
+                self.logger.error("VAE decoder model path ('sequential_model_file') not provided. Cannot build generator.")
                 raise ValueError("VAE decoder model path is required to build the generator.")
 
             try:
@@ -394,13 +382,37 @@ class GeneratorPlugin(PluginBase):
         return composite_generator_model
 
     def _get_l2_reg(self):
-        # Existing L2 regularization logic...
-        pass
+        """Get L2 regularizer if enabled, otherwise return None."""
+        if self.params.get("use_generator_l2_reg", False):
+            l2_factor = self.params.get("generator_l2_reg", 0.01)
+            return l2(l2_factor)
+        return None
 
     def build(self, input_shape: Tuple[int, ...], condition_shape: Tuple[int, ...] = None) -> tf.keras.Model:
+        """
+        Build generator model with specified input and condition shapes.
+        
+        Args:
+            input_shape: Shape of the noise input
+            condition_shape: Shape of conditional inputs
+            
+        Returns:
+            Built Keras model
+        """
         self.logger.info(f"Building generator model with input shape: {input_shape}, condition shape: {condition_shape}")
-        # Existing build logic...
-        pass
+        
+        # If model is already loaded/built, return it
+        if self.model is not None:
+            self.logger.info("Generator model already exists, returning existing model")
+            return self.model
+            
+        # Try to load/build the model
+        try:
+            self._load_model()
+            return self.model
+        except Exception as e:
+            self.logger.error(f"Failed to build generator model: {e}")
+            raise RuntimeError(f"Generator model build failed: {e}")
 
     def generate_synthetic_data(self, n_samples: int, initial_conditions: Optional[np.ndarray] = None, date_conditions: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         self.logger.info(f"Generating {n_samples} synthetic samples.")
@@ -429,3 +441,24 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"Preparing features for discriminator from real data batch of shape: {real_data_batch.shape}")
         # Existing feature preparation logic...
         pass
+
+    @property
+    def model(self):
+        """Property to access the generator model."""
+        return self._model if hasattr(self, '_model') else None
+
+    @model.setter
+    def model(self, value):
+        """Property setter for the generator model."""
+        self._model = value
+
+    def get_model(self):
+        """Get the generator model for training."""
+        if self.model is None:
+            self.logger.warning("Generator model is None. Attempting to load/build model.")
+            try:
+                self._load_model()
+            except Exception as e:
+                self.logger.error(f"Failed to load/build model in get_model: {e}")
+                return None
+        return self.model

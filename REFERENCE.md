@@ -171,7 +171,6 @@ Date/Time Info     Noise & Initial    (BiLSTM Z-gen → VAE Decoder)  GAN Traini
 - **Pre-trained Models**: 
   - Encoder: `examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras`
   - Decoder: `examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras`
-- **Normalization Params**: `examples/data/phase_3/phase_3_debug_out.json`
 
 #### Process Flow
 1. **Data Loading**: Load training data. Data is subsequently processed to ensure 51 features are used for training the discriminator.
@@ -221,7 +220,6 @@ sdg --trainer gan_trainer --gan_epochs 1000 --gan_batch_size 32 \
 - **Trained Models**:
   - Composite GAN Generator (which includes the VAE Decoder): `examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras` (as the VAE decoder part)
   - Encoder: `examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras` (if Feeder still uses it for initial state or complex noise generation)
-- **Normalization Params**: `examples/data/phase_3/phase_3_debug_out.json` (if denormalization is needed post-generation)
 
 #### Process Flow
 1.  **Feeder Initialization**: Feeder plugin prepares initial noise and sequences of date/time conditions.

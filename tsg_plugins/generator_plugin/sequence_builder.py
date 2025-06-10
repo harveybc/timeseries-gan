@@ -17,7 +17,7 @@ class SequenceBuilder:
     """Builds synthetic sequences with proper feature derivation and window management."""
     
     def __init__(self, params: Dict[str, Any], feature_to_idx: Dict[str, int],
-                 num_all_features: int, normalization_handler, ti_calculator, logger: logging.Logger): # Add logger argument
+                 num_all_features: int, ti_calculator, logger: logging.Logger): # Removed normalization_handler
         """
         Initialize sequence builder.
         
@@ -25,14 +25,12 @@ class SequenceBuilder:
             params: Plugin parameters
             feature_to_idx: Mapping from feature names to indices
             num_all_features: Total number of features
-            normalization_handler: Instance for normalization/denormalization
             ti_calculator: Technical indicator calculator
             logger: Logger instance
         """
         self.params = params
         self.feature_to_idx = feature_to_idx
         self.num_all_features = num_all_features
-        self.normalization_handler = normalization_handler
         self.ti_calculator = ti_calculator
         self.logger = logger # Store logger
         self.previous_normalized_close = None

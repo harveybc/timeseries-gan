@@ -16,20 +16,18 @@ class DataGenerator:
     """Handles data generation and feature assembly for synthetic sequence creation."""
     
     def __init__(self, params: Dict[str, Any], feature_to_idx: Dict[str, int],
-                 normalization_handler, ti_calculator, logger: logging.Logger): # Add logger argument
+                 ti_calculator, logger: logging.Logger): # Removed normalization_handler
         """
         Initialize the data generator.
         
         Args:
             params: Plugin parameters
             feature_to_idx: Mapping from feature names to indices  
-            normalization_handler: Instance for normalization/denormalization
             ti_calculator: Technical indicator calculator
             logger: Logger instance
         """
         self.params = params
         self.feature_to_idx = feature_to_idx
-        self.normalization_handler = normalization_handler
         self.ti_calculator = ti_calculator
         self.logger = logger # Store logger
         self.logger.debug("DataGenerator initialized.") # Use logger

@@ -18,18 +18,16 @@ class InitialDataHandler:
 
     """Manages initial data loading and close anchor initialization."""
     
-    def __init__(self, params: Dict[str, Any], logger: logging.Logger, normalization_handler: Optional[Any] = None):
+    def __init__(self, params: Dict[str, Any], logger: logging.Logger):
         """
         Initialize the data handler.
         
         Args:
-            normalization_handler: Instance of NormalizationHandler for denormalization
+            params: Plugin parameters
+            logger: Logger instance
         """
         self.params = params
         self.logger = logger
-        # The normalization_handler is passed, but we will avoid calling denormalize_value
-        # based on the policy of not using explicit denormalization here.
-        self.normalization_handler = normalization_handler 
         self.initial_close_anchor: float = self.DEFAULT_ANCHOR_VALUE
         self.initial_window_df: Optional[pd.DataFrame] = None
         
