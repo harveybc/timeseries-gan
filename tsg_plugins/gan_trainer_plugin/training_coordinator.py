@@ -181,11 +181,33 @@ class TrainingCoordinator:
         
         self.logger.info(f"Real data successfully prepared with {processed_df.shape[1]} features.")
         
-        # Return numpy array regardless of input type
+        # Convert to numpy array
         if isinstance(processed_df, np.ndarray):
-            return processed_df
+            data_array = processed_df
         else:
-            return processed_df.values
+            data_array = processed_df.values
+        
+        # Convert 2D data to 3D sequences for discriminator
+        # Discriminator expects (batch_size, sequence_length, features)
+        seq_len = self.params.get("seq_len", 144)
+        
+        # Create sequences from the data
+        sequences = []
+        num_samples, num_features = data_array.shape
+        
+        # Generate sequences of length seq_len
+        for i in range(num_samples - seq_len + 1):
+            sequence = data_array[i:i + seq_len]
+            sequences.append(sequence)
+        
+        if len(sequences) == 0:
+            self.logger.error(f"Cannot create sequences of length {seq_len} from data with {num_samples} samples")
+            raise ValueError(f"Not enough data to create sequences of length {seq_len}")
+        
+        sequences_array = np.array(sequences)
+        self.logger.info(f"Created {len(sequences)} sequences of shape {sequences_array.shape}")
+        
+        return sequences_array
     
     def _train_discriminator_step(self, real_data: tf.Tensor, generator: tf.keras.Model,
                                   discriminator: tf.keras.Model, batch_size: int,
@@ -212,7 +234,7 @@ class TrainingCoordinator:
             
             # Generate fake data with proper input shapes for composite generator
             # Per REFERENCE.md, generator expects: [noise_input, conditions_input, context_input] - 3 inputs
-            noise_dim = self.params.get("feeder_noise_dim", 32)
+            noise_dim = self.params.get("noise_dim", 100)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
             context_vector_dim = self.params.get("context_vector_dim", 64)
             
@@ -223,6 +245,14 @@ class TrainingCoordinator:
             
             # Generate fake batch with correct 3 inputs
             fake_batch = generator([noise, conditions, context], training=False)
+            
+            # Debug: Log shapes to verify compatibility
+            self.logger.debug(f"Real batch shape: {real_batch.shape}, Fake batch shape: {fake_batch.shape}")
+            
+            # Ensure both real and fake batches have the same shape for discriminator
+            if real_batch.shape != fake_batch.shape:
+                self.logger.error(f"Shape mismatch between real and fake batches. Real: {real_batch.shape}, Fake: {fake_batch.shape}")
+                raise ValueError(f"Real and fake batch shapes must match. Real: {real_batch.shape}, Fake: {fake_batch.shape}")
             
             # Train discriminator
             with tf.GradientTape() as tape:
@@ -235,7 +265,24 @@ class TrainingCoordinator:
             
             # Apply gradients
             gradients = tape.gradient(d_loss, discriminator.trainable_variables)
-            self.discriminator_optimizer.apply_gradients(zip(gradients, discriminator.trainable_variables))
+            
+            # Debug: Check discriminator trainable variables
+            if len(discriminator.trainable_variables) == 0:
+                self.logger.error("Discriminator has no trainable variables!")
+                raise RuntimeError("Discriminator model has no trainable variables. Model may not be compiled correctly.")
+            
+            self.logger.debug(f"Discriminator has {len(discriminator.trainable_variables)} trainable variables")
+            
+            # Filter out None gradients and ensure we have valid gradient-variable pairs
+            valid_grads_and_vars = []
+            for grad, var in zip(gradients, discriminator.trainable_variables):
+                if grad is not None:
+                    valid_grads_and_vars.append((grad, var))
+            
+            if len(valid_grads_and_vars) == 0:
+                self.logger.warning("No valid gradients found for discriminator. Skipping gradient update.")
+            else:
+                self.discriminator_optimizer.apply_gradients(valid_grads_and_vars)
             
             total_loss += d_loss.numpy()
         
@@ -258,7 +305,7 @@ class TrainingCoordinator:
         
         for _ in range(n_times):
             # Generate inputs for composite generator (3 inputs as per REFERENCE.md)
-            noise_dim = self.params.get("feeder_noise_dim", 32)
+            noise_dim = self.params.get("noise_dim", 100)
             conditional_features_dim = self.params.get("conditional_features_dim", 10)
             context_vector_dim = self.params.get("context_vector_dim", 64)
             
@@ -278,7 +325,24 @@ class TrainingCoordinator:
             # Apply gradients to generator only
             generator_vars = gan_model.layers[0].trainable_variables  # Assuming generator is first layer
             gradients = tape.gradient(g_loss, generator_vars)
-            self.generator_optimizer.apply_gradients(zip(gradients, generator_vars))
+            
+            # Debug: Check generator trainable variables
+            if len(generator_vars) == 0:
+                self.logger.error("Generator has no trainable variables!")
+                raise RuntimeError("Generator model has no trainable variables. Model may not be compiled correctly.")
+            
+            self.logger.debug(f"Generator has {len(generator_vars)} trainable variables")
+            
+            # Filter out None gradients and ensure we have valid gradient-variable pairs
+            valid_grads_and_vars = []
+            for grad, var in zip(gradients, generator_vars):
+                if grad is not None:
+                    valid_grads_and_vars.append((grad, var))
+            
+            if len(valid_grads_and_vars) == 0:
+                self.logger.warning("No valid gradients found for generator. Skipping gradient update.")
+            else:
+                self.generator_optimizer.apply_gradients(valid_grads_and_vars)
             
             total_loss += g_loss.numpy()
         

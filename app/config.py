@@ -55,6 +55,12 @@ DEFAULT_VALUES = {
     "feeder_context_vector_dim": 64, 
     "feeder_context_vector_strategy": "random",
     "feeder_copula_kde_bw_method": None,
+    "feeder_noise_dim": 32,  # Added: Noise dimension for feeder plugin
+
+    # --- GAN Training Parameters ---
+    "noise_dim": 100,  # Added: Noise dimension for generator input
+    "conditional_features_dim": 10,  # Added: Conditional features dimension
+    "context_vector_dim": 64,  # Added: Context vector dimension (same as feeder_context_vector_dim)
 
     # --- Parameters for GeneratorPlugin ---
     "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
