@@ -275,7 +275,7 @@ class GeneratorPlugin(PluginBase):
                     self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of Bidirectional LSTM (forward/backward): {layer.name}")
                 if hasattr(layer.forward_layer, 'recurrent_regularizer'):
                     layer.forward_layer.recurrent_regularizer = l2(l2_factor)
-                    layer.backward_layer.recurrent_regularizer = l2(l2_factor)
+                    layer.backward_layer.recurrent_regularizer = l2_factor
                     self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of Bidirectional LSTM (forward/backward): {layer.name}")
 
     def _build_bilstm_z_generator(self, input_noise_dim: int, output_latent_seq_len: int, output_latent_dim: int) -> tf.keras.Model:
@@ -313,13 +313,15 @@ class GeneratorPlugin(PluginBase):
         internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
 
         conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
+        context_dim = self.params.get("context_vector_dim", 64) # For decoder_input_h_context
 
         # 1. Define Input Layers for the Composite Generator
         self.logger.debug("Defining input layers for composite generator.")
         noise_input = tf.keras.layers.Input(shape=(noise_dim,), name="noise_input")
         conditional_input = tf.keras.layers.Input(shape=(conditional_dim,), name="conditional_input_to_vae")
+        context_input = tf.keras.layers.Input(shape=(context_dim,), name="context_input_to_vae")
         
-        self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}")
+        self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
 
         # 2. Build or Get the Internal BiLSTM Z-Generator
         self.logger.debug("Building internal BiLSTM Z-generator.")
@@ -415,11 +417,24 @@ class GeneratorPlugin(PluginBase):
             raise RuntimeError(f"Generator model build failed: {e}")
 
     def generate_synthetic_data(self, n_samples: int, initial_conditions: Optional[np.ndarray] = None, date_conditions: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """
+        Generate synthetic time series data.
+        
+        Args:
+            n_samples: Number of samples to generate
+            initial_conditions: Initial conditions for generation
+            date_conditions: Date-based conditions
+            
+        Returns:
+            DataFrame with synthetic data
+        """
         self.logger.info(f"Generating {n_samples} synthetic samples.")
         self.logger.debug(f"Initial conditions shape: {initial_conditions.shape if initial_conditions is not None else 'None'}")
         self.logger.debug(f"Date conditions shape: {date_conditions.shape if date_conditions is not None else 'None'}")
-        # Existing data generation logic...
-        pass
+        
+        # Placeholder implementation
+        self.logger.warning("generate_synthetic_data method is not fully implemented yet")
+        raise NotImplementedError("Synthetic data generation not yet implemented")
 
     def _iterative_generation_with_composite_model(
         self, 
@@ -428,19 +443,56 @@ class GeneratorPlugin(PluginBase):
         n_steps: int, 
         step_size: int = 1
     ) -> pd.DataFrame:
+        """
+        Perform iterative generation using the composite model.
+        
+        Args:
+            initial_conditions: Initial conditions for generation
+            date_conditions: Date-based conditions
+            n_steps: Number of steps to generate
+            step_size: Step size for generation
+            
+        Returns:
+            DataFrame with generated data
+        """
         self.logger.info(f"Iterative generation with composite model. Steps: {n_steps}, Step size: {step_size}")
-        # Existing iterative generation logic...
-        pass
+        
+        # Placeholder implementation
+        self.logger.warning("_iterative_generation_with_composite_model method is not fully implemented yet")
+        raise NotImplementedError("Iterative generation not yet implemented")
 
     def _post_process_generated_output(self, raw_generated_data: np.ndarray, current_datetimes_batch: pd.DataFrame) -> pd.DataFrame:
+        """
+        Post-process generated output to final format.
+        
+        Args:
+            raw_generated_data: Raw generated data from model
+            current_datetimes_batch: Corresponding datetime information
+            
+        Returns:
+            Post-processed DataFrame
+        """
         self.logger.debug(f"Post-processing generated output. Raw data shape: {raw_generated_data.shape}, Datetimes count: {len(current_datetimes_batch)}")
-        # Existing post-processing logic...
-        pass
+        
+        # Placeholder implementation
+        self.logger.warning("_post_process_generated_output method is not fully implemented yet")
+        raise NotImplementedError("Post-processing not yet implemented")
 
     def prepare_features_for_discriminator(self, real_data_batch: pd.DataFrame) -> np.ndarray:
+        """
+        Prepare features from real data for discriminator training.
+        
+        Args:
+            real_data_batch: Real data batch
+            
+        Returns:
+            Prepared features array
+        """
         self.logger.debug(f"Preparing features for discriminator from real data batch of shape: {real_data_batch.shape}")
-        # Existing feature preparation logic...
-        pass
+        
+        # Placeholder implementation
+        self.logger.warning("prepare_features_for_discriminator method is not fully implemented yet")
+        raise NotImplementedError("Feature preparation for discriminator not yet implemented")
 
     @property
     def model(self):
