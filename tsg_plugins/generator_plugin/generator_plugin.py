@@ -116,6 +116,7 @@ class GeneratorPlugin(PluginBase):
         self.norm_handler = NormalizationHandler(self.params, self.logger) # Pass self.params
         
         self.initial_data_handler = InitialDataHandler(
+            params=self.params, # Added missing params argument
             logger=self.logger, 
             normalization_handler=self.norm_handler
         )
