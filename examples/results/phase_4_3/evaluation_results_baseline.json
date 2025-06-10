@@ -1,0 +1,26 @@
+{
+  "data_info": {
+    "real_shape": [
+      30425,
+      44
+    ],
+    "synthetic_shape": [
+      1000,
+      47
+    ],
+    "real_features": 44,
+    "synthetic_features": 47,
+    "shape_match": false
+  },
+  "basic_statistics": {},
+  "distribution_metrics": {},
+  "correlation_metrics": {},
+  "ml_metrics": {},
+  "error": "operands could not be broadcast together with shapes (44,) (47,) ",
+  "stage_name": "baseline",
+  "evaluation_timestamp": "2025-06-08T14:18:04.816629",
+  "synthetic_data_shape": [
+    1000,
+    47
+  ]
+}

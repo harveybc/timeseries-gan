@@ -1,68 +1,96 @@
-from setuptools import setup, find_packages
+"""
+setup.py for tsg (Timeseries GAN Synthetic Data Generator)
 
-# Read the long description from README.md
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+This module packages the `tsg` project using setuptools. It defines:
+
+- Metadata (name, version, author, etc.)
+- Entry points for the CLI `tsg` command
+- Plugin entry points for feeder, generator, evaluator, optimizer
+- Installation requirements and extras for development
+
+"""
+
+from setuptools import setup, find_packages
+from pathlib import Path
+
+# Project directory
+here = Path(__file__).parent.resolve()
+
+# Read long description from README.md
+long_description = (here / "README.md").read_text(encoding="utf-8")
 
 setup(
-    name='rl-optimizer',
-    version='0.1.0',
-    packages=find_packages(),
-    entry_points={
-        'console_scripts': [
-            'rl_optimizer=app.main:main'
-        ],
-        'rl_optimizer.optimizers': [
-            'openrl=app.plugins.optimizer_plugin_openrl:Plugin',
-            'neat=app.plugins.optimizer_plugin_neat:Plugin',
-            'neat_p2p=app.plugins.optimizer_plugin_neat_p2p:Plugin',
-            'openrl_optimizer=app.plugins.optimizer_plugin_openrl:Plugin'  # Example additional optimizer
-        ],
-        'rl_optimizer.environments': [
-            'prediction=app.plugins.environment_plugin_prediction:Plugin',
-            # Add other environment plugins here
-        ],
-        'rl_optimizer.agents': [
-            'openrl_ppo=app.plugins.agent_plugin_openrl_ppo:Plugin',
-            'dummy_automation=app.plugins.agent_plugin_dummy_automation:Plugin',
-            # Add other agent plugins here
-        ]
-    },
-    install_requires=[
-        'numpy>=1.18.0',
-        'pandas>=1.0.0',
-        'scikit-learn>=0.22.0',
-        'openrl>=0.1.0',
-        'gym>=0.17.0'
-    ],
-    extras_require={
-        'dev': [
-            'pytest>=6.0.0',
-            'sphinx>=3.0.0',
-            'black>=21.0.0',
-            'isort>=5.0.0'
-        ],
-        'docs': [
-            'sphinx>=3.0.0',
-            'sphinx_rtd_theme>=0.5.0'
-        ]
-    },
-    author='Harvey Bastidas',
-    author_email='your.email@example.com',
-    description='A reinforcement learning optimization system that supports dynamic loading of optimizer, environment, and agent plugins for processing and optimizing trading strategies.',
+    name="tsg",
+    version="0.1.0",
+    description=(
+        "Synthetic Data Generator with plugin-based architecture for latent sampling, "
+        "generation, evaluation, and optimization."
+    ),
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url='https://github.com/harveybc/rl-optimizer',
+    url="https://github.com/harveybc/timeseries-gan",
+    author="Harvey Bastidas",
+    author_email="your.email@example.com",
+    license="MIT",
     classifiers=[
-        'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: MIT License',
-        'Operating System :: OS Independent',
-        'Intended Audience :: Developers',
-        'Intended Audience :: Science/Research',
-        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Developers",
+        "Topic :: Software Development :: Data Generation",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
     ],
-    keywords='reinforcement learning, optimization, trading, NEAT, OpenRL, plugin architecture',
-    python_requires='>=3.6',
-    include_package_data=True,  # Include non-code files specified in MANIFEST.in
-    zip_safe=False,  # Set to False if your package needs to access data files
+    keywords="synthetic-data generator plugin tsg",
+
+    packages=find_packages(exclude=["tests", "docs"]),
+    python_requires=">=3.8, <4",
+    install_requires=[
+        "numpy",        # Required for numerical operations
+        "pandas",       # Required for data manipulation
+        "tensorflow",   # Required for GAN trainer plugin
+        "matplotlib",   # Required for plotting and visualization
+        "scikit-learn", # Required for evaluation metrics
+        "h5py",         # Required for model persistence
+        "deap",         # Required for hyperparameter optimization
+    ],
+    extras_require={
+        "dev": [
+            "build",             # Build utilities
+            "pytest",           # Testing framework
+            "sphinx",           # Documentation generator
+            "sphinx-rtd-theme"  # ReadTheDocs theme for Sphinx
+        ]
+    },
+
+    entry_points={
+        "console_scripts": [
+            "tsg=app.main:main",
+        ],
+        "feeder.plugins": [
+            "default_feeder=tsg_plugins.feeder_plugin.feeder_plugin:FeederPlugin",
+        ],
+        "generator.plugins": [
+            "vae_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin",
+            "default_generator = tsg_plugins.generator_plugin.generator_plugin:GeneratorPlugin"
+        ],
+        "discriminator.plugins": [
+            "default_discriminator = tsg_plugins.discriminator_plugin:DiscriminatorPlugin",
+        ],
+        "evaluator.plugins": [
+            "default_evaluator = tsg_plugins.evaluator_plugin:EvaluatorPlugin",
+        ],
+        "optimizer.plugins": [
+            "default_optimizer = tsg_plugins.optimizer_plugin:OptimizerPlugin",
+        ],
+        "trainer.plugins": [
+            "gan_trainer = tsg_plugins.gan_trainer_plugin.gan_trainer_plugin:GANTrainerPlugin",
+        ],
+    },
+
+    include_package_data=True,
+    project_urls={
+        "Source": "https://github.com/harveybc/timeseries-gan",
+        "Tracker": "https://github.com/harveybc/timeseries-gan/issues",
+    },
 )

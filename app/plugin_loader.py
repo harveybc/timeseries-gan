@@ -1,171 +1,90 @@
-# app/plugin_loader.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+plugin_loader.py
 
-from importlib import metadata
-import logging
-from app.logger import get_logger  # Import the centralized logger
+Module for loading plugins using the importlib.metadata entry points API updated for Python 3.12.
+Provides functions to load a specific plugin and retrieve its parameters.
+"""
 
-logger = get_logger(__name__)
+from importlib.metadata import entry_points, EntryPoint
 
 def load_plugin(plugin_group: str, plugin_name: str):
     """
-    Dynamically loads a plugin class from the specified entry point group.
+    Load a plugin class from a specified entry point group using its name.
+    
+    This function uses the updated importlib.metadata API for Python 3.12 by filtering 
+    entry points with the select() method.
 
-    Parameters:
-    ----------
-    plugin_group : str
-        The entry point group under which the plugin is registered.
-    plugin_name : str
-        The name of the plugin to load.
+    Args:
+        plugin_group (str): The entry point group from which to load the plugin.
+        plugin_name (str): The name of the plugin to load.
 
     Returns:
-    -------
-    tuple:
-        - The plugin class.
-        - A list of required parameter names for the plugin.
+        tuple: A tuple containing the plugin class and a list of required parameter keys 
+               extracted from the plugin's plugin_params attribute.
 
     Raises:
-    ------
-    ImportError:
-        If the plugin cannot be found or loaded.
+        ImportError: If the plugin is not found in the specified group.
+        Exception: For any other errors during the plugin loading process.
     """
-    logger.debug(f"Attempting to load plugin '{plugin_name}' from group '{plugin_group}'.")
-
+    print(f"Attempting to load plugin: {plugin_name} from group: {plugin_group}")
     try:
-        # Retrieve all entry points for the specified group
-        entry_points = metadata.entry_points()
-        if hasattr(entry_points, 'select'):  # For Python >=3.10
-            group_entries = entry_points.select(group=plugin_group)
-        else:  # For older Python versions
-            group_entries = entry_points.get(plugin_group, [])
-
-        logger.debug(f"Found {len(group_entries)} entries in group '{plugin_group}'.")
-
-        # Find the entry point with the specified plugin name
-        entry_point = next((ep for ep in group_entries if ep.name == plugin_name), None)
-        if entry_point is None:
-            logger.error(f"Plugin '{plugin_name}' not found in group '{plugin_group}'.")
-            raise ImportError(f"Plugin '{plugin_name}' not found in group '{plugin_group}'.")
-
-        # Load the plugin class
+        # Filter entry points for the specified group using the new .select() method.
+        group_entries = entry_points().select(group=plugin_group)
+        # Find the entry point that matches the plugin name.
+        entry_point = next(ep for ep in group_entries if ep.name == plugin_name)
+        # Load the plugin class using the entry point's load method.
         plugin_class = entry_point.load()
-        logger.debug(f"Successfully loaded plugin class '{plugin_class.__name__}' from '{entry_point.module}'.")
-
-        # Retrieve required parameters if available
-        required_params = list(getattr(plugin_class, 'plugin_params', {}).keys())
-        logger.debug(f"Plugin '{plugin_name}' has parameters: {required_params}")
-
-        return plugin_class, required_params
-
-    except ImportError as ie:
-        logger.exception(f"ImportError while loading plugin '{plugin_name}' from group '{plugin_group}': {ie}")
-        raise
+        # Extract the keys from the plugin's plugin_params attribute as required parameters.
+        required_params = list(plugin_class.plugin_params.keys())
+        print(f"Successfully loaded plugin: {plugin_name} with params: {plugin_class.plugin_params}")
+        # ADD THIS DEBUG BLOCK
+        return_value_to_send = (plugin_class, required_params)
+        print(f"DEBUG plugin_loader.py: About to return: {return_value_to_send}")
+        print(f"DEBUG plugin_loader.py: Type of return_value_to_send: {type(return_value_to_send)}")
+        if isinstance(return_value_to_send, tuple):
+            print(f"DEBUG plugin_loader.py: Length of return_value_to_send tuple: {len(return_value_to_send)}")
+        # END DEBUG BLOCK
+        return return_value_to_send
+    except StopIteration:
+        print(f"Failed to find plugin {plugin_name} in group {plugin_group}")
+        raise ImportError(f"Plugin {plugin_name} not found in group {plugin_group}.")
     except Exception as e:
-        logger.exception(f"Unexpected error while loading plugin '{plugin_name}' from group '{plugin_group}': {e}")
+        print(f"Failed to load plugin {plugin_name} from group {plugin_group}, Error: {e}")
         raise
-
-def load_environment_plugin(env_name: str):
-    """
-    Loads an environment plugin by name.
-
-    Parameters:
-    ----------
-    env_name : str
-        The name of the environment plugin to load.
-
-    Returns:
-    -------
-    tuple:
-        - The environment plugin class.
-        - A list of required parameter names for the plugin.
-    """
-    return load_plugin('rl_optimizer.environments', env_name)
-
-def load_agent_plugin(agent_name: str):
-    """
-    Loads an agent plugin by name.
-
-    Parameters:
-    ----------
-    agent_name : str
-        The name of the agent plugin to load.
-
-    Returns:
-    -------
-    tuple:
-        - The agent plugin class.
-        - A list of required parameter names for the plugin.
-    """
-    return load_plugin('rl_optimizer.agents', agent_name)
-
-def load_optimizer_plugin(optimizer_name: str):
-    """
-    Loads an optimizer plugin by name.
-
-    Parameters:
-    ----------
-    optimizer_name : str
-        The name of the optimizer plugin to load.
-
-    Returns:
-    -------
-    tuple:
-        - The optimizer plugin class.
-        - A list of required parameter names for the plugin.
-    """
-    return load_plugin('rl_optimizer.optimizers', optimizer_name)
 
 def get_plugin_params(plugin_group: str, plugin_name: str):
     """
-    Retrieves the parameters of a specified plugin.
+    Retrieve the plugin parameters from a specified entry point group using the plugin name.
+    
+    This function loads the plugin class using the updated importlib.metadata API and returns 
+    its plugin_params attribute.
 
-    Parameters:
-    ----------
-    plugin_group : str
-        The entry point group under which the plugin is registered.
-    plugin_name : str
-        The name of the plugin whose parameters are to be retrieved.
+    Args:
+        plugin_group (str): The entry point group from which to retrieve the plugin.
+        plugin_name (str): The name of the plugin.
 
     Returns:
-    -------
-    dict:
-        A dictionary of parameter names and their default values.
+        dict: A dictionary representing the plugin parameters (plugin_params).
 
     Raises:
-    ------
-    ImportError:
-        If the plugin cannot be found or loaded.
+        ImportError: If the plugin is not found in the specified group.
+        ImportError: For any errors encountered while retrieving the plugin parameters.
     """
-    logger.debug(f"Getting parameters for plugin '{plugin_name}' from group '{plugin_group}'.")
-
+    print(f"Getting plugin parameters for: {plugin_name} from group: {plugin_group}")
     try:
-        # Retrieve all entry points for the specified group
-        entry_points = metadata.entry_points()
-        if hasattr(entry_points, 'select'):  # For Python >=3.10
-            group_entries = entry_points.select(group=plugin_group)
-        else:  # For older Python versions
-            group_entries = entry_points.get(plugin_group, [])
-
-        logger.debug(f"Found {len(group_entries)} entries in group '{plugin_group}'.")
-
-        # Find the entry point with the specified plugin name
-        entry_point = next((ep for ep in group_entries if ep.name == plugin_name), None)
-        if entry_point is None:
-            logger.error(f"Plugin '{plugin_name}' not found in group '{plugin_group}'.")
-            raise ImportError(f"Plugin '{plugin_name}' not found in group '{plugin_group}'.")
-
-        # Load the plugin class
+        # Filter entry points for the specified group using the new .select() method.
+        group_entries = entry_points().select(group=plugin_group)
+        # Find the entry point that matches the plugin name.
+        entry_point = next(ep for ep in group_entries if ep.name == plugin_name)
+        # Load the plugin class using the entry point's load method.
         plugin_class = entry_point.load()
-        logger.debug(f"Successfully loaded plugin class '{plugin_class.__name__}' from '{entry_point.module}'.")
-
-        # Retrieve plugin parameters
-        plugin_params = getattr(plugin_class, 'plugin_params', {})
-        logger.debug(f"Retrieved parameters for plugin '{plugin_name}': {plugin_params}")
-
-        return plugin_params
-
-    except ImportError as ie:
-        logger.exception(f"ImportError while retrieving parameters for plugin '{plugin_name}' from group '{plugin_group}': {ie}")
-        raise
+        print(f"Retrieved plugin params: {plugin_class.plugin_params}")
+        return plugin_class.plugin_params
+    except StopIteration:
+        print(f"Failed to find plugin {plugin_name} in group {plugin_group}")
+        raise ImportError(f"Plugin {plugin_name} not found in group {plugin_group}.")
     except Exception as e:
-        logger.exception(f"Unexpected error while retrieving parameters for plugin '{plugin_name}' from group '{plugin_group}': {e}")
-        raise
+        print(f"Failed to get plugin params for {plugin_name} from group {plugin_group}, Error: {e}")
+        raise ImportError(f"Failed to get plugin params for {plugin_name} from group {plugin_group}, Error: {e}")
