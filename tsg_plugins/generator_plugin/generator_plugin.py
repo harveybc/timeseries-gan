@@ -340,6 +340,7 @@ class GeneratorPlugin(PluginBase):
         # 3. Connect to the VAE Decoder
         self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
         self.logger.debug(f"  - z_sequence_for_vae shape: {z_sequence_for_vae.shape}")
+        self.logger.debug(f"  - context_input shape: {context_input.shape}")
         self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
 
         vae_decoder_model.trainable = True
@@ -361,18 +362,38 @@ class GeneratorPlugin(PluginBase):
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
             self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
-            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, conditional_input])
+            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
             self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
+            
+            # Post-process VAE decoder output to match discriminator input requirements
+            # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
+            self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
+            
+            # Expand 23 features to 51 features using a Dense layer
+            expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
+            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
+            
+            # Repeat the feature vector across 144 timesteps
+            # RepeatVector expects 2D input (batch_size, features) and outputs (batch_size, timesteps, features)
+            sequence_output = tf.keras.layers.RepeatVector(144)(expanded_features)
+            self.logger.debug(f"RepeatVector output shape: {sequence_output.shape}")
+            
+            # Ensure final shape is correct (batch_size, 144, 51)
+            sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
+            
+            self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
+            
         except Exception as e:
             self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
             self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
             self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
+            self.logger.error(f"Provided context_input: {context_input}")
             self.logger.error(f"Provided conditional_input: {conditional_input}")
             raise
 
         composite_generator_model = tf.keras.Model(
-            inputs=[noise_input, conditional_input],
-            outputs=vae_decoder_output,
+            inputs=[noise_input, conditional_input, context_input],
+            outputs=sequence_output,
             name="Composite_VAE_GAN_Generator"
         )
         self.logger.info("Composite VAE-GAN Generator model built successfully.")
