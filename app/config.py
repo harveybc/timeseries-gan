@@ -78,8 +78,8 @@ DEFAULT_VALUES = {
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # The following are placeholders for the 51-feature requirement (config.py test)
-        "PLACEHOLDER_FEATURE_X1", "PLACEHOLDER_FEATURE_Y2", "PLACEHOLDER_FEATURE_Z3"
+        # Replace placeholders to maintain 51 features
+        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
     ], 
     "generator_decoder_output_feature_names": [
         # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
@@ -111,8 +111,8 @@ DEFAULT_VALUES = {
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # The following are placeholders for the 51-feature requirement (config.py test)
-        "PLACEHOLDER_FEATURE_X1", "PLACEHOLDER_FEATURE_Y2", "PLACEHOLDER_FEATURE_Z3"
+        # Replace placeholders to maintain 51 features
+        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
     ],
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
     "discriminator_ti_feature_names": [

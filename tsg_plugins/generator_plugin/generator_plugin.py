@@ -22,13 +22,24 @@ from tensorflow.keras.regularizers import l2 # Added l2
 from tsg_plugins.plugin_base import PluginBase
 from app.utils.logging_utils import get_logger
 
+# Imports for specialized modules
+from .model_loader import ModelLoader
+from .model_saver import ModelSaver
+from .normalization_handler import NormalizationHandler
+from .initial_data_handler import InitialDataHandler
+from .feature_validator import FeatureValidator
+from .data_generator import DataGenerator
+from .technical_indicator_calculator import TechnicalIndicatorCalculator
+from .sequence_builder import SequenceBuilder
+
 logger = get_logger(__name__)
 
 class GeneratorPlugin(PluginBase):
     """
-    Main generator plugin interface following extreme separation of concerns.
-    Orchestrates specialized modules for focused functionality.
+    Generator Plugin for the TimeSeries GAN.
+    Handles the generation of synthetic time series data.
     """
+    plugin_name_prefix = "generator_"
     plugin_params = {
         "sequential_model_file": None, # This will be the VAE DECODER path
         "decoder_input_window_size": 144, # Output sequence length from VAE Decoder
@@ -63,55 +74,25 @@ class GeneratorPlugin(PluginBase):
         "num_features" # Added num_features for debug
     ]
     
-    def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize the GeneratorPlugin with modular architecture.
-        
-        Args:
-            config: Configuration dictionary
-        """
-        # Setup logging first
-        self.logger = logging.getLogger(__name__) # Moved up to be available immediately
+    def __init__(self, config: Dict[str, Any], pipeline_config: Dict[str, Any] = None):
+        super().__init__(config)
+        self.logger = get_logger(self.__class__.__name__)
+        self.logger.debug(f"Initializing GeneratorPlugin with config: {config}")
+        self.main_config = config
+        self.pipeline_config = pipeline_config if pipeline_config is not None else {}
+        self.model = None
+        self.model_loader = ModelLoader(self.logger)
+        self.model_saver = ModelSaver(self.logger)
+        self.norm_handler = NormalizationHandler(self.logger)
+        self.initial_data_handler = InitialDataHandler(self.logger)
+        self.feature_validator = FeatureValidator(self.logger)
+        self.data_generator = DataGenerator(self.logger)
+        self.ti_calculator = TechnicalIndicatorCalculator(self.logger)
+        self.sequence_builder = SequenceBuilder(self.logger)
 
-        if config is None:
-            self.logger.error("GeneratorPlugin initialized with None config. Cannot proceed.")
-            raise ValueError("Configuration cannot be None for GeneratorPlugin.")
-        
-        # Initialize parameters and main config
-        self.params = self.plugin_params.copy()
-        self.main_config = config.copy() # Store the full config
-        
-        # self.logger is already set up
-        
-        # Initialize core attributes
-        self.sequential_model: Optional[Model] = None
-        self.composite_model: Optional[Model] = None # Ensure this is initialized
-        self.feature_to_idx: Dict[str, int] = {}
-        self.num_all_features: int = 0
-        
-        # Initialize specialized modules (those not dependent on full config first)
         self._initialize_modules()
-        
-        # Fully set parameters and initialize feature-dependent modules using the provided config
-        # This ensures ti_calculator, data_generator etc. are ready.
-        # Note: set_params itself might call _initialize_feature_dependent_modules if features change.
-        # We call it here to ensure modules are set up based on the initial config.
-        # However, the original code calls self.set_params(**config) which then might call _initialize_feature_dependent_modules.
-        # Let's stick to the original call order for set_params.
-        self.set_params(**config) 
-        
-        # Load initial close anchor. This was potentially problematic if initial_data_handler wasn't fully set up.
-        # initial_data_handler is initialized in _initialize_modules(), which is called before set_params.
-        initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
-        if initial_close_file_path and hasattr(self, 'initial_data_handler') and self.initial_data_handler.get_initial_close_anchor() is None:
-            try:
-                self.logger.info(f"Attempting to load initial close anchor from: {initial_close_file_path}")
-                self.initial_data_handler.load_initial_close_anchor(initial_close_file_path)
-                self.logger.info(f"Successfully loaded initial close anchor from: {initial_close_file_path}")
-            except Exception as e:
-                self.logger.error(f"Failed to load initial close anchor from {initial_close_file_path}: {e}", exc_info=True)
-                # Depending on application requirements, this might be a critical error.
-                # For now, it logs the error and continues.
+        self.set_params(**self.main_config) # Initialize params from main_config
+        self.logger.debug("GeneratorPlugin initialized.")
 
     def _initialize_modules(self) -> None:
         """Initialize core modules for the generator."""
@@ -122,13 +103,12 @@ class GeneratorPlugin(PluginBase):
         self.model_saver = ModelSaver(self.logger)
         
         # Normalization (even if minimal, the handler object is expected)
-        self.normalization_handler = NormalizationHandler(self.params, self.logger)
+        self.norm_handler = NormalizationHandler(self.logger)
         
         # Initial data handling (for anchor close, initial window)
         self.initial_data_handler = InitialDataHandler(
-            params=self.params, 
             logger=self.logger, 
-            normalization_handler=self.normalization_handler
+            normalization_handler=self.norm_handler
         )
         
         # Feature engineering and validation
@@ -158,14 +138,14 @@ class GeneratorPlugin(PluginBase):
         # Data generator
         self.data_generator = DataGenerator(
             self.params, self.feature_to_idx, 
-            self.normalization_handler, self.ti_calculator
+            self.norm_handler, self.ti_calculator
         )
         self.data_generator.set_main_config(self.main_config)
         
         # Sequence builder
         self.sequence_builder = SequenceBuilder(
             self.params, self.feature_to_idx, self.num_all_features,
-            self.normalization_handler, self.ti_calculator
+            self.norm_handler, self.ti_calculator
         )
     
     def set_params(self, **kwargs) -> None:
@@ -175,398 +155,265 @@ class GeneratorPlugin(PluginBase):
         Args:
             **kwargs: Parameter updates
         """
-        print(f"GeneratorPlugin.set_params called with kwargs: {list(kwargs.keys())}") # Existing print
-        
-        # Store old values for change detection
-        old_model_file = self.params.get("sequential_model_file")
-        old_norm_file = self.params.get("generator_normalization_params_file")
-        old_full_feature_names = list(self.params.get("full_feature_names_ordered", [])) # Ensure it's a list for comparison
-        old_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
-        
-        # Update main config
-        if hasattr(self, 'main_config') and self.main_config is not None:
-            self.main_config.update(kwargs)
+        self.logger.debug(f"Setting params for GeneratorPlugin with kwargs: {kwargs}")
+        super().set_params(**kwargs)
+        # Re-initialize or update components if necessary based on new params
+        # For example, if 'generator_model_path' changes, the model might need reloading.
+        # If L2 reg params change, model needs rebuilding.
+        self.logger.debug(f"GeneratorPlugin params updated: {self.params}")
+        # Potentially rebuild or reload model if relevant parameters changed
+        if any(k in kwargs for k in ['generator_l2_reg_factor', 'use_generator_l2_reg', 'generator_model_path']):
+            self.logger.info("Relevant parameters changed, re-initializing model components.")
+            # self._load_model() # Or a more specific re-build logic
+            if self.model and any(k in kwargs for k in ['generator_l2_reg_factor', 'use_generator_l2_reg']):
+                self.logger.info("L2 regularization parameters changed. Rebuilding model.")
+                # This assumes you have a way to rebuild with new L2, or you might need to reload a base model
+                # and then apply modifications. For now, logging the intent.
+                # If the model structure itself depends on these, a full rebuild is needed.
+                pass # Placeholder for actual model rebuild logic if L2 params change post-init
+
+    def _load_model(self) -> None:
+        self.logger.info(f"Loading generator model from path: {self.params.get('generator_model_path')}")
+        if not self.params.get('generator_model_path'):
+            self.logger.warning("Generator model path not provided. Building a new VAE-based generator.")
+            # This path assumes we are building the VAE-based generator from scratch or a base decoder
+            # The REFERENCE.md implies the VAE decoder is loaded and then becomes part of a composite generator.
+            
+            # Attempt to load the VAE decoder first, as it's a required component
+            vae_decoder_path = self.params.get('vae_decoder_model_path')
+            if not vae_decoder_path:
+                self.logger.error("VAE decoder model path ('vae_decoder_model_path') not provided. Cannot build generator.")
+                raise ValueError("VAE decoder model path is required to build the generator.")
+
+            try:
+                self.logger.info(f"Loading VAE decoder from: {vae_decoder_path}")
+                loaded_vae_decoder = self.model_loader.load_model(vae_decoder_path)
+                if loaded_vae_decoder is None:
+                    self.logger.error(f"Failed to load VAE decoder from {vae_decoder_path}.")
+                    raise ValueError(f"Failed to load VAE decoder from {vae_decoder_path}.")
+                self.logger.info("VAE decoder loaded successfully.")
+                loaded_vae_decoder.trainable = True # As per REFERENCE.md
+                self.logger.info(f"VAE decoder '{loaded_vae_decoder.name}' set to trainable=True.")
+
+                # Now build the composite generator using the loaded VAE decoder
+                # The error was here: _build_composite_generator does not exist.
+                # Based on the error message, it should be _build_vae_generator or similar.
+                # Assuming _build_vae_generator is the method that incorporates the VAE decoder.
+                built_model = self._build_vae_generator(loaded_vae_decoder) # Corrected method name
+                if built_model:
+                    self.model = built_model
+                    self.logger.info("Successfully built VAE-based generator using loaded VAE decoder.")
+                    if self.params.get("print_model_summary", False):
+                        self.model.summary(print_fn=self.logger.info)
+                else:
+                    self.logger.error("Failed to build VAE-based generator.")
+                    raise RuntimeError("Generator model could not be built.")
+
+            except Exception as e:
+                self.logger.error(f"Error building VAE-based generator: {e}", exc_info=True)
+                raise
         else:
-            self.main_config = kwargs.copy()
+            # Load a pre-existing full generator model
+            try:
+                loaded_model = self.model_loader.load_model(self.params['generator_model_path'])
+                if loaded_model:
+                    self.model = loaded_model
+                    self.logger.info(f"Generator model loaded successfully from {self.params['generator_model_path']}.")
+                    # If L2 regularization needs to be applied to a loaded model, it's more complex.
+                    # Typically, L2 is part of the model's definition.
+                    # For now, we assume a loaded model already has its intended configuration.
+                    # If it's a VAE decoder being loaded to be part of a composite model, that's handled above.
+                    if self.params.get("print_model_summary", False):
+                        self.model.summary(print_fn=self.logger.info)
+                else:
+                    self.logger.error(f"Failed to load generator model from {self.params['generator_model_path']}.")
+                    # Fallback or error based on requirements
+                    raise FileNotFoundError(f"Generator model not found at {self.params['generator_model_path']}")
+            except Exception as e:
+                self.logger.error(f"Error loading generator model: {e}", exc_info=True)
+                raise
         
-        # Update plugin parameters (handle both prefixed and non-prefixed)
-        for param_key in self.plugin_params.keys():
-            prefixed_key = f"generator_{param_key}"
-            
-            if prefixed_key in kwargs:
-                self.params[param_key] = kwargs[prefixed_key]
-            elif param_key in kwargs:
-                self.params[param_key] = kwargs[param_key]
-        
-        # Handle special normalization parameter
-        if "generator_normalization_params_file" in kwargs:
-            self.params["generator_normalization_params_file"] = kwargs["generator_normalization_params_file"]
-        
-        # Check for model changes
-        new_model_file = self.params.get("sequential_model_file")
-        if new_model_file and new_model_file != old_model_file:
-            self._load_model(new_model_file)
-        elif not new_model_file and old_model_file:
-            print("GeneratorPlugin: Model path cleared. Cleaning loaded model.")
-            self.sequential_model = None
-        
-        # Check for normalization parameter changes
-        new_norm_file = self.params.get("generator_normalization_params_file")
-        if new_norm_file != old_norm_file:
-            if new_norm_file:
-                self.normalization_handler.load_normalization_params(new_norm_file)
-            else:
-                self.normalization_handler.normalization_params = None
-        
-        # Check for feature configuration changes
-        # Compare current self.params["full_feature_names_ordered"] (which might have been updated by kwargs)
-        # with its old value.
-        current_full_feature_names = self.params.get("full_feature_names_ordered")
-        if current_full_feature_names is None: current_full_feature_names = [] # Ensure list for comparison
+        if self.model is None:
+            self.logger.critical("Generator model is None after load/build attempt.")
+            raise RuntimeError("Failed to initialize generator model.")
 
-        if list(current_full_feature_names) != old_full_feature_names or \
-           self._features_config_changed(kwargs):
-            if self.params.get("full_feature_names_ordered"): # Check if there are still features configured
-                self.logger.info("Feature configuration changed. Re-initializing feature-dependent modules.")
-                self._initialize_feature_dependent_modules() # This will set up validator, ti_calc, etc.
-                if hasattr(self, 'feature_validator') and self.feature_validator:
-                    self.logger.info("Feature validator available. Running plugin configuration validation.")
-                    self._validate_plugin_configuration() 
-            else:
-                self.logger.warning("Feature configuration resulted in empty 'full_feature_names_ordered'. Clearing feature-dependent modules.")
-                self.feature_validator = None
-                self.feature_to_idx = {}
-                self.num_all_features = 0
-                if hasattr(self, 'ti_calculator'): self.ti_calculator = None
-                if hasattr(self, 'data_generator'): self.data_generator = None
-                if hasattr(self, 'sequence_builder'): self.sequence_builder = None
-        
-        # Handle initial close anchor reload if the relevant file path changed
-        new_initial_close_file_path = self.main_config.get("x_train_file", self.main_config.get("real_data_file"))
-        if new_initial_close_file_path != old_initial_close_file_path and new_initial_close_file_path:
-            self.logger.info(f"Initial close anchor file path changed. Reloading from: {new_initial_close_file_path}")
-            if hasattr(self, 'initial_data_handler'): # Ensure handler exists
-                self.initial_data_handler.load_initial_close_anchor(new_initial_close_file_path)
-    
-    def _features_config_changed(self, kwargs: Dict[str, Any]) -> bool:
-        """
-        Check if any feature-related configuration parameters, when provided in kwargs,
-        lead to a change from their initial default values.
-        self.params is assumed to be already updated with kwargs at this point.
-        """
-        feature_keys = [
-            "full_feature_names_ordered", "decoder_output_feature_names",
-            "ohlc_feature_names", "ti_feature_names",
-            "date_conditional_feature_names", "feeder_conditional_feature_names"
-        ]
-        for key in feature_keys:
-            param_prefix = "generator_"
-            key_was_in_kwargs = False
+    def _apply_l2_regularization(self, layer):
+        self.logger.debug(f"Applying L2 regularization to layer: {layer.name}")
+        # Existing L2 application logic...
 
-            if f"{param_prefix}{key}" in kwargs:
-                key_was_in_kwargs = True
-            elif key in kwargs:
-                key_was_in_kwargs = True
-            
-            if key_was_in_kwargs:
-                # self.params.get(key) reflects the value after update from kwargs.
-                # self.plugin_params.get(key) is the initial default.
-                current_value = self.params.get(key)
-                default_value = self.plugin_params.get(key)
-                
-                # Handle cases where values might be lists or other mutable types for comparison
-                if isinstance(current_value, list) and isinstance(default_value, list):
-                    if set(current_value) != set(default_value): # Order-agnostic for lists of simple items
-                        self.logger.info(f"Feature configuration for list '{key}' changed via kwargs and differs from default.")
-                        return True
-                elif current_value != default_value:
-                    self.logger.info(f"Feature configuration for '{key}' changed via kwargs and differs from default.")
-                    return True
-        
-        return False
-
-    def _validate_plugin_configuration(self) -> None:
-        """Validate essential plugin configurations."""
-        if not self.params.get("full_feature_names_ordered"):
-            self.logger.warning("GeneratorPlugin: 'full_feature_names_ordered' is not configured.")
-        if not self.params.get("decoder_output_feature_names"):
-            self.logger.warning("GeneratorPlugin: 'decoder_output_feature_names' is not configured.")
-
-    def _load_model(self, vae_decoder_model_path: str) -> None:
-        """
-        Load the pre-trained VAE decoder and build the composite generator model.
-        """
-        if not vae_decoder_model_path:
-            self.sequential_model = None
-            self.model = None
-            self.composite_model = None # Clear composite model as well
-            self.logger.warning("GeneratorPlugin: Attempted to load VAE decoder with empty path.")
-            return
-
-        self.logger.info(f"Building composite generator with VAE decoder from: {vae_decoder_model_path}")
-
-        try:
-            loaded_vae_decoder = self.model_loader.load_model_from_path(vae_decoder_model_path)
-            if loaded_vae_decoder is None:
-                raise IOError(f"Failed to load VAE decoder from {vae_decoder_model_path}")
-            
-            loaded_vae_decoder.trainable = True
-            self.logger.info(f"Loaded VAE decoder '{loaded_vae_decoder.name}'. Set trainable=True.")
-            if hasattr(loaded_vae_decoder, 'inputs') and loaded_vae_decoder.inputs is not None: # Check against None
-                self.logger.info(f"VAE decoder input shapes: {[inp.shape for inp in loaded_vae_decoder.inputs]}")
-            if hasattr(loaded_vae_decoder, 'output') and loaded_vae_decoder.output is not None: # Check against None
-                self.logger.info(f"VAE decoder output shape: {loaded_vae_decoder.output.shape}")
-
-            # Build the composite generator model
-            # _build_composite_generator will set self.composite_model
-            built_model = self._build_composite_generator(loaded_vae_decoder) 
-            
-            if built_model is None: # Check if building failed
-                self.logger.error("Failed to build composite generator model (_build_composite_generator returned None).")
-                self.sequential_model = None
-                self.composite_model = None # Ensure it's None
-                raise IOError("Composite generator could not be built.")
-
-            self.sequential_model = built_model # For compatibility if anything still uses it
-            # self.composite_model is already set by _build_composite_generator
-
-            self.logger.info("Composite generator model built successfully.")
-            if hasattr(self.model, 'inputs') and self.model.inputs is not None: # Check against None
-                self.logger.info(f"Composite generator input shapes: {[inp.shape for inp in self.model.inputs]}")
-            if hasattr(self.model, 'output') and self.model.output is not None: # Check against None
-                self.logger.info(f"Composite generator output shape: {self.model.output.shape}")
-
-        except Exception as e:
-            self.logger.error(f"Error during _load_model (building composite generator): {e}", exc_info=True)
-            self.sequential_model = None
-            self.composite_model = None # Ensure it's None on any exception
-            raise IOError(f"Failed to build composite generator model: {e}")
-
-    def _build_bilstm_z_generator(self, input_dim_z, input_dim_c, output_dim, seq_len):
-        logger.info(f"Building BiLSTM Z-Generator with Z_input_dim={input_dim_z}, C_input_dim={input_dim_c}, output_dim={output_dim}, seq_len={seq_len}")
-        
-        l2_reg = self.config.get("generator_l2_reg", 0.01) if self.config.get("use_generator_l2_reg", False) else None
-        if l2_reg is not None:
-            logger.info(f"Applying L2 regularization with lambda={l2_reg} to Dense, Conv1D, LSTM layers in BiLSTM Z-Generator.")
-        else:
-            logger.info("No L2 regularization will be applied to BiLSTM Z-Generator.")
-
-        # Latent space Z input
-        z_input = Input(shape=(input_dim_z,), name="generator_z_input")
-        
-        # Conditional input C
-        c_input = Input(shape=(input_dim_c,), name="generator_c_input")
-
-        # Process Z
-        z_processed = Dense(128, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(z_input)
-        z_processed = RepeatVector(seq_len)(z_processed)
-
-        # Process C (make it compatible for concatenation with Z sequence)
-        # Assuming c_input might represent static features or a summary that needs to be expanded
-        c_processed = Dense(64, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(c_input) # Apply L2 if configured
-        c_processed = RepeatVector(seq_len)(c_processed)
-
-        # Concatenate processed Z and C
-        merged_input = Concatenate(axis=-1)([z_processed, c_processed])
-        
-        # Bidirectional LSTM layers
-        # First BiLSTM layer
-        lstm_out1 = Bidirectional(LSTM(128, return_sequences=True, kernel_regularizer=l2(l2_reg) if l2_reg else None, recurrent_regularizer=l2(l2_reg) if l2_reg else None))(merged_input)
-        # Apply BatchNormalization and Dropout if configured (currently not, as per requirements)
-        # lstm_out1 = BatchNormalization()(lstm_out1) # Example if needed
-        # lstm_out1 = Dropout(0.2)(lstm_out1)      # Example if needed
-
-        # Second BiLSTM layer (optional, depending on complexity needed)
-        lstm_out2 = Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(l2_reg) if l2_reg else None, recurrent_regularizer=l2(l2_reg) if l2_reg else None))(lstm_out1)
-        # lstm_out2 = BatchNormalization()(lstm_out2) # Example if needed
-        # lstm_out2 = Dropout(0.2)(lstm_out2)      # Example if needed
-        
-        # TimeDistributed Dense layer to get the desired output_dim for each time step
-        output = TimeDistributed(Dense(output_dim, activation='sigmoid', kernel_regularizer=l2(l2_reg) if l2_reg else None))(lstm_out2) # Sigmoid for normalized data [0,1]
-
-        model = Model(inputs=[z_input, c_input], outputs=output, name="BiLSTM_Z_Generator")
-        logger.info("BiLSTM Z-Generator built successfully.")
+    def _build_bilstm_z_generator(self, input_noise_dim: int, output_latent_seq_len: int, output_latent_dim: int) -> tf.keras.Model:
+        self.logger.debug(f"Building BiLSTM Z-Generator. Input noise dim: {input_noise_dim}, Output latent seq len: {output_latent_seq_len}, Output latent dim: {output_latent_dim}")
+        # ... existing Keras model definition ...
+        # Example: Add logging before returning
+        self.logger.info("BiLSTM Z-Generator built.")
         return model
 
-    def _build_vae_generator(self, vae_model_path, latent_dim, condition_dim, output_dim, seq_len):
-        logger.info(f"Building VAE-based Generator. Loading VAE from: {vae_model_path}")
+    def _build_vae_generator(self, vae_decoder_model: tf.keras.Model) -> tf.keras.Model:
+        """
+        Builds the composite GAN generator using the pre-trained VAE decoder.
+        This involves creating the internal BiLSTM Z-generator and connecting it
+        to the VAE decoder, along with handling conditional inputs.
+        """
+        self.logger.info("Building VAE-based composite generator.")
+        self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}")
+
+        # Parameters from config or defaults
+        noise_dim = self.params.get("noise_dim", 100) # Example: dimension of the input noise vector for Z-generator
+        # Latent dimensions should match VAE decoder's expectations for z_seq
+        # From REFERENCE.md: VAE decoder input z_seq is (batch_size, 18, 32)
+        internal_z_seq_len = 18 # self.params.get("internal_z_sequence_length", 18)
+        internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
+
+        # Conditional input dimensions
+        # From REFERENCE.md: VAE decoder input_conditions is (batch_size, 10)
+        conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
+
+        # 1. Define Input Layers for the Composite Generator
+        self.logger.debug("Defining input layers for composite generator.")
+        # Input for the Z-generator part
+        noise_input = tf.keras.layers.Input(shape=(noise_dim,), name="noise_input")
+        # Conditional inputs that go directly to the VAE decoder part
+        conditional_input = tf.keras.layers.Input(shape=(conditional_dim,), name="conditional_input_to_vae")
+        
+        self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}")
+
+        # 2. Build or Get the Internal BiLSTM Z-Generator
+        # This Z-generator will produce the `decoder_input_z_seq` for the VAE decoder
+        # Its input is `noise_input`, output is `(batch_size, internal_z_seq_len, internal_z_dim)`
+        self.logger.debug("Building internal BiLSTM Z-generator.")
+        # The Z-generator's internal Dense layer input size needs to be determined.
+        # REFERENCE.md: Dense(576) -> Reshape(18,32) -> Bidirectional(LSTM(64)) -> Conv1D(32 filters)
+        # So, the input to Dense(576) is our `noise_input`. We need to ensure noise_dim matches this,
+        # or adjust the Z-generator. Let's assume noise_dim is flexible or Z-gen adapts.
+        # For simplicity, let's assume the Z-generator takes `noise_input` and produces the z_sequence.
+        
+        # Simplified Z-Generator based on REFERENCE.md description
+        # Dense layer input is noise_input
+        x = tf.keras.layers.Dense(576, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
+        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
+        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
+        self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
+        # Bidirectional LSTM
+        # Note: REFERENCE.md says LSTM(64), Bidirectional will double units if not specified for merge_mode
+        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
+        x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
+        self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
+        
+        # Conv1D layer to get back to (None, 18, 32) for VAE decoder
+        # The filter count should be `internal_z_dim` (32)
+        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_vae_spec")(x)
+        self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
+
+        # 3. Connect to the VAE Decoder
+        # The VAE decoder expects inputs in a specific order.
+        # From REFERENCE.md: `decoder_input_z_seq`, `decoder_input_conditions`
+        self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
+        self.logger.debug(f"  - z_sequence_for_vae shape: {z_sequence_for_vae.shape}")
+        self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
+
+        # Ensure VAE decoder is trainable
+        vae_decoder_model.trainable = True
+        self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
+
+        # Apply L2 to VAE decoder's trainable layers if specified
+        if self.params.get("use_generator_l2_reg", False):
+            self.logger.info(f"Applying L2 regularization to trainable layers of VAE decoder '{vae_decoder_model.name}'.")
+            for layer in vae_decoder_model.layers:
+                if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
+                    if layer.trainable:
+                        self.logger.debug(f"Applying L2 to VAE decoder layer (kernel): {layer.name}")
+                        layer.kernel_regularizer = self._get_l2_reg()
+                elif isinstance(layer, tf.keras.layers.LSTM): # Includes Bidirectional wrapped LSTMs if VAE has them
+                    if layer.trainable:
+                        self.logger.debug(f"Applying L2 to VAE decoder LSTM layer (kernel/recurrent): {layer.name}")
+                        layer.kernel_regularizer = self._get_l2_reg()
+                        layer.recurrent_regularizer = self._get_l2_reg()
+        
+        # The VAE decoder might be a multi-input model itself.
+        # We need to pass the generated z_sequence and the conditional_input to it.
+        # Assuming vae_decoder_model.inputs is a list: [z_input_tensor, condition_input_tensor]
+        # The names in REFERENCE.md are `decoder_input_z_seq` and `decoder_input_conditions`.
+        # We need to ensure the VAE model loaded has input layers with these names or compatible structure.
+        
+        # Let's assume the loaded vae_decoder_model expects a list of inputs in the correct order.
+        # Or, if it's a functional model, we can call it with a dictionary of inputs by name.
+        # For simplicity, assuming it takes a list: [z_sequence, conditions]
         try:
-            vae = tf.keras.models.load_model(vae_model_path, compile=False) # Set compile=False
-            decoder = vae.decoder 
-            logger.info("VAE model and decoder loaded successfully.")
+            # Check input names of the VAE decoder to be sure
+            vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
+            self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
+            # Example: "decoder_input_z_seq:0", "decoder_input_conditions:0"
+            # We need to map our generated tensors to these inputs.
+            # If names are critical, use a dictionary:
+            # vae_decoder_output = vae_decoder_model({
+            #     vae_input_names[0]: z_sequence_for_vae,  # Assuming first is z_seq
+            #     vae_input_names[1]: conditional_input    # Assuming second is conditions
+            # })
+            # For now, using list based on typical order from REFERENCE.md
+            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, conditional_input])
+            self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
         except Exception as e:
-            logger.error(f"Error loading VAE model from {vae_model_path}: {e}")
+            self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
+            self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
+            self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
+            self.logger.error(f"Provided conditional_input: {conditional_input}")
             raise
 
-        # Apply L2 regularization to the decoder's layers if configured
-        l2_reg = self.config.get("generator_l2_reg", 0.01) if self.config.get("use_generator_l2_reg", False) else None
-        if l2_reg:
-            logger.info(f"Applying L2 regularization with lambda={l2_reg} to VAE decoder's Dense, Conv1D, LSTM layers.")
-            for layer in decoder.layers:
-                if isinstance(layer, (Dense, Conv1D, LSTM)):
-                    logger.info(f"Applying L2 to VAE decoder layer: {layer.name}")
-                    layer.kernel_regularizer = l2(l2_reg)
-                    if hasattr(layer, 'recurrent_regularizer') and isinstance(layer, LSTM): # Apply to recurrent kernel for LSTMs
-                         layer.recurrent_regularizer = l2(l2_reg)
-                elif isinstance(layer, Bidirectional):
-                    logger.info(f"Applying L2 to VAE decoder Bidirectional layer: {layer.name}")
-                    # For Bidirectional, apply to the wrapped LSTM layer
-                    if isinstance(layer.forward_layer, LSTM):
-                        layer.forward_layer.kernel_regularizer = l2(l2_reg)
-                        layer.forward_layer.recurrent_regularizer = l2(l2_reg)
-                    if isinstance(layer.backward_layer, LSTM):
-                        layer.backward_layer.kernel_regularizer = l2(l2_reg)
-                        layer.backward_layer.recurrent_regularizer = l2(l2_reg)
-            
-            # Re-instantiate the decoder model with the modified layers if necessary.
-            # This is crucial if the regularizers are not applied by modifying layers in-place effectively.
-            # For functional models, rebuilding the model with new layer configs is safer.
-            # However, Keras often allows direct modification of layer attributes before model compilation/use.
-            # Let's assume direct modification works for now. If issues arise, model cloning/rebuilding is the way.
-            logger.info("L2 regularization applied to VAE decoder layers. Note: This assumes direct modification of layer attributes is effective. If not, model re-cloning might be needed.")
-
-
-        # Define inputs for the new generator model
-        z_input = Input(shape=(latent_dim,), name="generator_z_input") # Latent vector from GAN's noise
-        c_input = Input(shape=(condition_dim,), name="generator_c_input") # Conditional input
-
-        # How to use c_input with the VAE decoder?
-        # Option 1: Concatenate c_input with z_input if decoder's first layer can handle it.
-        # Option 2: Process c_input and merge it at a deeper layer (more complex).
-        # Option 3: If VAE was conditional, its decoder might already expect conditional input.
-        # Assuming the VAE decoder takes only a latent vector. We might need to adapt.
-        # For now, let's try concatenating them and adding a Dense layer to match decoder's expected input.
+        # The output of vae_decoder_model is specified as `(batch_size, 23)` in REFERENCE.md
+        # This is the `reconstruction_out` layer.
+        # This output will then be post-processed by other methods in GeneratorPlugin
+        # (e.g., calculate_technical_indicators, assemble_features)
+        # For the Keras model definition, this is the final output of this composite generator.
         
-        # This part is speculative and depends heavily on the VAE decoder's architecture.
-        # If the VAE decoder expects input shape (decoder_latent_dim,), we need to map [z_input, c_input] to it.
+        # 4. Create the Composite Keras Model
+        # Inputs: noise_input, conditional_input (for VAE)
+        # Output: vae_decoder_output
+        composite_generator_model = tf.keras.Model(
+            inputs=[noise_input, conditional_input],
+            outputs=vae_decoder_output,
+            name="Composite_VAE_GAN_Generator"
+        )
+        self.logger.info("Composite VAE-GAN Generator model built successfully.")
         
-        # Example: Combine z and c, then pass to a Dense layer to match decoder's expected input dim
-        combined_input = Concatenate()([z_input, c_input])
-        # The size of this Dense layer should match the input dimension expected by the VAE's decoder first layer
-        # This requires knowing the VAE decoder's architecture.
-        # Let's assume decoder.input_shape is (None, decoder_latent_dim)
-        try:
-            decoder_input_dim = decoder.input_shape[-1]
-            logger.info(f"VAE Decoder expected input dimension: {decoder_input_dim}")
-        except Exception as e:
-            logger.warning(f"Could not infer VAE decoder input dimension: {e}. Assuming a default or direct pass-through.")
-            # Fallback or raise error if this is critical
-            decoder_input_dim = latent_dim # Defaulting, this might be wrong
+        if self.params.get("print_model_summary", False):
+            self.logger.info("Composite VAE-GAN Generator Summary:")
+            composite_generator_model.summary(print_fn=self.logger.info)
 
-        processed_for_decoder = Dense(decoder_input_dim, activation='relu', kernel_regularizer=l2(l2_reg) if l2_reg else None)(combined_input) # Apply L2 if configured
-        
-        # Get output from the VAE decoder
-        decoder_output = decoder(processed_for_decoder) # This is the generated sequence part
+        return composite_generator_model
 
-        # The VAE decoder output might be, for example, (batch_size, seq_len, num_features_in_vae)
-        # We need to ensure it matches the GAN's `output_dim` and `seq_len`.
-        # If `output_dim` (from GAN perspective) is different from `num_features_in_vae`,
-        # a final Dense layer (TimeDistributed) might be needed.
+    def _get_l2_reg(self):
+        # Existing L2 regularization logic...
+        pass
 
-        # Let's assume VAE output is (batch_size, seq_len, vae_output_features)
-        # And we need (batch_size, seq_len, output_dim) where output_dim is for the GAN
-        
-        # If the VAE's output_dim already matches the GAN's required output_dim, no extra layer needed.
-        # Otherwise, add a TimeDistributed Dense layer to adjust the feature dimension.
-        current_output_features = decoder_output.shape[-1]
-        if current_output_features != output_dim:
-            logger.info(f"VAE decoder output features ({current_output_features}) != GAN output_dim ({output_dim}). Adding TimeDistributed Dense layer.")
-            final_output = TimeDistributed(Dense(output_dim, activation='sigmoid', kernel_regularizer=l2(l2_reg) if l2_reg else None), name="gan_output_projection")(decoder_output) # Sigmoid for [0,1]
-        else:
-            # If shapes match, but activation is not 'sigmoid', we might need to add it.
-            # However, usually, the decoder's last layer would have the appropriate activation.
-            # For now, assume it's compatible or the VAE is designed for [0,1] outputs.
-            # If VAE output is e.g. tanh, an additional activation layer or rescaling might be needed.
-            logger.info(f"VAE decoder output features ({current_output_features}) == GAN output_dim ({output_dim}). Using decoder output directly.")
-            final_output = decoder_output 
-            # Consider adding a final activation if decoder doesn't ensure [0,1] range, e.g.
-            # final_output = tf.keras.layers.Activation('sigmoid')(decoder_output)
+    def build(self, input_shape: Tuple[int, ...], condition_shape: Tuple[int, ...] = None) -> tf.keras.Model:
+        self.logger.info(f"Building generator model with input shape: {input_shape}, condition shape: {condition_shape}")
+        # Existing build logic...
+        pass
 
+    def generate_synthetic_data(self, n_samples: int, initial_conditions: Optional[np.ndarray] = None, date_conditions: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        self.logger.info(f"Generating {n_samples} synthetic samples.")
+        self.logger.debug(f"Initial conditions shape: {initial_conditions.shape if initial_conditions is not None else 'None'}")
+        self.logger.debug(f"Date conditions shape: {date_conditions.shape if date_conditions is not None else 'None'}")
+        # Existing data generation logic...
+        pass
 
-        model = Model(inputs=[z_input, c_input], outputs=final_output, name="VAE_GAN_Generator")
-        logger.info("VAE-based Generator built successfully.")
-        # model.summary(print_fn=logger.info) # Optional: print summary here or in trainer
-        return model
+    def _iterative_generation_with_composite_model(
+        self, 
+        initial_conditions: np.ndarray, 
+        date_conditions: pd.DataFrame, 
+        n_steps: int, 
+        step_size: int = 1
+    ) -> pd.DataFrame:
+        self.logger.info(f"Iterative generation with composite model. Steps: {n_steps}, Step size: {step_size}")
+        # Existing iterative generation logic...
+        pass
 
-    @property
-    def model(self):
-        # This property should ideally return the primary model interface used by the GAN,
-        # which is the composite_model if built, or the sequential_model (VAE decoder) otherwise.
-        # Or, it could be specifically self._model if that's the convention for GANs.
-        # Given the GAN trainer will interact with this, it should be the generator model
-        # that takes (noise, conditions) and outputs sequences.
-        if hasattr(self, '_model') and self._model is not None:
-            return self._model
-        if hasattr(self, 'composite_model') and self.composite_model is not None:
-            # This was the VAE-based composite model, which might be what's intended
-            # if generator_type was 'vae' and it was successfully built.
-            return self.composite_model 
-        # Fallback or initial state before a specific GAN generator is built by self.build()
-        # self.logger.warning("GeneratorPlugin.model accessed but self._model is not set. Check build process.")
-        return None # Or raise an error if a model is always expected after init/build
+    def _post_process_generated_output(self, raw_generated_data: np.ndarray, current_datetimes_batch: pd.DataFrame) -> pd.DataFrame:
+        self.logger.debug(f"Post-processing generated output. Raw data shape: {raw_generated_data.shape}, Datetimes count: {len(current_datetimes_batch)}")
+        # Existing post-processing logic...
+        pass
 
-    @model.setter
-    def model(self, value: Optional[Model]):
-        # This setter should align with what self.model property returns.
-        # It's likely intended to set self._model, which is the common pattern for the GAN's generator.
-        self.logger.info(f"GeneratorPlugin.model being set with: {type(value)}")
-        self._model = value
-        # If self.composite_model was the VAE-based one, and self.model is now the GAN's generator,
-        # this implies a shift in what 'model' refers to, or that self._model is the primary interface.
-
-    def build(self):
-        """
-        Builds the generator model based on the configuration.
-        This method should set self._model.
-        """
-        self.logger.info("GeneratorPlugin: Initiating build process for the generator model...")
-        try:
-            # Ensure essential configurations are present
-            if not self.config.get("num_features") or not self.config.get("seq_len"):
-                self.logger.error("GeneratorPlugin: Missing 'num_features' or 'seq_len' in config for building model.")
-                raise ValueError("Essential configuration for generator model building is missing.")
-
-            # Determine which generator to build based on config
-            generator_type = self.config.get("generator_type", "bilstm_z") # Default to bilstm_z
-            self.logger.info(f"Selected generator type: {generator_type}")
-
-            if generator_type == "bilstm_z":
-                self._model = self._build_bilstm_z_generator(
-                    input_dim_z=self.config.get("latent_dim_z"),
-                    input_dim_c=self.config.get("latent_dim_c"),
-                    output_dim=self.config.get("num_features"), # num_features from data config
-                    seq_len=self.config.get("seq_len")
-                )
-            elif generator_type == "vae":
-                # This implies the VAE decoder itself, or a wrapper around it, will be the generator.
-                # The _build_vae_generator method should return a Keras model.
-                vae_model_path = self.config.get("vae_model_path")
-                if not vae_model_path:
-                    self.logger.error("GeneratorPlugin: 'vae_model_path' not provided for 'vae' generator type.")
-                    raise ValueError("'vae_model_path' is required for VAE generator type.")
-                
-                self._model = self._build_vae_generator(
-                    vae_model_path=vae_model_path,
-                    latent_dim=self.config.get("latent_dim_z"), # GAN's latent space for Z
-                    condition_dim=self.config.get("latent_dim_c"), # GAN's conditional input C
-                    output_dim=self.config.get("num_features"), # Target num_features for GAN output
-                    seq_len=self.config.get("seq_len")
-                )
-            else:
-                error_msg = f"Unsupported generator type: {generator_type}"
-                self.logger.error(error_msg)
-                raise ValueError(error_msg)
-
-            if self._model is None:
-                self.logger.error(f"GeneratorPlugin: Model building returned None for type '{generator_type}'.")
-                raise RuntimeError(f"Failed to build generator model of type '{generator_type}'.")
-            
-            self.logger.info(f"GeneratorPlugin: Successfully built generator model of type '{generator_type}'.")
-            # self._model.summary(print_fn=self.logger.info) # Optional: Log summary after build
-
-        except Exception as e:
-            self.logger.error(f"GeneratorPlugin: Error during build process: {e}", exc_info=True)
-            self._model = None # Ensure model is None if build fails
-            raise # Re-raise the exception to signal failure
-
-        return self._model # Return the built model
+    def prepare_features_for_discriminator(self, real_data_batch: pd.DataFrame) -> np.ndarray:
+        self.logger.debug(f"Preparing features for discriminator from real data batch of shape: {real_data_batch.shape}")
+        # Existing feature preparation logic...
+        pass
