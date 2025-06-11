@@ -13,7 +13,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from tensorflow.keras.optimizers import Adam
-
+from tensorflow.keras import backend as K # Add this import
 
 class TrainingCoordinator:
     """Coordinates GAN training process with proper orchestration."""
@@ -59,6 +59,8 @@ class TrainingCoordinator:
               batch_size: int = None, train_discriminator_n_times: int = 1, 
               train_generator_n_times: int = 1, save_interval: int = 500, 
               models_dir: str = "", plots_dir: str = "", metrics_dir: str = "",
+              lr_scheduler_g: Optional[tf.keras.callbacks.Callback] = None, # Add LR schedulers
+              lr_scheduler_d: Optional[tf.keras.callbacks.Callback] = None, # Add LR schedulers
               **kwargs) -> Dict[str, Any]:
         """
         Main training loop for GAN.
@@ -77,11 +79,13 @@ class TrainingCoordinator:
             models_dir: Directory to save models
             plots_dir: Directory to save plots
             metrics_dir: Directory to save metrics
+            lr_scheduler_g: Learning rate scheduler for the generator.
+            lr_scheduler_d: Learning rate scheduler for the discriminator.
         
         Returns:
             Training history dictionary
         """
-        self.logger.info(f"Starting GAN training for {epochs} epochs")
+        self.logger.info(f"Starting GAN training for {epochs} epochs with batch_size {batch_size}")
         
         # Use defaults if not provided
         if epochs is None:
@@ -95,30 +99,50 @@ class TrainingCoordinator:
         self._setup_optimizers()
         
         # Prepare real data for training
+        self.logger.info("Calling _prepare_real_data...")
         real_data = self._prepare_real_data(training_data) # Removed batch_size argument
+        self.logger.info(f"Real data preparation complete. Shape: {real_data.shape}")
         
+        self.logger.info("Starting training loop...")
         # Training loop
         for epoch in range(epochs):
             self.current_epoch = epoch
             epoch_start_time = time.time()
             
+            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting discriminator training step...")
             # Train discriminator
             d_loss = self._train_discriminator_step(
                 real_data, generator, discriminator, batch_size, train_discriminator_n_times
             )
+            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Discriminator training step completed. D_loss: {d_loss:.4f}")
             
+            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting generator training step...")
             # Train generator
             g_loss = self._train_generator_step(
                 gan_model, batch_size, train_generator_n_times
             )
+            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Generator training step completed. G_loss: {g_loss:.4f}")
             
             # Record training metrics
             epoch_time = time.time() - epoch_start_time
             self._record_epoch_metrics(epoch, g_loss, d_loss, epoch_time)
+
+            # Call ReduceLROnPlateau callbacks
+            if lr_scheduler_g:
+                lr_scheduler_g.on_epoch_end(epoch, logs={'g_loss': g_loss, 'lr': K.get_value(self.generator_optimizer.learning_rate)})
+            if lr_scheduler_d:
+                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss, 'lr': K.get_value(self.discriminator_optimizer.learning_rate)})
             
-            # Log progress
-            if epoch % 100 == 0:
-                self.logger.info(f"Epoch {epoch}/{epochs} - G_loss: {g_loss:.4f}, D_loss: {d_loss:.4f}, Time: {epoch_time:.2f}s")
+            # Log progress every epoch
+            log_interval_epochs = self.params.get("log_interval_epochs", 1)
+            if (epoch + 1) % log_interval_epochs == 0:
+                self.logger.info(
+                    f"Epoch {epoch+1}/{epochs} - "
+                    f"G_loss: {g_loss:.4f}, D_loss: {d_loss:.4f}, "
+                    f"G_LR: {K.get_value(self.generator_optimizer.learning_rate):.1e}, "
+                    f"D_LR: {K.get_value(self.discriminator_optimizer.learning_rate):.1e}, "
+                    f"Time: {epoch_time:.2f}s"
+                )
             
             # Save models at intervals
             if epoch % save_interval == 0 and epoch > 0:
@@ -146,11 +170,41 @@ class TrainingCoordinator:
         self.logger.debug(f"Input training_data_df shape: {training_data_df.shape}, columns: {training_data_df.columns.tolist()}")
 
         try:
-            processed_df = self.generator_plugin.prepare_features_for_discriminator(training_data_df)
-            if isinstance(processed_df, np.ndarray):
-                self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}")
-            else:
-                self.logger.info(f"Real data processed by GeneratorPlugin. Shape: {processed_df.shape}, Columns: {processed_df.columns.tolist()}")
+            # processed_data_df is the DataFrame returned by prepare_features_for_discriminator
+            processed_data_df = self.generator_plugin.prepare_features_for_discriminator(training_data)
+            # The log "Successfully prepared features..." is printed from the call above.
+            
+            self.logger.info("Converting processed DataFrame to NumPy array in chunks...")
+            num_rows = len(processed_data_df)
+            # You can configure this chunk size in your parameters if needed
+            chunk_size = self.params.get("data_conversion_chunk_size", 1000)
+            
+            if num_rows == 0:
+                self.logger.info("Processed DataFrame is empty. Returning an empty NumPy array.")
+                return np.array([])
+
+            num_chunks = (num_rows + chunk_size - 1) // chunk_size
+            np_arrays = []
+
+            self.logger.info(f"Will convert {num_rows} rows to NumPy in {num_chunks} chunks of approximately {chunk_size} rows each.")
+
+            # To add a tqdm progress bar here:
+            # 1. Make sure tqdm is installed: pip install tqdm
+            # 2. Import it at the top of the file: from tqdm import tqdm
+            # 3. Wrap range(num_chunks) with tqdm: for i in tqdm(range(num_chunks), desc="Converting to NumPy"):
+            for i in range(num_chunks):
+                start_idx = i * chunk_size
+                end_idx = min((i + 1) * chunk_size, num_rows)
+                df_chunk = processed_data_df.iloc[start_idx:end_idx]
+                np_arrays.append(df_chunk.to_numpy())
+                
+                # Log progress periodically (e.g., every 10% or last chunk)
+                if (i + 1) % max(1, num_chunks // 10) == 0 or (i + 1) == num_chunks:
+                    self.logger.info(f"Converted chunk {i+1}/{num_chunks} to NumPy array.")
+            
+            real_data_np = np.concatenate(np_arrays, axis=0)
+            self.logger.info(f"Conversion to NumPy array complete. Final shape: {real_data_np.shape}")
+            return real_data_np
         except Exception as e:
             self.logger.error(f"Error during generator_plugin.prepare_features_for_discriminator: {e}", exc_info=True)
             raise
@@ -192,20 +246,20 @@ class TrainingCoordinator:
         seq_len = self.params.get("seq_len", 144)
         
         # Create sequences from the data
-        sequences = []
+        # Using a more efficient way to create sequences with pre-allocated NumPy array
         num_samples, num_features = data_array.shape
+        num_sequences = num_samples - seq_len + 1
         
-        # Generate sequences of length seq_len
-        for i in range(num_samples - seq_len + 1):
-            sequence = data_array[i:i + seq_len]
-            sequences.append(sequence)
-        
-        if len(sequences) == 0:
+        if num_sequences <= 0:
             self.logger.error(f"Cannot create sequences of length {seq_len} from data with {num_samples} samples")
             raise ValueError(f"Not enough data to create sequences of length {seq_len}")
         
-        sequences_array = np.array(sequences)
-        self.logger.info(f"Created {len(sequences)} sequences of shape {sequences_array.shape}")
+        self.logger.info(f"Allocating memory for {num_sequences} sequences of shape ({seq_len}, {num_features}).")
+        sequences_array = np.empty((num_sequences, seq_len, num_features), dtype=data_array.dtype)
+        for i in range(num_sequences):
+            sequences_array[i] = data_array[i:i + seq_len]
+        
+        self.logger.info(f"Created {len(sequences_array)} sequences. Output shape {sequences_array.shape}")
         
         return sequences_array
     
