@@ -31,7 +31,7 @@ from .training_coordinator import TrainingCoordinator
 # from ..discriminator_plugin.discriminator_plugin import DiscriminatorPlugin # Example
 # from ..feeder_plugin.feeder_plugin import FeederPlugin # Example
 
-from app.utils.logging_utils import get_logger
+from app.utils.logging_utils import get_logger # Corrected import
 from tsg_plugins.plugin_base import PluginBase
 
 class GANTrainerPlugin(PluginBase):
@@ -116,9 +116,11 @@ class GANTrainerPlugin(PluginBase):
             feeder_plugin: Instance of FeederPlugin.
         """
         self.logger = logging.getLogger(__name__)
-        self.main_config = config.copy()
-        self.params = {} # Initialize before set_params
-        self._initialize_parameters() # Call to populate self.params from main_config and defaults
+        self.main_config = config.copy() # Store the global config
+        
+        # self.params will be populated by _initialize_parameters
+        self.params: Dict[str, Any] = {} 
+        self._initialize_parameters() # Populate self.params based on main_config and plugin_params
 
         # Store plugin instances
         if generator_plugin is None:
@@ -140,31 +142,34 @@ class GANTrainerPlugin(PluginBase):
         # Initialize TrainingCoordinator
         # Pass self.params which should now be populated
         self.training_coordinator = TrainingCoordinator(
-            params=self.params, 
-            logger=self.logger, # Pass logger to TrainingCoordinator
-            generator_plugin=self.generator_plugin # Pass the stored instance
+            main_config=self.main_config, # Pass main_config
+            plugin_params=self.params, 
+            generator_plugin=self.generator_plugin, 
+            discriminator_plugin=self.discriminator_plugin,
+            feeder_plugin=self.feeder_plugin,
+            device=None # Or determine device if needed
         )
         self.logger.info("GANTrainerPlugin initialized.")
 
-        self.generator_l2_reg = self.params.get("generator_l2_reg")
+        self.generator_l2_reg = self.params.get("generator_l2_reg") # This should now be correctly sourced
 
         # Initialize ReduceLROnPlateau callbacks
         if self.params.get("enable_reduce_lr_on_plateau"):
             self.lr_scheduler_g = ReduceLROnPlateau(
                 monitor=self.params.get("lr_monitor_metric_g", "g_loss"),
-                factor=self.params.get("lr_reduction_factor"),
-                patience=self.params.get("lr_patience"),
+                factor=self.params.get("lr_reduction_factor"), # Will be from resolved self.params
+                patience=self.params.get("lr_patience"),       # Will be from resolved self.params
                 verbose=1,
-                min_delta=self.params.get("lr_min_delta"),
-                min_lr=self.params.get("min_lr_g")
+                min_delta=self.params.get("lr_min_delta"),     # Will be from resolved self.params
+                min_lr=self.params.get("min_lr_g")             # Will be from resolved self.params
             )
             self.lr_scheduler_d = ReduceLROnPlateau(
                 monitor=self.params.get("lr_monitor_metric_d", "d_loss"),
-                factor=self.params.get("lr_reduction_factor"),
-                patience=self.params.get("lr_patience"),
+                factor=self.params.get("lr_reduction_factor"), # Will be from resolved self.params
+                patience=self.params.get("lr_patience"),       # Will be from resolved self.params
                 verbose=1,
-                min_delta=self.params.get("lr_min_delta"),
-                min_lr=self.params.get("min_lr_d")
+                min_delta=self.params.get("lr_min_delta"),     # Will be from resolved self.params
+                min_lr=self.params.get("min_lr_d")             # Will be from resolved self.params
             )
             # Associate models with schedulers - this needs to happen after models are compiled
             # We will call them manually in the training loop.
@@ -190,57 +195,98 @@ class GANTrainerPlugin(PluginBase):
             self.logger.info("Early stopping is disabled by configuration.")
 
     def _initialize_parameters(self):
-        self.logger.debug(f"GANTrainerPlugin: _initialize_parameters called.")
-        self.logger.debug(f"Initial plugin_params['gan_epochs']: {self.plugin_params.get('gan_epochs')}")
+        """
+        Initializes self.params by merging main_config with plugin_params,
+        ensuring correct precedence for all relevant training parameters.
+        Precedence:
+        1. main_config['trainer_<param>']
+        2. main_config['<param>']
+        3. main_config['<general_equivalent_param>'] (e.g., 'learning_rate' for 'generator_lr')
+        4. GANTrainerPlugin.plugin_params['<param>'] (class default)
+        5. Keras/hardcoded defaults (applied at point of use if still not found)
+        """
+        self.logger.debug("GANTrainerPlugin: Starting _initialize_parameters.")
+        resolved_params: Dict[str, Any] = {}
+
+        # Define parameter groups and their mappings
+        # target_key: (general_config_key, plugin_default_key_in_plugin_params)
+        param_mapping = {
+            # Optimizer params - Generator
+            "generator_lr": ("learning_rate", "generator_lr"),
+            "generator_beta1": ("beta1", "generator_beta1"),
+            "generator_beta2": ("beta2", None), # No default in plugin_params, general 'beta2' or Keras default
+            "generator_epsilon": ("epsilon", None),
+            "generator_amsgrad": ("amsgrad", None),
+            # Optimizer params - Discriminator
+            "discriminator_lr": ("learning_rate", "discriminator_lr"),
+            "discriminator_beta1": ("beta1", "discriminator_beta1"),
+            "discriminator_beta2": ("beta2", None),
+            "discriminator_epsilon": ("epsilon", None),
+            "discriminator_amsgrad": ("amsgrad", None),
+            # Training loop
+            "gan_epochs": ("gan_epochs", "gan_epochs"), # General key is same as specific
+            "gan_batch_size": ("gan_batch_size", "gan_batch_size"),
+            # Model specific
+            "generator_l2_reg": ("generator_l2_reg", "generator_l2_reg"),
+            # Callbacks / Other - Add all keys from plugin_params here to ensure they are processed
+        }
+
+        # Ensure all keys from plugin_params are in the mapping to be processed
+        for p_key in self.plugin_params.keys():
+            if p_key not in param_mapping:
+                # For params like 'es_patience', general key is itself, plugin default key is itself
+                param_mapping[p_key] = (p_key, p_key)
         
-        self.params = self.plugin_params.copy()
-        self.logger.debug(f"self.params after copy from plugin_params - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
+        main_cfg = self.main_config if hasattr(self, 'main_config') and self.main_config else {}
+        plugin_defaults = self.plugin_params
 
-        if hasattr(self, 'main_config') and self.main_config is not None:
-            self.logger.debug(f"main_config available. main_config.get('gan_epochs'): {self.main_config.get('gan_epochs')}")
-            self.logger.debug(f"main_config.get('trainer_gan_epochs'): {self.main_config.get('trainer_gan_epochs')}")
+        for target_key, (general_key, plugin_default_key) in param_mapping.items():
+            value = None
+            found_source = ""
 
-            # Phase 1: Apply direct/general parameters from main_config
-            # These are keys in main_config that are also in self.params (plugin_params keys)
-            # OR general keys (not prefixed for other specific plugins).
-            for key, value in self.main_config.items():
-                is_plugin_default_key = key in self.params # Check if 'key' is a direct parameter name defined in plugin_params
-                is_general_app_key = not key.startswith(("generator_", "discriminator_", "feeder_", "trainer_")) # Check if it's a general key
-
-                if key == 'gan_epochs': # Specific log for gan_epochs
-                    self.logger.debug(f"Processing 'gan_epochs' in main_config Phase 1. Value: {value}. is_plugin_default_key: {is_plugin_default_key}")
-
-                if is_plugin_default_key:
-                    # If the key from main_config matches a key in plugin_params, update it.
-                    # e.g., if main_config has "gan_epochs", it updates self.params["gan_epochs"]
-                    self.params[key] = value
-                    if key == 'gan_epochs':
-                        self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 1.")
-                elif is_general_app_key:
-                    # If it's a general key not defined in plugin_params and not for other plugins, add it.
-                    # This allows passing through other general configurations.
-                    self.params[key] = value
+            # 1. Check 'trainer_<target_key>' in main_config
+            trainer_specific_key = f"trainer_{target_key}"
+            if trainer_specific_key in main_cfg:
+                value = main_cfg[trainer_specific_key]
+                found_source = f"main_config['{trainer_specific_key}']"
             
-            self.logger.debug(f"self.params after Phase 1 - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
+            # 2. Check '<target_key>' in main_config
+            if value is None and target_key in main_cfg:
+                value = main_cfg[target_key]
+                found_source = f"main_config['{target_key}']"
             
-            # Phase 2: Apply trainer-specific prefixed parameters from main_config.
-            # These are intended to override values set in Phase 1 if they map to the same parameter name.
-            trainer_prefix = "trainer_"
-            for key, value in self.main_config.items():
-                if key.startswith(trainer_prefix):
-                    param_key = key[len(trainer_prefix):]
-                    # Only apply if param_key corresponds to an original parameter name in plugin_params.
-                    # This ensures that `trainer_` prefixed keys specifically target existing plugin params.
-                    if param_key == 'gan_epochs': # Specific log
-                        self.logger.debug(f"Processing prefixed key '{key}' (param_key 'gan_epochs') in main_config Phase 2. Value: {value}.")
-                    if param_key in self.plugin_params: 
-                        self.params[param_key] = value
-                        if param_key == 'gan_epochs':
-                             self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 2 from prefixed key '{key}'.")
-        else:
-            self.logger.debug("main_config not available in _initialize_parameters.")
+            # 3. Check '<general_key>' in main_config (if different from target_key)
+            if value is None and general_key and general_key != target_key and general_key in main_cfg:
+                value = main_cfg[general_key]
+                found_source = f"main_config['{general_key}'] (for {target_key})"
+
+            # 4. Use plugin_params default if plugin_default_key is defined
+            if value is None and plugin_default_key and plugin_default_key in plugin_defaults:
+                value = plugin_defaults[plugin_default_key]
+                found_source = f"plugin_params['{plugin_default_key}']"
+            
+            if value is not None:
+                resolved_params[target_key] = value
+                self.logger.debug(f"Resolved param '{target_key}': {value} (from {found_source})")
+            else:
+                self.logger.debug(f"Param '{target_key}' not resolved by specific rules, will rely on usage-site defaults if any.")
+
+        # Add any other general keys from main_config that weren't specifically mapped/processed
+        # and are not prefixed for other plugins.
+        for key, m_value in main_cfg.items():
+            if key not in resolved_params:
+                # Check if it's a general key or a trainer_ prefixed key not yet handled
+                is_general = not any(key.startswith(p) for p in ["generator_", "discriminator_", "feeder_"])
+                is_unhandled_trainer_key = key.startswith("trainer_") and key[len("trainer_"):] not in resolved_params
+                
+                if is_general or is_unhandled_trainer_key:
+                    actual_key_to_set = key[len("trainer_"):] if is_unhandled_trainer_key else key
+                    if actual_key_to_set not in resolved_params: # Avoid double setting
+                       resolved_params[actual_key_to_set] = m_value
+                       self.logger.debug(f"Added general/unhandled trainer param '{actual_key_to_set}': {m_value} from main_config")
         
-        self.logger.info(f"GANTrainerPlugin params fully initialized. Final self.params.get('gan_epochs'): {self.params.get('gan_epochs')}")
+        self.params = resolved_params
+        self.logger.info(f"GANTrainerPlugin params fully initialized. Example - generator_lr: {self.params.get('generator_lr')}, gan_epochs: {self.params.get('gan_epochs')}")
 
     def set_params(self, **kwargs) -> None:
         """
@@ -359,11 +405,18 @@ class GANTrainerPlugin(PluginBase):
                                  f"num_vars: {len(disc_layer_in_gan.variables)}, "
                                  f"num_trainable_vars: {len(disc_layer_in_gan.trainable_variables)}")
             
+            # Keras Adam defaults for fallback if a param is entirely missing
+            keras_adam_defaults = {"beta_1": 0.9, "beta_2": 0.999, "epsilon": 1e-7, "amsgrad": False}
+            default_lr = 1e-4 # Final fallback LR for optimizers if not found in params
+
             generator_optimizer_config = {
-                'learning_rate': self.params.get('generator_lr', 1e-4), # Corrected key
-                'beta_1': self.params.get('generator_beta1', 0.5)     # Corrected key
+                'learning_rate': self.params.get('generator_lr', default_lr),
+                'beta_1': self.params.get('generator_beta1', keras_adam_defaults['beta_1']),
+                'beta_2': self.params.get('generator_beta2', keras_adam_defaults['beta_2']),
+                'epsilon': self.params.get('generator_epsilon', keras_adam_defaults['epsilon']),
+                'amsgrad': self.params.get('generator_amsgrad', keras_adam_defaults['amsgrad'])
             }
-            self.logger.info(f"GANTrainer: Generator optimizer config for GAN: {generator_optimizer_config}")
+            self.logger.info(f"GANTrainer: Compiling GAN model with Generator optimizer config: {generator_optimizer_config}")
             gan_optimizer = tf.keras.optimizers.Adam(**generator_optimizer_config)
 
             self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
@@ -440,6 +493,17 @@ class GANTrainerPlugin(PluginBase):
                 self.logger.info("lr_scheduler_d is None, not linking.")
             if not self.discriminator_model:
                 self.logger.warning("self.discriminator_model is None, cannot link lr_scheduler_d.")
+        
+        # Prepare callbacks list
+        callbacks_list = []
+        if self.lr_scheduler_g:
+            callbacks_list.append(self.lr_scheduler_g)
+        if self.lr_scheduler_d:
+            callbacks_list.append(self.lr_scheduler_d)
+        if self.early_stopping_callback:
+            callbacks_list.append(self.early_stopping_callback)
+        
+        self.logger.info(f"Passing {len(callbacks_list)} callbacks to TrainingCoordinator: {[type(cb).__name__ for cb in callbacks_list]}")
 
         # Prepare directories
         models_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_model_dir", "models"))
@@ -448,24 +512,17 @@ class GANTrainerPlugin(PluginBase):
         os.makedirs(models_dir, exist_ok=True)
         os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(metrics_dir, exist_ok=True)
-        self.logger.info(f"Models will be saved to: {models_dir}")
 
-        # Pass the actual model instances to the training coordinator
+        # Delegate to TrainingCoordinator
+        self.logger.info("Calling TrainingCoordinator.train()...")
         history = self.training_coordinator.train(
+            gan_model=self.gan_model,
             generator=self.generator_model,
             discriminator=self.discriminator_model,
-            gan_model=self.gan_model, # Pass the combined GAN model
-            feeder_plugin=self.feeder_plugin, # Pass feeder_plugin
-            training_data=training_data,
+            dataset=training_data, # This is the pd.DataFrame, FeederPlugin will handle conversion
             epochs=current_epochs,
             batch_size=current_batch_size,
-            save_interval=self.params.get("gan_save_interval", 500),
-            models_dir=models_dir, # Pass the constructed models_dir
-            plots_dir=plots_dir,
-            metrics_dir=metrics_dir,
-            lr_scheduler_g=self.lr_scheduler_g, # Pass the LR scheduler for G
-            lr_scheduler_d=self.lr_scheduler_d, # Pass the LR scheduler for D
-            early_stopping_callback=self.early_stopping_callback # Pass the EarlyStopping callback
+            callbacks=callbacks_list # Pass the compiled list of callbacks
         )
         return history
 

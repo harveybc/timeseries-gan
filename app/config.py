@@ -187,7 +187,7 @@ DEFAULT_VALUES = {
     "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler
     "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
     "lr_reduction_factor": 0.1,   # Factor by which LR is reduced
-    "lr_patience": 10,            # Epochs with no improvement before LR is reduced
+    "lr_patience": 40,            # Epochs with no improvement before LR is reduced
     "lr_min_delta": 0.0001,       # Minimum change to qualify as an improvement
     "min_lr_g": 1e-7,             # Minimum LR for generator
     "min_lr_d": 1e-7,             # Minimum LR for discriminator
