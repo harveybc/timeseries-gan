@@ -43,6 +43,7 @@ DEFAULT_VALUES = {
     "feeder_sampling_method": "standard_normal", 
     "feeder_encoder_sampling_technique": "direct", 
     "encoder_model_path": "examples/results/phase_4_3/phase_4_3_cnn_small_encoder_model.keras", 
+    "decoder_model_path": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", 
     "feeder_feature_columns_for_encoder": [], 
     "feeder_real_data_file_has_header": True,
     "feeder_datetime_col_in_real_data": "DATE_TIME",
@@ -63,11 +64,23 @@ DEFAULT_VALUES = {
     "context_vector_dim": 64,  # Added: Context vector dimension (same as feeder_context_vector_dim)
 
     # --- Parameters for GeneratorPlugin ---
-    "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
-    "discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
-    "save_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
+    # Path to a pre-trained full generator model (if available, otherwise one is built)
+    "generator_model_path": None, # Explicitly set to None for building new
+    # Path to the VAE DECODER model, used when building a new generator
+    "generator_vae_decoder_model_path_param": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras",
+    # Path to a pre-trained discriminator model (if available, otherwise one is built)
+    "discriminator_model_path": None, # Explicitly set to None for building new
+
+    # Default save paths for newly trained models
+    "save_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_generator_model.keras",
     "save_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
     
+    # Old parameter, potentially remove or ensure it's not misused.
+    # For now, ensure GeneratorPlugin uses generator_vae_decoder_model_path_param
+    "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", # Retained for now, but ensure clarity
+    "discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
+
+
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
         "DATE_TIME", 
@@ -127,7 +140,7 @@ DEFAULT_VALUES = {
     ],
 
     # Training parameters
-    "learning_rate": 0.0002,
+    "learning_rate": 0.001,
     "beta1": 0.5,
     "beta2": 0.999,
     "epsilon": 1e-8,

@@ -20,7 +20,7 @@ import logging
 import time
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.callbacks import ReduceLROnPlateau # Import ReduceLROnPlateau
+from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping # Import EarlyStopping
 from tensorflow.keras import backend as K # Import Keras backend
 import pandas as pd
 from typing import Dict, Any, List, Optional, Tuple
@@ -173,6 +173,21 @@ class GANTrainerPlugin(PluginBase):
             self.lr_scheduler_d = None
         
         self.feeder_plugin = feeder_plugin # Store feeder plugin
+
+        # Initialize EarlyStopping callback
+        self.early_stopping_callback = None
+        if self.params.get("enable_early_stopping"):
+            self.logger.info(f"Early stopping enabled. Metric: {self.params.get('es_monitor_metric')}, Patience: {self.params.get('es_patience')}")
+            self.early_stopping_callback = EarlyStopping(
+                monitor=self.params.get("es_monitor_metric", "g_loss"),
+                min_delta=self.params.get("es_min_delta", 0.001),
+                patience=self.params.get("es_patience", 50), # Defaulted to 50 from 200 for quicker testing if needed
+                verbose=1,
+                mode='min', # Assuming lower loss is better
+                restore_best_weights=self.params.get("es_restore_best_weights", False) # Default to False
+            )
+        else:
+            self.logger.info("Early stopping is disabled by configuration.")
 
     def _initialize_parameters(self):
         """Initialize self.params from main_config and plugin_params defaults."""
@@ -371,43 +386,28 @@ class GANTrainerPlugin(PluginBase):
              self.training_coordinator.set_params(**self.params)
 
         try:
-            # Initialize ReduceLROnPlateau callback
-            # Ensure that the monitored value 'val_loss' is available from the validation step if used.
-            # If not using validation data in the same way, this might need adjustment,
-            # or monitor 'd_loss' or 'g_loss' if more appropriate and available.
-            # For now, let's assume we want to monitor a general loss, e.g., G_loss.
-            # We will pass G_loss to the callback at the end of each epoch.
-            reduce_lr_g = ReduceLROnPlateau(
-                monitor='g_loss',  # Monitor G_loss
-                factor=self.params.get("lr_reduction_factor", 0.2),
-                patience=self.params.get("lr_patience", 5),
-                verbose=1,
-                mode='min', # Assuming lower G_loss is better
-                min_delta=self.params.get("lr_min_delta", 0.0001),
-                cooldown=self.params.get("reduce_lr_cooldown", 0),
-                min_lr=self.params.get("min_lr_g", 0)
-            )
-            reduce_lr_d = ReduceLROnPlateau(
-                monitor='d_loss', # Monitor D_loss
-                factor=self.params.get("lr_reduction_factor", 0.2),
-                patience=self.params.get("lr_patience", 5),
-                verbose=1,
-                mode='min', # Assuming lower D_loss is better
-                min_delta=self.params.get("lr_min_delta", 0.0001),
-                cooldown=self.params.get("reduce_lr_cooldown", 0),
-                min_lr=self.params.get("min_lr_d", 0)
-            )
+            # Ensure models are set for the ReduceLROnPlateau callbacks initialized in __init__
+            if self.lr_scheduler_g and self.generator_model:
+                self.lr_scheduler_g.set_model(self.generator_model)
+                self.logger.info(f"Set generator_model for self.lr_scheduler_g. Monitored metric: {self.lr_scheduler_g.monitor}")
+            if self.lr_scheduler_d and self.discriminator_model:
+                self.lr_scheduler_d.set_model(self.discriminator_model)
+                self.logger.info(f"Set discriminator_model for self.lr_scheduler_d. Monitored metric: {self.lr_scheduler_d.monitor}")
 
-            # Set the models for the callbacks
-            reduce_lr_g.set_model(self.generator_model)
-            reduce_lr_d.set_model(self.discriminator_model)
+            # Set model for EarlyStopping callback if it exists
+            if self.early_stopping_callback and self.generator_model: # Assuming generator_model is primary for ES
+                self.early_stopping_callback.set_model(self.generator_model) 
+                self.logger.info(f"Set generator_model for self.early_stopping_callback. Monitored metric: {self.early_stopping_callback.monitor}")
 
             history = self.training_coordinator.train(
                 training_data=training_data,
                 generator=self.generator_model,
                 discriminator=self.discriminator_model,
                 gan_model=self.gan_model,
-                feeder_plugin=self.feeder_plugin 
+                feeder_plugin=self.feeder_plugin,
+                lr_scheduler_g=self.lr_scheduler_g, # Pass LR schedulers
+                lr_scheduler_d=self.lr_scheduler_d, # Pass LR schedulers
+                early_stopping_callback=self.early_stopping_callback # Pass ES callback
             )
             self.logger.info("GANTrainerPlugin: Training completed by TrainingCoordinator.")
             return history

@@ -15,6 +15,7 @@ import pandas as pd
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K # Add this import
 from tqdm import tqdm # Import tqdm
+import os # Import os for path joining
 
 class TrainingCoordinator:
     """Coordinates GAN training process with proper orchestration."""
@@ -60,8 +61,9 @@ class TrainingCoordinator:
               batch_size: int = None, train_discriminator_n_times: int = 1, 
               train_generator_n_times: int = 1, save_interval: int = 500, 
               models_dir: str = "", plots_dir: str = "", metrics_dir: str = "",
-              lr_scheduler_g: Optional[tf.keras.callbacks.Callback] = None, # Add LR schedulers
-              lr_scheduler_d: Optional[tf.keras.callbacks.Callback] = None, # Add LR schedulers
+              lr_scheduler_g: Optional[tf.keras.callbacks.Callback] = None,
+              lr_scheduler_d: Optional[tf.keras.callbacks.Callback] = None,
+              early_stopping_callback: Optional[tf.keras.callbacks.Callback] = None, # Add early_stopping_callback
               **kwargs) -> Dict[str, Any]:
         """
         Main training loop for GAN.
@@ -82,6 +84,7 @@ class TrainingCoordinator:
             metrics_dir: Directory to save metrics
             lr_scheduler_g: Learning rate scheduler for the generator.
             lr_scheduler_d: Learning rate scheduler for the discriminator.
+            early_stopping_callback: Early stopping callback.
         
         Returns:
             Training history dictionary
@@ -99,11 +102,35 @@ class TrainingCoordinator:
         # Setup optimizers
         self._setup_optimizers()
 
-        # Print model summaries
-        self.logger.info("Generator Model Summary:")
-        generator.summary(print_fn=self.logger.info)
-        self.logger.info("Discriminator Model Summary:")
-        discriminator.summary(print_fn=self.logger.info)
+        # Assign the TrainingCoordinator's optimizers to the models held by the LR schedulers.
+        # This allows ReduceLROnPlateau to find model.optimizer.learning_rate.
+        self.logger.info("Linking TrainingCoordinator's optimizers to models held by LR schedulers.")
+        if lr_scheduler_g:
+            if lr_scheduler_g.model: # model attribute is set by GANTrainerPlugin via set_model()
+                lr_scheduler_g.model.optimizer = self.generator_optimizer
+                self.logger.info(f"Assigned training_coordinator.generator_optimizer to lr_scheduler_g.model ({lr_scheduler_g.model.name}).")
+            else:
+                self.logger.warning("lr_scheduler_g was passed but has no .model attribute set. Cannot link optimizer.")
+        
+        if lr_scheduler_d:
+            if lr_scheduler_d.model: # model attribute is set by GANTrainerPlugin via set_model()
+                lr_scheduler_d.model.optimizer = self.discriminator_optimizer
+                self.logger.info(f"Assigned training_coordinator.discriminator_optimizer to lr_scheduler_d.model ({lr_scheduler_d.model.name}).")
+            else:
+                self.logger.warning("lr_scheduler_d was passed but has no .model attribute set. Cannot link optimizer.")
+
+        # Call on_train_begin for EarlyStopping callback if it exists
+        if early_stopping_callback:
+            self.logger.info("Calling on_train_begin for EarlyStopping callback.")
+            early_stopping_callback.on_train_begin(logs=None) # Initialize EarlyStopping callback
+
+        # Print model summaries directly to stdout for diagnosis
+        self.logger.info("Attempting to print Generator Model Summary (if logger is working)...")
+        print("\nGenerator Model Summary (direct print):")
+        generator.summary() # Prints to stdout by default
+        self.logger.info("Attempting to print Discriminator Model Summary (if logger is working)...")
+        print("\nDiscriminator Model Summary (direct print):")
+        discriminator.summary() # Prints to stdout by default
         
         # Prepare real data for training
         self.logger.info("Calling _prepare_real_data...")
@@ -162,6 +189,24 @@ class TrainingCoordinator:
             if lr_scheduler_d:
                 lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss_avg, 'lr': K.get_value(self.discriminator_optimizer.learning_rate)})
             
+            # Handle Early Stopping
+            if early_stopping_callback:
+                monitor_metric_name = self.params.get("es_monitor_metric", "g_loss")
+                current_metric_value = g_loss # Default to g_loss
+                if monitor_metric_name == "d_loss":
+                    current_metric_value = d_loss_avg
+                elif monitor_metric_name == "combined_loss": # Example if we had a combined loss
+                    current_metric_value = (g_loss + d_loss_avg) / 2
+                
+                logs_for_es = {monitor_metric_name: current_metric_value}
+                early_stopping_callback.on_epoch_end(epoch, logs=logs_for_es)
+                if early_stopping_callback.model and getattr(early_stopping_callback.model, 'stop_training', False):
+                    self.logger.info(f"Early stopping triggered at epoch {epoch+1} "
+                                     f"monitoring '{monitor_metric_name}' with value {current_metric_value:.4f}.")
+                    # Save models before breaking, as this is the last state due to early stopping
+                    self._save_checkpoint(epoch + 1, generator, discriminator, gan_model, models_dir, is_final_save=True)
+                    break # Exit training loop
+            
             # Log progress every epoch
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
@@ -181,11 +226,18 @@ class TrainingCoordinator:
                 log_msg += f"Time: {epoch_time:.2f}s"
                 self.logger.info(log_msg)
             
-            # Save models at intervals
-            if epoch % save_interval == 0 and epoch > 0:
-                self._save_checkpoint(epoch, generator, discriminator, gan_model, models_dir)
+            # Save models at intervals - THIS SECTION IS REMOVED
+            # if epoch % save_interval == 0 and epoch > 0:
+            #     self._save_checkpoint(epoch, generator, discriminator, gan_model, models_dir)
         
         self.logger.info("GAN training completed")
+        
+        # Save final models after the training loop finishes,
+        # unless early stopping already saved and exited.
+        if not (early_stopping_callback and early_stopping_callback.model and getattr(early_stopping_callback.model, 'stop_training', False)):
+            self.logger.info(f"Saving final models after {epochs} epochs...")
+            self._save_checkpoint(epochs, generator, discriminator, gan_model, models_dir, is_final_save=True)
+
         return self.training_history
     
     def _prepare_real_data(self, training_data: pd.DataFrame) -> np.ndarray:
@@ -507,26 +559,59 @@ class TrainingCoordinator:
         self.training_history['discriminator_losses'].append(d_loss)
         self.training_history['timestamps'].append(time.time())
     
-    def _save_checkpoint(self, epoch: int, generator: tf.keras.Model,
-                        discriminator: tf.keras.Model, gan_model: tf.keras.Model,
-                        models_dir: str):
-        """Save model checkpoint."""
-        try:
-            import os
+    def _save_checkpoint(self, epoch: int, generator: tf.keras.Model, 
+                         discriminator: tf.keras.Model, gan_model: tf.keras.Model, 
+                         models_dir: str, is_final_save: bool = False): # Add is_final_save flag
+        """
+        Save model checkpoints. If is_final_save is True, uses specific filenames from config.
+        
+        Args:
+            epoch: Current epoch number
+            generator: Generator model
+            discriminator: Discriminator model
+            gan_model: Combined GAN model
+            models_dir: Directory to save models
+            is_final_save: Boolean, if True, save with final configured names.
+        """
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
+            self.logger.info(f"Created models directory: {models_dir}")
+
+        if is_final_save:
+            gen_filename = self.params.get("save_generator_sequential_model_file", f"generator_final_epoch_{epoch}.keras")
+            disc_filename = self.params.get("save_discriminator_sequential_model_file", f"discriminator_final_epoch_{epoch}.keras")
+            # GAN model saving is not explicitly requested for final named files, but we can add if needed.
+            # gan_filename = self.params.get("save_gan_sequential_model_file", f"gan_final_epoch_{epoch}.keras")
             
-            generator_path = os.path.join(models_dir, f"generator_epoch_{epoch}.keras")
-            discriminator_path = os.path.join(models_dir, f"discriminator_epoch_{epoch}.keras")
-            gan_path = os.path.join(models_dir, f"gan_epoch_{epoch}.keras")
+            generator_save_path = os.path.join(models_dir, gen_filename)
+            discriminator_save_path = os.path.join(models_dir, disc_filename)
+            # gan_save_path = os.path.join(models_dir, gan_filename)
+
+            self.logger.info(f"Saving final generator model to: {generator_save_path}")
+            generator.save(generator_save_path)
+            self.logger.info(f"Saving final discriminator model to: {discriminator_save_path}")
+            discriminator.save(discriminator_save_path)
+            # self.logger.info(f"Saving final GAN model to: {gan_save_path}")
+            # gan_model.save(gan_save_path)
+            self.logger.info(f"Final models saved for epoch {epoch}.")
+        else:
+            # This part is for intermediate saving, which was removed from the main loop.
+            # If re-enabled, it would use epoch-based template names.
+            # For now, this 'else' branch might not be hit if save_interval logic is removed.
+            gen_template = self.params.get("save_generator_epoch_template", "generator_epoch_{epoch}.keras")
+            disc_template = self.params.get("save_discriminator_epoch_template", "discriminator_epoch_{epoch}.keras")
+            gan_template = self.params.get("save_gan_epoch_template", "gan_epoch_{epoch}.keras")
+
+            generator_save_path = os.path.join(models_dir, gen_template.format(epoch=epoch))
+            discriminator_save_path = os.path.join(models_dir, disc_template.format(epoch=epoch))
+            gan_save_path = os.path.join(models_dir, gan_template.format(epoch=epoch))
             
-            generator.save(generator_path)
-            discriminator.save(discriminator_path)
-            gan_model.save(gan_path)
-            
-            self.logger.info(f"Checkpoint saved at epoch {epoch}")
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to save checkpoint: {e}")
-    
+            self.logger.info(f"Saving checkpoint models for epoch {epoch}...")
+            generator.save(generator_save_path)
+            discriminator.save(discriminator_save_path)
+            gan_model.save(gan_save_path) # Save the combined GAN model as well
+            self.logger.info(f"Checkpoint models saved for epoch {epoch} to {models_dir}")
+
     def get_debug_info(self) -> Dict[str, Any]:
         """Get debug information."""
         return {

@@ -41,6 +41,7 @@ class GeneratorPlugin(PluginBase):
     plugin_name_prefix = "generator_"
     plugin_params = {
         "sequential_model_file": None, # This will be the VAE DECODER path
+        "vae_decoder_model_path_param": None, # Explicit param for VAE decoder path
         "decoder_input_window_size": 144, # Output sequence length from VAE Decoder
         "full_feature_names_ordered": [],
         "decoder_output_feature_names": [],
@@ -206,10 +207,11 @@ class GeneratorPlugin(PluginBase):
         self.logger.info(f"Loading generator model from path: {self.params.get('generator_model_path')}")
         if not self.params.get('generator_model_path'):
             self.logger.warning("Generator model path not provided. Building a new VAE-based generator.")
-            vae_decoder_path = self.params.get('sequential_model_file')
+            # Use the new explicit parameter for the VAE decoder path
+            vae_decoder_path = self.params.get('vae_decoder_model_path_param') 
             if not vae_decoder_path:
-                self.logger.error("VAE decoder model path ('sequential_model_file') not provided. Cannot build generator.")
-                raise ValueError("VAE decoder model path is required to build the generator.")
+                self.logger.error("VAE decoder model path ('vae_decoder_model_path_param') not provided. Cannot build generator.")
+                raise ValueError("VAE decoder model path ('vae_decoder_model_path_param') is required to build the generator.")
 
             try:
                 self.logger.info(f"Loading VAE decoder from: {vae_decoder_path}")
@@ -834,41 +836,50 @@ class GeneratorPlugin(PluginBase):
         Returns:
             Sequences array (n_samples, 144, 51)
         """
-        sequence_length = 144
+        sequence_length = 144;
         
         # Create sequences by repeating and slightly varying the base features
-        sequences = np.zeros((n_samples, sequence_length, 51))
+        sequences = np.zeros((n_samples, sequence_length, 51));
         
-        for i in range(n_samples):
-            base_features = expanded_data[i]  # (51,)
+        for i in range(n_samples): # Corrected { to :
+            base_features = expanded_data[i];  # (51,)
             
             # Create a sequence by adding small random variations to base features
             for t in range(sequence_length):
                 # Add small random walk to create realistic time series
-                noise_factor = 0.01  # Small noise to create variation
-                time_decay = np.exp(-t * 0.01)  # Slight decay over time
+                noise_factor = 0.01;  # Small noise to create variation
+                time_decay = np.exp(-t * 0.01);  # Slight decay over time
                 
                 # Apply noise and time variation
-                variation = np.random.normal(0, noise_factor, 51) * time_decay
-                sequences[i, t] = base_features + variation
+                variation = np.random.normal(0, noise_factor, 51) * time_decay;
+                sequences[i, t] = base_features + variation;
                 
                 # For OHLC features, ensure realistic price relationships
-                if t > 0:
+                if t > 0: # Corrected { to :
                     # Keep OHLC within reasonable bounds relative to previous timestep
-                    prev_close = sequences[i, t-1, 3]  # Previous close
+                    prev_close = sequences[i, t-1, 3];  # Previous close
                     
                     # Adjust current OHLC to be realistic relative to previous close
-                    price_change = np.random.normal(0, 0.02)  # 2% typical price change
-                    new_close = prev_close * (1 + price_change)
+                    price_change = np.random.normal(0, 0.02);  # 2% typical price change
+                    new_close = prev_close * (1 + price_change);
                     
                     # Generate realistic OHLC around the new close
-                    sequences[i, t, 0] = prev_close  # Open = previous close
-                    sequences[i, t, 3] = new_close   # Close
+                    sequences[i, t, 0] = prev_close;  # Open = previous close
+                    sequences[i, t, 3] = new_close;   # Close
                     
                     # High and Low around open/close
-                    high_low_range = abs(new_close - prev_close) * 1.5
-                    sequences[i, t, 1] = max(prev_close, new_close) + np.random.uniform(0, high_low_range)  # High
-                    sequences[i, t, 2] = min(prev_close, new_close) - np.random.uniform(0, high_low_range)  # Low
+                    high_low_range = abs(new_close - prev_close) * 1.5;
+                    sequences[i, t, 1] = max(prev_close, new_close) + np.random.uniform(0, high_low_range);  # High
+                    sequences[i, t, 2] = min(prev_close, new_close) - np.random.uniform(0, high_low_range);  # Low
         
-        self.logger.debug(f"Created sequences shape: {sequences.shape}")
         return sequences
+
+# Ensure any subsequent methods are correctly defined and indented.
+# For example:
+#
+# class SomeOtherClass:
+#     def another_method(self):
+#         pass
+#
+# def top_level_function():
+#     pass

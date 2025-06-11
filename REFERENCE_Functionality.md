@@ -70,6 +70,15 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 *   **Feature Consistency**: A critical step (`prepare_features_for_discriminator` method in `GeneratorPlugin`) ensures that real data fed to the discriminator undergoes the same feature engineering (technical indicators, cyclical features, ordering, and padding to 51 features) as the synthetic data. This guarantees the discriminator receives inputs of shape `(batch_size, sequence_length, 51)`.
 *   **Regularization**: Specific L2 regularization is applied to the generator, while the discriminator generally avoids explicit regularization to maintain a balance in training.
 *   **Learning Rate Scheduling**: `ReduceLROnPlateau` is used for dynamic learning rate adjustment for both generator and discriminator.
+    *   Callbacks are configured in `GANTrainerPlugin` and monitor `g_loss` and `d_loss`.
+    *   `TrainingCoordinator` calls their `on_epoch_end` method after each epoch.
+*   **Early Stopping (Planned)**:
+    *   Parameters for early stopping are configured in `GANTrainerPlugin`.
+    *   **Status**: Integration into the training loop in `TrainingCoordinator` is pending.
+*   **Model Saving**:
+    *   The `TrainingCoordinator` saves the generator, discriminator, and the combined GAN model (for generator training) once after all training epochs complete.
+    *   Filenames are epoch-based (e.g., `generator_epoch_{total_epochs}.keras`) within the configured `models_dir`.
+    *   Alignment with specific final model paths from `app/config.py` (like `save_generator_sequential_model_file`) is pending for the final save action.
 
 ## 3. Operational Modes Detailed
 
@@ -78,14 +87,16 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 *   **Purpose**: To train the GAN, specifically improving the Composite GAN Generator and the Discriminator through adversarial learning.
 *   **Core Process**:
     1.  Load real training and validation data.
-    2.  Load the pre-trained VAE decoder.
-    3.  Initialize/build the Composite GAN Generator (incorporating the VAE decoder and the BiLSTM Z-generator) and the Discriminator.
-    4.  Iteratively train the Generator and Discriminator:
-        *   Generator produces synthetic data based on noise and conditions.
-        *   Discriminator is trained to distinguish real (processed to 51 features) from synthetic data.
-        *   Generator is trained to fool the Discriminator.
-    5.  Save trained model checkpoints and final models.
-*   **Key Inputs**: Real training data, pre-trained VAE decoder model file.
+    2.  Load the pre-trained VAE decoder (specified by `config["decoder_model_path"]`) into the `GeneratorPlugin`. The VAE decoder is set to `trainable=True` for fine-tuning.
+    3.  The `GeneratorPlugin` builds the composite GAN generator, which includes the VAE decoder and an internal BiLSTM Z-generator.
+    4.  The `DiscriminatorPlugin` builds the discriminator model.
+    5.  The `GANTrainerPlugin` orchestrates the training via `TrainingCoordinator`:
+        *   Iterative training of discriminator and generator.
+        *   Detailed per-epoch logging (losses, learning rates, timing, `ReduceLROnPlateau` info).
+        *   Dynamic learning rate adjustment using `ReduceLROnPlateau`.
+        *   (Planned: Early stopping).
+    6.  Save trained model checkpoints (currently one final save after all epochs) to `models_dir`. The generator saved is the full composite GAN generator.
+*   **Key Inputs**: Real training data, pre-trained VAE decoder model file (`config["decoder_model_path"]`).
 *   **Key Outputs**: Improved/trained Composite GAN Generator model, trained Discriminator model, training logs, and loss metrics.
 
 ### 3.2. Generate Mode
