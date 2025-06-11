@@ -36,7 +36,7 @@ DEFAULT_VALUES = {
     "latent_shape": [18, 32], 
     "batch_size": 32, 
     "seq_len": 144, # ADDED: Corresponds to generator_decoder_input_window_size or expected output sequence length
-    "epochs": 100,  # Added gan_epochs for training
+    "gan_epochs": 100,  # Added gan_epochs for training
     "gan_batch_size": 32,  # Added gan_batch_size for training
     
     # --- Parameters for FeederPlugin ---
