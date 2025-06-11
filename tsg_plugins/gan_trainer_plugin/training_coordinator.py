@@ -98,6 +98,12 @@ class TrainingCoordinator:
         
         # Setup optimizers
         self._setup_optimizers()
+
+        # Print model summaries
+        self.logger.info("Generator Model Summary:")
+        generator.summary(print_fn=self.logger.info)
+        self.logger.info("Discriminator Model Summary:")
+        discriminator.summary(print_fn=self.logger.info)
         
         # Prepare real data for training
         self.logger.info("Calling _prepare_real_data...")
@@ -126,16 +132,18 @@ class TrainingCoordinator:
 
         self.logger.info(f"Starting training loop for {epochs} epochs...")
         # Training loop
-        for epoch in tqdm(range(epochs), desc="Overall Training Progress", unit="epoch"):
+        # Removed tqdm wrapper from the epoch loop
+        for epoch in range(epochs):
             self.current_epoch = epoch
             epoch_start_time = time.time()
             
             self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting discriminator training step...")
             # Train discriminator
-            d_loss = self._train_discriminator_step(
+            # _train_discriminator_step now returns (d_loss_avg, d_loss_real_avg, d_loss_fake_avg)
+            d_loss_avg, d_loss_real_avg, d_loss_fake_avg = self._train_discriminator_step(
                 real_data, generator, discriminator, batch_size, train_discriminator_n_times
             )
-            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Discriminator training step completed. D_loss: {d_loss:.4f}")
+            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Discriminator training step completed. D_loss_avg: {d_loss_avg:.4f}, D_loss_real: {d_loss_real_avg:.4f}, D_loss_fake: {d_loss_fake_avg:.4f}")
             
             self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting generator training step...")
             # Train generator
@@ -144,26 +152,34 @@ class TrainingCoordinator:
             )
             self.logger.debug(f"Epoch {epoch+1}/{epochs}: Generator training step completed. G_loss: {g_loss:.4f}")
             
-            # Record training metrics
+            # Record training metrics (using the average total discriminator loss)
             epoch_time = time.time() - epoch_start_time
-            self._record_epoch_metrics(epoch, g_loss, d_loss, epoch_time)
+            self._record_epoch_metrics(epoch, g_loss, d_loss_avg, epoch_time)
 
             # Call ReduceLROnPlateau callbacks
             if lr_scheduler_g:
                 lr_scheduler_g.on_epoch_end(epoch, logs={'g_loss': g_loss, 'lr': K.get_value(self.generator_optimizer.learning_rate)})
             if lr_scheduler_d:
-                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss, 'lr': K.get_value(self.discriminator_optimizer.learning_rate)})
+                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss_avg, 'lr': K.get_value(self.discriminator_optimizer.learning_rate)})
             
             # Log progress every epoch
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
-                self.logger.info(
+                log_msg = (
                     f"Epoch {epoch+1}/{epochs} - "
-                    f"G_loss: {g_loss:.4f}, D_loss: {d_loss:.4f}, "
+                    f"G_loss: {g_loss:.4f}, D_loss: {d_loss_avg:.4f} "
+                    f"(Real: {d_loss_real_avg:.4f}, Fake: {d_loss_fake_avg:.4f}), "
                     f"G_LR: {K.get_value(self.generator_optimizer.learning_rate):.1e}, "
                     f"D_LR: {K.get_value(self.discriminator_optimizer.learning_rate):.1e}, "
-                    f"Time: {epoch_time:.2f}s"
                 )
+                if lr_scheduler_g and hasattr(lr_scheduler_g, 'wait'):
+                    log_msg += f"G_Patience: {getattr(lr_scheduler_g, 'wait', 'N/A')}, "
+                    log_msg += f"G_Cooldown: {getattr(lr_scheduler_g, 'cooldown_counter', 'N/A')}, "
+                if lr_scheduler_d and hasattr(lr_scheduler_d, 'wait'):
+                    log_msg += f"D_Patience: {getattr(lr_scheduler_d, 'wait', 'N/A')}, "
+                    log_msg += f"D_Cooldown: {getattr(lr_scheduler_d, 'cooldown_counter', 'N/A')}, "
+                log_msg += f"Time: {epoch_time:.2f}s"
+                self.logger.info(log_msg)
             
             # Save models at intervals
             if epoch % save_interval == 0 and epoch > 0:
@@ -300,9 +316,14 @@ class TrainingCoordinator:
             n_times: Number of training steps
         
         Returns:
-            Average discriminator loss
+            A tuple containing:
+                - Average total discriminator loss (float)
+                - Average discriminator loss on real samples (float)
+                - Average discriminator loss on fake samples (float)
         """
-        total_loss = 0.0
+        total_d_loss_val = 0.0
+        total_d_real_loss_val = 0.0
+        total_d_fake_loss_val = 0.0
         
         for _ in range(n_times):
             # Sample real data batch
@@ -337,8 +358,8 @@ class TrainingCoordinator:
                 real_pred = discriminator(real_batch, training=True)
                 fake_pred = discriminator(fake_batch, training=True)
                 
-                # Calculate loss
-                d_loss = self._discriminator_loss(real_pred, fake_pred)
+                # Calculate loss components
+                d_loss, d_real_loss, d_fake_loss = self._discriminator_loss(real_pred, fake_pred)
             
             # Apply gradients
             gradients = tape.gradient(d_loss, discriminator.trainable_variables)
@@ -361,9 +382,11 @@ class TrainingCoordinator:
             else:
                 self.discriminator_optimizer.apply_gradients(valid_grads_and_vars)
             
-            total_loss += d_loss.numpy()
+            total_d_loss_val += d_loss.numpy()
+            total_d_real_loss_val += d_real_loss.numpy()
+            total_d_fake_loss_val += d_fake_loss.numpy()
         
-        return total_loss / n_times
+        return total_d_loss_val / n_times, total_d_real_loss_val / n_times, total_d_fake_loss_val / n_times
     
     def _train_generator_step(self, gan_model: tf.keras.Model, batch_size: int,
                              n_times: int) -> float:
@@ -444,18 +467,26 @@ class TrainingCoordinator:
     
     def _discriminator_loss(self, real_pred: tf.Tensor, fake_pred: tf.Tensor) -> tf.Tensor:
         """
-        Calculate discriminator loss.
+        Calculate discriminator loss and its components.
         
         Args:
             real_pred: Discriminator predictions on real data
             fake_pred: Discriminator predictions on fake data
         
         Returns:
-            Discriminator loss
+            A tuple containing:
+                - Total discriminator loss (tf.Tensor)
+                - Mean loss on real samples (tf.Tensor)
+                - Mean loss on fake samples (tf.Tensor)
         """
         real_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(real_pred), real_pred)
         fake_loss = tf.keras.losses.binary_crossentropy(tf.zeros_like(fake_pred), fake_pred)
-        return tf.reduce_mean(real_loss + fake_loss)
+        
+        d_real_loss_mean = tf.reduce_mean(real_loss)
+        d_fake_loss_mean = tf.reduce_mean(fake_loss)
+        
+        total_d_loss = d_real_loss_mean + d_fake_loss_mean # As per original formulation, sum of means
+        return total_d_loss, d_real_loss_mean, d_fake_loss_mean
     
     def _generator_loss(self, fake_pred: tf.Tensor) -> tf.Tensor:
         """
