@@ -190,20 +190,57 @@ class GANTrainerPlugin(PluginBase):
             self.logger.info("Early stopping is disabled by configuration.")
 
     def _initialize_parameters(self):
-        """Initialize self.params from main_config and plugin_params defaults."""
-        # Start with plugin defaults
+        self.logger.debug(f"GANTrainerPlugin: _initialize_parameters called.")
+        self.logger.debug(f"Initial plugin_params['gan_epochs']: {self.plugin_params.get('gan_epochs')}")
+        
         self.params = self.plugin_params.copy()
-        # Override with main_config values
+        self.logger.debug(f"self.params after copy from plugin_params - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
+
         if hasattr(self, 'main_config') and self.main_config is not None:
+            self.logger.debug(f"main_config available. main_config.get('gan_epochs'): {self.main_config.get('gan_epochs')}")
+            self.logger.debug(f"main_config.get('trainer_gan_epochs'): {self.main_config.get('trainer_gan_epochs')}")
+
+            # Phase 1: Apply direct/general parameters from main_config
+            # These are keys in main_config that are also in self.params (plugin_params keys)
+            # OR general keys (not prefixed for other specific plugins).
             for key, value in self.main_config.items():
-                # Update if key is in plugin_params or if it's a general param
-                if key in self.params or not key.startswith(("generator_", "discriminator_", "feeder_")):
+                is_plugin_default_key = key in self.params # Check if 'key' is a direct parameter name defined in plugin_params
+                is_general_app_key = not key.startswith(("generator_", "discriminator_", "feeder_", "trainer_")) # Check if it's a general key
+
+                if key == 'gan_epochs': # Specific log for gan_epochs
+                    self.logger.debug(f"Processing 'gan_epochs' in main_config Phase 1. Value: {value}. is_plugin_default_key: {is_plugin_default_key}")
+
+                if is_plugin_default_key:
+                    # If the key from main_config matches a key in plugin_params, update it.
+                    # e.g., if main_config has "gan_epochs", it updates self.params["gan_epochs"]
                     self.params[key] = value
-                # Handle prefixed params specifically for this plugin
-                if key.startswith("trainer_"):
-                    param_key = key[len("trainer_"):]
-                    self.params[param_key] = value
-        self.logger.debug(f"GANTrainerPlugin params initialized: {self.params.keys()}")
+                    if key == 'gan_epochs':
+                        self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 1.")
+                elif is_general_app_key:
+                    # If it's a general key not defined in plugin_params and not for other plugins, add it.
+                    # This allows passing through other general configurations.
+                    self.params[key] = value
+            
+            self.logger.debug(f"self.params after Phase 1 - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
+            
+            # Phase 2: Apply trainer-specific prefixed parameters from main_config.
+            # These are intended to override values set in Phase 1 if they map to the same parameter name.
+            trainer_prefix = "trainer_"
+            for key, value in self.main_config.items():
+                if key.startswith(trainer_prefix):
+                    param_key = key[len(trainer_prefix):]
+                    # Only apply if param_key corresponds to an original parameter name in plugin_params.
+                    # This ensures that `trainer_` prefixed keys specifically target existing plugin params.
+                    if param_key == 'gan_epochs': # Specific log
+                        self.logger.debug(f"Processing prefixed key '{key}' (param_key 'gan_epochs') in main_config Phase 2. Value: {value}.")
+                    if param_key in self.plugin_params: 
+                        self.params[param_key] = value
+                        if param_key == 'gan_epochs':
+                             self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 2 from prefixed key '{key}'.")
+        else:
+            self.logger.debug("main_config not available in _initialize_parameters.")
+        
+        self.logger.info(f"GANTrainerPlugin params fully initialized. Final self.params.get('gan_epochs'): {self.params.get('gan_epochs')}")
 
     def set_params(self, **kwargs) -> None:
         """
@@ -349,88 +386,88 @@ class GANTrainerPlugin(PluginBase):
             
         return True
 
-    def train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None):
-        self.logger.info("GANTrainerPlugin: Starting GAN training process...")
+    def train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Train the GAN model.
+        """
+        self.logger.info(f"GANTrainerPlugin.train: Entered. Argument epochs: {epochs}, Argument batch_size: {batch_size}")
+        self.logger.info(f"GANTrainerPlugin.train: self.params.get('gan_epochs') before resolving current_epochs: {self.params.get('gan_epochs')}")
+        self.logger.info(f"GANTrainerPlugin.train: self.plugin_params.get('gan_epochs') for fallback: {self.plugin_params.get('gan_epochs')}")
+        self.logger.info(f"GANTrainerPlugin.train: self.params.get('gan_batch_size') before resolving current_batch_size: {self.params.get('gan_batch_size')}")
+        self.logger.info(f"GANTrainerPlugin.train: self.plugin_params.get('gan_batch_size') for fallback: {self.plugin_params.get('gan_batch_size')}")
 
-        if self.generator_plugin is None or self.discriminator_plugin is None or self.feeder_plugin is None:
-            self.logger.error("GANTrainerPlugin: One or more required plugins (Generator, Discriminator, Feeder) are not set.")
-            raise RuntimeError("Required plugins not available for training.")
+        if not self._build_models():
+            self.logger.error("Failed to build models. Aborting training.")
+            return {}
 
-        # Build models if not already built
-        if self.generator_model is None or self.discriminator_model is None or self.gan_model is None:
-            self.logger.info("GANTrainerPlugin: Models not built or cleared, attempting to build...")
-            if not self._build_models():
-                self.logger.error("GANTrainerPlugin: Failed to build GAN models. Aborting training.")
-                raise RuntimeError("Failed to build GAN models")
+        # Determine epochs and batch_size, prioritizing direct arguments, then self.params, then plugin_params defaults
+        current_epochs = epochs
+        if current_epochs is None:
+            self.logger.debug("GANTrainerPlugin.train: Argument 'epochs' is None. Trying self.params.get('gan_epochs').")
+            current_epochs = self.params.get('gan_epochs') 
+            if current_epochs is None: 
+                self.logger.debug("GANTrainerPlugin.train: self.params.get('gan_epochs') is None. Falling back to self.plugin_params['gan_epochs'].")
+                current_epochs = self.plugin_params['gan_epochs']
         
-        # Ensure models are available after attempting to build
-        if self.generator_model is None:
-            self.logger.error("GANTrainer: Generator model is MISSING after build attempt.")
-            raise RuntimeError("Generator model is MISSING.")
-        if self.discriminator_model is None:
-            self.logger.error("GANTrainer: Discriminator model is MISSING after build attempt.")
-            raise RuntimeError("Discriminator model is MISSING.")
-        if self.gan_model is None:
-            self.logger.error("GANTrainer: Combined GAN model is MISSING after build attempt.")
-            raise RuntimeError("Combined GAN model is MISSING.")
+        current_batch_size = batch_size
+        if current_batch_size is None:
+            self.logger.debug("GANTrainerPlugin.train: Argument 'batch_size' is None. Trying self.params.get('gan_batch_size').")
+            current_batch_size = self.params.get('gan_batch_size')
+            if current_batch_size is None:
+                self.logger.debug("GANTrainerPlugin.train: self.params.get('gan_batch_size') is None. Falling back to self.plugin_params['gan_batch_size'].")
+                current_batch_size = self.plugin_params['gan_batch_size']
 
-        self.logger.info("GANTrainerPlugin: All models are available. Proceeding with TrainingCoordinator.")
-        
-        current_epochs = epochs if epochs is not None else self.params.get('epochs', 100)
-        current_batch_size = batch_size if batch_size is not None else self.params.get('batch_size', 32)
+        self.logger.info(f"GANTrainerPlugin.train: Resolved current_epochs to: {current_epochs}, current_batch_size to: {current_batch_size}")
 
-        self.params['epochs'] = current_epochs
-        self.params['batch_size'] = current_batch_size
-        
-        if hasattr(self.training_coordinator, 'set_params'):
-             self.training_coordinator.set_params(**self.params)
+        # Ensure models are compiled and LR schedulers are associated
+        # This needs to happen after models are built but before training starts.
+        # The optimizers are created in TrainingCoordinator._setup_optimizers()
+        # The LR schedulers need their .model attribute set to the respective models.
+        if self.lr_scheduler_g and self.gan_model: # Use gan_model for generator's LR scheduler
+            self.lr_scheduler_g.set_model(self.gan_model) 
+            self.logger.info(f"Linked lr_scheduler_g to gan_model: {self.gan_model.name}")
+        else:
+            if not self.lr_scheduler_g:
+                self.logger.info("lr_scheduler_g is None, not linking.")
+            if not self.gan_model:
+                self.logger.warning("self.gan_model is None, cannot link lr_scheduler_g.")
 
-        # Construct full paths for output directories
-        base_dir = self.params.get("results_base_dir", "results")
-        model_save_subdir = self.params.get("save_model_dir", "models")
-        # plot_save_subdir = self.params.get("save_plot_dir", "plots") # For future use
-        # metrics_save_subdir = self.params.get("save_metrics_dir", "metrics") # For future use
+        if self.lr_scheduler_d and self.discriminator_model:
+            self.lr_scheduler_d.set_model(self.discriminator_model)
+            self.logger.info(f"Linked lr_scheduler_d to discriminator_model: {self.discriminator_model.name}")
+        else:
+            if not self.lr_scheduler_d:
+                self.logger.info("lr_scheduler_d is None, not linking.")
+            if not self.discriminator_model:
+                self.logger.warning("self.discriminator_model is None, cannot link lr_scheduler_d.")
 
-        models_dir_path = os.path.join(base_dir, model_save_subdir)
-        # plots_dir_path = os.path.join(base_dir, plot_save_subdir) # For future use
-        # metrics_dir_path = os.path.join(base_dir, metrics_save_subdir) # For future use
+        # Prepare directories
+        models_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_model_dir", "models"))
+        plots_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_plot_dir", "plots"))
+        metrics_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_metrics_dir", "metrics"))
+        os.makedirs(models_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
+        os.makedirs(metrics_dir, exist_ok=True)
+        self.logger.info(f"Models will be saved to: {models_dir}")
 
-        self.logger.info(f"GANTrainerPlugin: Models will be saved to: {models_dir_path}")
-
-        try:
-            # Ensure models are set for the ReduceLROnPlateau callbacks initialized in __init__
-            if self.lr_scheduler_g and self.generator_model:
-                self.lr_scheduler_g.set_model(self.generator_model)
-                self.logger.info(f"Set generator_model for self.lr_scheduler_g. Monitored metric: {self.lr_scheduler_g.monitor}")
-            if self.lr_scheduler_d and self.discriminator_model:
-                self.lr_scheduler_d.set_model(self.discriminator_model)
-                self.logger.info(f"Set discriminator_model for self.lr_scheduler_d. Monitored metric: {self.lr_scheduler_d.monitor}")
-
-            # Set model for EarlyStopping callback if it exists
-            if self.early_stopping_callback and self.generator_model: # Assuming generator_model is primary for ES
-                self.early_stopping_callback.set_model(self.generator_model) 
-                self.logger.info(f"Set generator_model for self.early_stopping_callback. Monitored metric: {self.early_stopping_callback.monitor}")
-
-            history = self.training_coordinator.train(
-                training_data=training_data,
-                generator=self.generator_model,
-                discriminator=self.discriminator_model,
-                gan_model=self.gan_model,
-                feeder_plugin=self.feeder_plugin,
-                epochs=current_epochs,  # Explicitly pass current_epochs
-                batch_size=current_batch_size,  # Explicitly pass current_batch_size
-                models_dir=models_dir_path, # Pass the constructed models_dir_path
-                # plots_dir=plots_dir_path, # Pass for future use
-                # metrics_dir=metrics_dir_path, # Pass for future use
-                lr_scheduler_g=self.lr_scheduler_g, # Pass LR schedulers
-                lr_scheduler_d=self.lr_scheduler_d, # Pass LR schedulers
-                early_stopping_callback=self.early_stopping_callback # Pass ES callback
-            )
-            self.logger.info("GANTrainerPlugin: Training completed by TrainingCoordinator.")
-            return history
-        except Exception as e:
-            self.logger.error(f"GANTrainerPlugin: Error during TrainingCoordinator.train: {e}", exc_info=True)
-            raise RuntimeError(f"GAN training failed: {e}")
+        # Pass the actual model instances to the training coordinator
+        history = self.training_coordinator.train(
+            generator=self.generator_model,
+            discriminator=self.discriminator_model,
+            gan_model=self.gan_model, # Pass the combined GAN model
+            feeder_plugin=self.feeder_plugin, # Pass feeder_plugin
+            training_data=training_data,
+            epochs=current_epochs,
+            batch_size=current_batch_size,
+            save_interval=self.params.get("gan_save_interval", 500),
+            models_dir=models_dir, # Pass the constructed models_dir
+            plots_dir=plots_dir,
+            metrics_dir=metrics_dir,
+            lr_scheduler_g=self.lr_scheduler_g, # Pass the LR scheduler for G
+            lr_scheduler_d=self.lr_scheduler_d, # Pass the LR scheduler for D
+            early_stopping_callback=self.early_stopping_callback # Pass the EarlyStopping callback
+        )
+        return history
 
     def get_debug_info(self) -> Dict[str, Any]:
         """Return debug information for the plugin."""

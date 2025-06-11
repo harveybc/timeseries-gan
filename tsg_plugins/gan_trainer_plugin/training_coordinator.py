@@ -89,35 +89,66 @@ class TrainingCoordinator:
         Returns:
             Training history dictionary
         """
-        self.logger.info(f"Starting GAN training for {epochs} epochs with batch_size {batch_size}")
+        self.logger.info(f"TrainingCoordinator.train: Received epochs argument: {epochs}, batch_size argument: {batch_size}")
         
-        # Use defaults if not provided
-        if epochs is None:
-            epochs = self.params.get("epochs", 1000)
-        if batch_size is None:
-            batch_size = self.params.get("batch_size", 32)
+        # The 'epochs' and 'batch_size' arguments passed here should be the definitive values from GANTrainerPlugin.
+        final_epochs = epochs
+        if final_epochs is None:
+            self.logger.warning("TrainingCoordinator.train: 'epochs' argument from caller was None. This is unexpected.")
+            # Fallback to TrainingCoordinator's own params if caller failed to provide epochs.
+            # TC.params should have 'gan_epochs' if GANTrainerPlugin.set_params(TC) worked.
+            final_epochs = self.params.get("gan_epochs") 
+            if final_epochs is None:
+                self.logger.error("TrainingCoordinator.train: 'gan_epochs' not found in self.params either. Defaulting to a hardcoded 1000 for epochs.")
+                final_epochs = 1000 # Last resort default for epochs
+            else:
+                self.logger.info(f"TrainingCoordinator.train: Using 'gan_epochs' from self.params for epochs: {final_epochs}")
+
+        final_batch_size = batch_size
+        if final_batch_size is None:
+            self.logger.warning("TrainingCoordinator.train: 'batch_size' argument from caller was None. This is unexpected.")
+            final_batch_size = self.params.get("gan_batch_size")
+            if final_batch_size is None:
+                self.logger.error("TrainingCoordinator.train: 'gan_batch_size' not found in self.params either. Defaulting to a hardcoded 32 for batch_size.")
+                final_batch_size = 32 # Last resort default for batch_size
+            else:
+                self.logger.info(f"TrainingCoordinator.train: Using 'gan_batch_size' from self.params for batch_size: {final_batch_size}")
+        
         if training_data is None:
+            self.logger.error("TrainingCoordinator.train: training_data parameter is required and was None.")
             raise ValueError("training_data parameter is required")
         
+        self.logger.info(f"TrainingCoordinator: Starting GAN training for {final_epochs} epochs with batch_size {final_batch_size}")
+
         # Setup optimizers
         self._setup_optimizers()
 
-        # Assign the TrainingCoordinator's optimizers to the models held by the LR schedulers.
-        # This allows ReduceLROnPlateau to find model.optimizer.learning_rate.
-        self.logger.info("Linking TrainingCoordinator's optimizers to models held by LR schedulers.")
-        if lr_scheduler_g:
-            if lr_scheduler_g.model: # model attribute is set by GANTrainerPlugin via set_model()
-                lr_scheduler_g.model.optimizer = self.generator_optimizer
-                self.logger.info(f"Assigned training_coordinator.generator_optimizer to lr_scheduler_g.model ({lr_scheduler_g.model.name}).")
-            else:
-                self.logger.warning("lr_scheduler_g was passed but has no .model attribute set. Cannot link optimizer.")
-        
-        if lr_scheduler_d:
-            if lr_scheduler_d.model: # model attribute is set by GANTrainerPlugin via set_model()
-                lr_scheduler_d.model.optimizer = self.discriminator_optimizer
-                self.logger.info(f"Assigned training_coordinator.discriminator_optimizer to lr_scheduler_d.model ({lr_scheduler_d.model.name}).")
-            else:
-                self.logger.warning("lr_scheduler_d was passed but has no .model attribute set. Cannot link optimizer.")
+        # The following block for linking optimizers to LR schedulers' models is removed.
+        # This is now handled in GANTrainerPlugin by calling set_model() on the schedulers
+        # with the already compiled Keras models (gan_model and discriminator_model),
+        # which have their optimizers set during their compilation.
+        # self.logger.info("Linking TrainingCoordinator's optimizers to models held by LR schedulers.")
+        # if lr_scheduler_g:
+        #     if hasattr(lr_scheduler_g, 'model') and lr_scheduler_g.model:
+        #         if hasattr(lr_scheduler_g.model, 'optimizer') and lr_scheduler_g.model.optimizer is not self.generator_optimizer:
+        #             self.logger.info(f"Updating optimizer for lr_scheduler_g.model ({lr_scheduler_g.model.name}) to TrainingCoordinator's generator_optimizer.")
+        #             lr_scheduler_g.model.optimizer = self.generator_optimizer
+        #         elif not hasattr(lr_scheduler_g.model, 'optimizer'):
+        #              self.logger.info(f"Assigning TrainingCoordinator's generator_optimizer to lr_scheduler_g.model ({lr_scheduler_g.model.name}).")
+        #              lr_scheduler_g.model.optimizer = self.generator_optimizer
+        #     else:
+        #         self.logger.warning("lr_scheduler_g was passed but has no .model attribute set or it's None. Cannot link optimizer.")
+        # 
+        # if lr_scheduler_d:
+        #     if hasattr(lr_scheduler_d, 'model') and lr_scheduler_d.model:
+        #         if hasattr(lr_scheduler_d.model, 'optimizer') and lr_scheduler_d.model.optimizer is not self.discriminator_optimizer:
+        #             self.logger.info(f"Updating optimizer for lr_scheduler_d.model ({lr_scheduler_d.model.name}) to TrainingCoordinator's discriminator_optimizer.")
+        #             lr_scheduler_d.model.optimizer = self.discriminator_optimizer
+        #         elif not hasattr(lr_scheduler_d.model, 'optimizer'):
+        #             self.logger.info(f"Assigning TrainingCoordinator's discriminator_optimizer to lr_scheduler_d.model ({lr_scheduler_d.model.name}).")
+        #             lr_scheduler_d.model.optimizer = self.discriminator_optimizer
+        #     else:
+        #         self.logger.warning("lr_scheduler_d was passed but has no .model attribute set or it's None. Cannot link optimizer.")
 
         # Call on_train_begin for EarlyStopping callback if it exists
         if early_stopping_callback:
@@ -139,7 +170,7 @@ class TrainingCoordinator:
         
         if isinstance(real_data, np.ndarray):
             self.logger.info(f"real_data is a NumPy array. Attempting to access shape. Dtype: {real_data.dtype}, Size: {real_data.size}")
-            if real_data.size == 0 and epochs > 0: # Check if data is empty but epochs are expected
+            if real_data.size == 0 and final_epochs > 0: # Check if data is empty but epochs are expected
                 self.logger.error("real_data is empty but training epochs are scheduled. This will likely lead to errors.")
                 # Potentially raise an error or handle as appropriate
                 # For now, just log and let it proceed to see the error or if it handles it
@@ -149,35 +180,33 @@ class TrainingCoordinator:
         else:
             self.logger.warning(f"Real data preparation complete, but real_data is not a NumPy array. Type: {type(real_data)}. This might cause issues.")
 
-        self.logger.info("Checking if epochs > 0 before starting training loop...")
-        if not isinstance(epochs, int) or epochs <= 0:
-            self.logger.warning(f"Number of epochs is '{epochs}' (type: {type(epochs)}). Training loop will not run or will cause an error.")
-            if isinstance(epochs, int) and epochs <=0:
-                 self.logger.info("GAN training considered complete as epochs <= 0.")
+        self.logger.info("Checking if final_epochs > 0 before starting training loop...")
+        if not isinstance(final_epochs, int) or final_epochs <= 0:
+            self.logger.warning(f"Number of epochs is '{final_epochs}' (type: {type(final_epochs)}). Training loop will not run or will cause an error.")
+            if isinstance(final_epochs, int) and final_epochs <=0:
+                 self.logger.info("GAN training considered complete as final_epochs <= 0.")
                  return self.training_history # Exit if no epochs to run
-            # If not an int, it might error out in range(epochs) anyway, but good to log.
+            # If not an int, it might error out in range(final_epochs) anyway, but good to log.
 
-        self.logger.info(f"Starting training loop for {epochs} epochs...")
+        self.logger.info(f"Starting training loop for {final_epochs} epochs...")
         # Training loop
-        # Removed tqdm wrapper from the epoch loop
-        for epoch in range(epochs):
+        for epoch in range(final_epochs): # Use final_epochs
             self.current_epoch = epoch
             epoch_start_time = time.time()
             
-            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting discriminator training step...")
+            self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Starting discriminator training step...")
             # Train discriminator
-            # _train_discriminator_step now returns (d_loss_avg, d_loss_real_avg, d_loss_fake_avg)
             d_loss_avg, d_loss_real_avg, d_loss_fake_avg = self._train_discriminator_step(
-                real_data, generator, discriminator, batch_size, train_discriminator_n_times
+                real_data, generator, discriminator, final_batch_size, train_discriminator_n_times # Use final_batch_size
             )
-            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Discriminator training step completed. D_loss_avg: {d_loss_avg:.4f}, D_loss_real: {d_loss_real_avg:.4f}, D_loss_fake: {d_loss_fake_avg:.4f}")
+            self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Discriminator training step completed. D_loss_avg: {d_loss_avg:.4f}, D_loss_real: {d_loss_real_avg:.4f}, D_loss_fake: {d_loss_fake_avg:.4f}")
             
-            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Starting generator training step...")
+            self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Starting generator training step...")
             # Train generator
             g_loss = self._train_generator_step(
-                gan_model, batch_size, train_generator_n_times
+                gan_model, final_batch_size, train_generator_n_times # Use final_batch_size
             )
-            self.logger.debug(f"Epoch {epoch+1}/{epochs}: Generator training step completed. G_loss: {g_loss:.4f}")
+            self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Generator training step completed. G_loss: {g_loss:.4f}")
             
             # Record training metrics (using the average total discriminator loss)
             epoch_time = time.time() - epoch_start_time
@@ -211,7 +240,7 @@ class TrainingCoordinator:
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
                 log_msg = (
-                    f"Epoch {epoch+1}/{epochs} - "
+                    f"Epoch {epoch+1}/{final_epochs} - " # Use final_epochs
                     f"G_loss: {g_loss:.4f}, D_loss: {d_loss_avg:.4f} "
                     f"(Real: {d_loss_real_avg:.4f}, Fake: {d_loss_fake_avg:.4f}), "
                     f"G_LR: {K.get_value(self.generator_optimizer.learning_rate):.1e}, "
@@ -235,8 +264,8 @@ class TrainingCoordinator:
         # Save final models after the training loop finishes,
         # unless early stopping already saved and exited.
         if not (early_stopping_callback and early_stopping_callback.model and getattr(early_stopping_callback.model, 'stop_training', False)):
-            self.logger.info(f"Saving final models after {epochs} epochs...")
-            self._save_checkpoint(epochs, generator, discriminator, gan_model, models_dir, is_final_save=True)
+            self.logger.info(f"Saving final models after {final_epochs} epochs...") # Use final_epochs
+            self._save_checkpoint(final_epochs, generator, discriminator, gan_model, models_dir, is_final_save=True) # Use final_epochs
 
         return self.training_history
     
