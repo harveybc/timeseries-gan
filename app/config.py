@@ -36,7 +36,7 @@ DEFAULT_VALUES = {
     "latent_shape": [18, 32], 
     "batch_size": 32, 
     "seq_len": 144, # ADDED: Corresponds to generator_decoder_input_window_size or expected output sequence length
-    "gan_epochs": 2,  # Added gan_epochs for training
+    "gan_epochs": 2000,  # Added gan_epochs for training
     "gan_batch_size": 32,  # Added gan_batch_size for training
     
     # --- Parameters for FeederPlugin ---
@@ -180,7 +180,7 @@ DEFAULT_VALUES = {
     "autocast": True,
 
     # Added: L2 Regularization for Generator
-    "generator_l2_reg": 0.01,
+    "generator_l2_reg": 1e-5,
 
     # Added: ReduceLROnPlateau parameters
     "enable_reduce_lr_on_plateau": True,

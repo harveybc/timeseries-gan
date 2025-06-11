@@ -599,34 +599,56 @@ class TrainingCoordinator:
             generator: Generator model
             discriminator: Discriminator model
             gan_model: Combined GAN model
-            models_dir: Directory to save models
+            models_dir: Directory to save models (primarily for intermediate checkpoints or fallbacks)
             is_final_save: Boolean, if True, save with final configured names.
         """
-        if not os.path.exists(models_dir):
-            os.makedirs(models_dir)
-            self.logger.info(f"Created models directory: {models_dir}")
-
         if is_final_save:
-            gen_filename = self.params.get("save_generator_sequential_model_file", f"generator_final_epoch_{epoch}.keras")
-            disc_filename = self.params.get("save_discriminator_sequential_model_file", f"discriminator_final_epoch_{epoch}.keras")
-            # GAN model saving is not explicitly requested for final named files, but we can add if needed.
-            # gan_filename = self.params.get("save_gan_sequential_model_file", f"gan_final_epoch_{epoch}.keras")
-            
-            generator_save_path = os.path.join(models_dir, gen_filename)
-            discriminator_save_path = os.path.join(models_dir, disc_filename)
-            # gan_save_path = os.path.join(models_dir, gan_filename)
+            gen_path_key = "save_generator_sequential_model_file"
+            disc_path_key = "save_discriminator_sequential_model_file"
 
-            self.logger.info(f"Saving final generator model to: {generator_save_path}")
-            generator.save(generator_save_path)
-            self.logger.info(f"Saving final discriminator model to: {discriminator_save_path}")
-            discriminator.save(discriminator_save_path)
-            # self.logger.info(f"Saving final GAN model to: {gan_save_path}")
-            # gan_model.save(gan_save_path)
+            # --- Generator Saving ---
+            generator_save_path_config = self.params.get(gen_path_key)
+            if generator_save_path_config:
+                final_gen_path = generator_save_path_config
+                gen_parent_dir = os.path.dirname(final_gen_path)
+                if gen_parent_dir: # Ensure parent_dir is not empty (e.g. if path is just a filename)
+                    os.makedirs(gen_parent_dir, exist_ok=True)
+                    self.logger.info(f"Ensured directory for final generator model: {gen_parent_dir}")
+            else:
+                self.logger.warning(f"'{gen_path_key}' not in config. Using fallback for final generator save.")
+                os.makedirs(models_dir, exist_ok=True) # Ensure models_dir exists for fallback
+                self.logger.info(f"Ensured fallback directory for generator: {models_dir}")
+                final_gen_path = os.path.join(models_dir, f"generator_final_epoch_{epoch}.keras")
+            
+            self.logger.info(f"Saving final generator model to: {final_gen_path}")
+            generator.save(final_gen_path)
+
+            # --- Discriminator Saving ---
+            discriminator_save_path_config = self.params.get(disc_path_key)
+            if discriminator_save_path_config:
+                final_disc_path = discriminator_save_path_config
+                disc_parent_dir = os.path.dirname(final_disc_path)
+                if disc_parent_dir: # Ensure parent_dir is not empty
+                    os.makedirs(disc_parent_dir, exist_ok=True)
+                    self.logger.info(f"Ensured directory for final discriminator model: {disc_parent_dir}")
+            else:
+                self.logger.warning(f"'{disc_path_key}' not in config. Using fallback for final discriminator save.")
+                os.makedirs(models_dir, exist_ok=True) # Ensure models_dir exists for fallback
+                self.logger.info(f"Ensured fallback directory for discriminator: {models_dir}")
+                final_disc_path = os.path.join(models_dir, f"discriminator_final_epoch_{epoch}.keras")
+
+            self.logger.info(f"Saving final discriminator model to: {final_disc_path}")
+            discriminator.save(final_disc_path)
+            
+            # GAN model saving for final state is not explicitly requested by config keys,
+            # but could be added here if needed, similar to generator/discriminator.
             self.logger.info(f"Final models saved for epoch {epoch}.")
-        else:
-            # This part is for intermediate saving, which was removed from the main loop.
-            # If re-enabled, it would use epoch-based template names.
-            # For now, this 'else' branch might not be hit if save_interval logic is removed.
+
+        else: # Intermediate checkpoint saving (currently not called by train loop but logic kept)
+            # For intermediate saves, always use the models_dir
+            os.makedirs(models_dir, exist_ok=True) # Ensure models_dir exists
+            self.logger.info(f"Ensured directory for intermediate checkpoint: {models_dir}")
+
             gen_template = self.params.get("save_generator_epoch_template", "generator_epoch_{epoch}.keras")
             disc_template = self.params.get("save_discriminator_epoch_template", "discriminator_epoch_{epoch}.keras")
             gan_template = self.params.get("save_gan_epoch_template", "gan_epoch_{epoch}.keras")
@@ -635,7 +657,7 @@ class TrainingCoordinator:
             discriminator_save_path = os.path.join(models_dir, disc_template.format(epoch=epoch))
             gan_save_path = os.path.join(models_dir, gan_template.format(epoch=epoch))
             
-            self.logger.info(f"Saving checkpoint models for epoch {epoch}...")
+            self.logger.info(f"Saving checkpoint models for epoch {epoch} to {models_dir}...")
             generator.save(generator_save_path)
             discriminator.save(discriminator_save_path)
             gan_model.save(gan_save_path) # Save the combined GAN model as well
