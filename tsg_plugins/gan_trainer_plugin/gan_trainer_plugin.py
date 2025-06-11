@@ -462,100 +462,140 @@ class GANTrainerPlugin(PluginBase):
             
         return True
 
-    def train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Train the GAN model.
-        """
+    def train(self, training_data: pd.DataFrame, feeder_plugin, generator_plugin, discriminator_plugin, epochs: Optional[int] = None, batch_size: Optional[int] = None):
         self.logger.info(f"GANTrainerPlugin.train: Entered. Argument epochs: {epochs}, Argument batch_size: {batch_size}")
+
+        current_epochs = epochs if epochs is not None else self.params.get('gan_epochs', self.plugin_params.get('gan_epochs'))
+        current_batch_size = batch_size if batch_size is not None else self.params.get('gan_batch_size', self.plugin_params.get('gan_batch_size'))
         self.logger.info(f"GANTrainerPlugin.train: self.params.get('gan_epochs') before resolving current_epochs: {self.params.get('gan_epochs')}")
         self.logger.info(f"GANTrainerPlugin.train: self.plugin_params.get('gan_epochs') for fallback: {self.plugin_params.get('gan_epochs')}")
         self.logger.info(f"GANTrainerPlugin.train: self.params.get('gan_batch_size') before resolving current_batch_size: {self.params.get('gan_batch_size')}")
         self.logger.info(f"GANTrainerPlugin.train: self.plugin_params.get('gan_batch_size') for fallback: {self.plugin_params.get('gan_batch_size')}")
 
-        if not self._build_models():
-            self.logger.error("Failed to build models. Aborting training.")
-            return {}
+        self.generator_plugin = generator_plugin
+        self.discriminator_plugin = discriminator_plugin
+        self.feeder_plugin = feeder_plugin # Ensure feeder_plugin is stored on self if needed by other methods or for clarity
 
-        # Determine epochs and batch_size, prioritizing direct arguments, then self.params, then plugin_params defaults
-        current_epochs = epochs
-        if current_epochs is None:
-            self.logger.debug("GANTrainerPlugin.train: Argument 'epochs' is None. Trying self.params.get('gan_epochs').")
-            current_epochs = self.params.get('gan_epochs') 
-            if current_epochs is None: 
-                self.logger.debug("GANTrainerPlugin.train: self.params.get('gan_epochs') is None. Falling back to self.plugin_params['gan_epochs'].")
-                current_epochs = self.plugin_params['gan_epochs']
+        self._build_models() # Builds combined_gan_model, generator_model, discriminator_model
+
+        self.logger.info(f"GANTrainerPlugin.train: Original training_data shape: {training_data.shape if training_data is not None else 'None'}")
+
+        if training_data is None:
+            self.logger.error("GANTrainerPlugin.train: training_data is None. Cannot proceed.")
+            raise ValueError("training_data for GANTrainerPlugin.train cannot be None.")
+
+        # Use FeederPlugin to create sequences
+        # Parameter 'seq_len' is expected to be in feeder_plugin.params, sourced from the global config.
+        sequence_length = self.feeder_plugin.params.get("seq_len") 
+        if not sequence_length:
+            self.logger.error("FeederPlugin parameter 'seq_len' (expected from global config) is not set in feeder_plugin.params.")
+            # Log available keys in feeder_plugin.params for debugging
+            self.logger.debug(f"Available keys in feeder_plugin.params: {list(self.feeder_plugin.params.keys())}")
+            raise ValueError("FeederPlugin parameter 'seq_len' is not set in its params. Check config propagation.")
+
+        selected_features = self.feeder_plugin.params.get("selected_features")
+        if selected_features:
+            self.logger.info(f"Using 'selected_features' from FeederPlugin: {selected_features}")
+            missing_cols = [col for col in selected_features if col not in training_data.columns]
+            if missing_cols:
+                self.logger.error(f"Selected features missing from training_data: {missing_cols}. Available columns: {training_data.columns.tolist()}")
+                raise ValueError(f"Selected features {missing_cols} not found in training_data columns.")
+            data_for_sequencing = training_data[selected_features]
+        else:
+            self.logger.warning("'selected_features' not found in FeederPlugin params. Using all numeric columns from training_data for sequencing.")
+            data_for_sequencing = training_data.select_dtypes(include=np.number)
+            if data_for_sequencing.shape[1] == 0:
+                self.logger.error("No numeric columns found in training_data to use for sequencing.")
+                raise ValueError("No numeric columns in training_data for sequencing.")
+            self.logger.info(f"Using numeric columns for sequencing: {data_for_sequencing.columns.tolist()}")
+
+        # Ensure data_for_sequencing is purely numeric
+        non_numeric_cols = [col for col in data_for_sequencing.columns if not pd.api.types.is_numeric_dtype(data_for_sequencing[col])]
+        if non_numeric_cols:
+            for col_name in non_numeric_cols:
+                self.logger.error(f"Column '{col_name}' in data_for_sequencing is non-numeric (dtype: {data_for_sequencing[col_name].dtype}).")
+            raise ValueError(f"Non-numeric data found in columns {non_numeric_cols} intended for sequencing. Please ensure all selected features are numeric.")
         
-        current_batch_size = batch_size
-        if current_batch_size is None:
-            self.logger.debug("GANTrainerPlugin.train: Argument 'batch_size' is None. Trying self.params.get('gan_batch_size').")
-            current_batch_size = self.params.get('gan_batch_size')
-            if current_batch_size is None:
-                self.logger.debug("GANTrainerPlugin.train: self.params.get('gan_batch_size') is None. Falling back to self.plugin_params['gan_batch_size'].")
-                current_batch_size = self.plugin_params['gan_batch_size']
+        self.logger.info(f"Data for FeederPlugin.create_sequences has shape: {data_for_sequencing.shape} and columns: {data_for_sequencing.columns.tolist()}")
 
-        self.logger.info(f"GANTrainerPlugin.train: Resolved current_epochs to: {current_epochs}, current_batch_size to: {current_batch_size}")
+        try:
+            # Ensure the call matches the definition: create_sequences(self, data: np.ndarray, seq_len: int)
+            real_sequences_np = self.feeder_plugin.create_sequences(
+                data=data_for_sequencing.to_numpy(), # Pass numpy array
+                seq_len=sequence_length
+            )
+            # The method create_sequences is expected to return only one value (the sequences)
+            # If it previously returned a tuple like (sequences, None), adjust accordingly.
+            # Assuming it now returns just the sequences based on the simplified definition.
 
-        # Assign optimizers to TrainingCoordinator
-        if self.generator_optimizer_instance and self.discriminator_optimizer_instance:
-            self.training_coordinator.g_optimizer = self.generator_optimizer_instance
-            self.training_coordinator.d_optimizer = self.discriminator_optimizer_instance
-            self.logger.info("GANTrainerPlugin.train: Assigned optimizer instances to TrainingCoordinator.")
-        else:
-            self.logger.error("GANTrainerPlugin.train: Optimizer instances are not available after _build_models. Aborting.")
-            return {}
+        except Exception as e:
+            self.logger.error(f"Error during FeederPlugin.create_sequences: {e}", exc_info=True)
+            raise
 
-        # Ensure models are compiled and LR schedulers are associated
-        # This needs to happen after models are built but before training starts.
-        # The optimizers are created in TrainingCoordinator._setup_optimizers()
-        # The LR schedulers need their .model attribute set to the respective models.
-        if self.lr_scheduler_g and self.gan_model: # Use gan_model for generator's LR scheduler
-            self.lr_scheduler_g.set_model(self.gan_model) 
-            self.logger.info(f"Linked lr_scheduler_g to gan_model: {self.gan_model.name}")
-        else:
-            if not self.lr_scheduler_g:
-                self.logger.info("lr_scheduler_g is None, not linking.")
-            if not self.gan_model:
-                self.logger.warning("self.gan_model is None, cannot link lr_scheduler_g.")
+        if real_sequences_np is None or real_sequences_np.ndim != 3:
+            self.logger.error(f"FeederPlugin.create_sequences did not return valid 3D sequence data. Shape: {real_sequences_np.shape if real_sequences_np is not None else 'None'}")
+            raise ValueError("Failed to create valid sequences from FeederPlugin.")
 
-        if self.lr_scheduler_d and self.discriminator_model:
-            self.lr_scheduler_d.set_model(self.discriminator_model)
-            self.logger.info(f"Linked lr_scheduler_d to discriminator_model: {self.discriminator_model.name}")
-        else:
-            if not self.lr_scheduler_d:
-                self.logger.info("lr_scheduler_d is None, not linking.")
-            if not self.discriminator_model:
-                self.logger.warning("self.discriminator_model is None, cannot link lr_scheduler_d.")
+        self.logger.info(f"GANTrainerPlugin.train: training_data processed by FeederPlugin.create_sequences. Shape of real_sequences_np: {real_sequences_np.shape}")
         
-        # Prepare callbacks list
+        actual_num_features = real_sequences_np.shape[2]
+        self.logger.info(f"Actual number of features in sequences: {actual_num_features}")
+
+        # Log warnings if configured model features differ from actual data features
+        # Note: Models are already built. A more robust solution would reconfigure/rebuild models if num_features mismatches.
+        if self.generator_plugin and hasattr(self.generator_plugin, 'params'):
+            gen_conf_features = self.generator_plugin.params.get('num_features')
+            if gen_conf_features != actual_num_features:
+                self.logger.warning(
+                    f"Generator configured num_features ({gen_conf_features}) "
+                    f"differs from actual data features ({actual_num_features}). "
+                    f"Model might behave unexpectedly or error out if input shapes mismatch."
+                )
+        
+        if self.discriminator_plugin and hasattr(self.discriminator_plugin, 'params'):
+            disc_conf_features = self.discriminator_plugin.params.get('num_features')
+            if disc_conf_features != actual_num_features:
+                self.logger.warning(
+                    f"Discriminator configured num_features ({disc_conf_features}) "
+                    f"differs from actual data features ({actual_num_features}). "
+                    f"Model might behave unexpectedly or error out if input shapes mismatch."
+                )
+
+        # Initialize and assign optimizers to TrainingCoordinator
+        self.training_coordinator.g_optimizer = self.generator_optimizer_instance
+        self.training_coordinator.d_optimizer = self.discriminator_optimizer_instance
+        self.logger.info("GANTrainerPlugin.train: Assigned optimizer instances to TrainingCoordinator.")
+
+        # Callbacks setup
         callbacks_list = []
         if self.lr_scheduler_g:
+            self.lr_scheduler_g.set_model(self.gan_model) # Changed from self.combined_gan_model
             callbacks_list.append(self.lr_scheduler_g)
+            self.logger.info(f"Linked lr_scheduler_g to gan_model: {self.gan_model.name}") # Changed from self.combined_gan_model
         if self.lr_scheduler_d:
+            self.lr_scheduler_d.set_model(self.discriminator_model) # Link scheduler to Discriminator model
             callbacks_list.append(self.lr_scheduler_d)
-        if self.early_stopping_callback:
-            callbacks_list.append(self.early_stopping_callback)
-        
-        self.logger.info(f"Passing {len(callbacks_list)} callbacks to TrainingCoordinator: {[type(cb).__name__ for cb in callbacks_list]}")
+            self.logger.info(f"Linked lr_scheduler_d to discriminator_model: {self.discriminator_model.name}")
+        if self.early_stopping:
+            # Early stopping should monitor a metric from the GAN's training, e.g., g_loss or a validation metric if available
+            # Ensure its model is set if it needs one, though typically it's set by Keras fit/evaluate
+            # For custom loop, it's manually checked. TrainingCoordinator handles this.
+            callbacks_list.append(self.early_stopping)
 
-        # Prepare directories
-        models_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_model_dir", "models"))
-        plots_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_plot_dir", "plots"))
-        metrics_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_metrics_dir", "metrics"))
-        os.makedirs(models_dir, exist_ok=True)
-        os.makedirs(plots_dir, exist_ok=True)
-        os.makedirs(metrics_dir, exist_ok=True)
-
-        # Delegate to TrainingCoordinator
+        self.logger.info(f"Passing {len(callbacks_list)} callbacks to TrainingCoordinator: {[cb.__class__.__name__ for cb in callbacks_list]}")
+        self.logger.info(f"GANTrainerPlugin.train: Resolved current_epochs to: {current_epochs}, current_batch_size to: {current_batch_size}")
         self.logger.info("Calling TrainingCoordinator.train()...")
+        
         history = self.training_coordinator.train(
-            gan_model=self.gan_model,
+            gan_model=self.gan_model, # Changed from self.combined_gan_model
             generator=self.generator_model,
             discriminator=self.discriminator_model,
-            dataset=training_data, # This is the pd.DataFrame, FeederPlugin will handle conversion
+            dataset=real_sequences_np,  # Pass the NumPy array of sequences
             epochs=current_epochs,
             batch_size=current_batch_size,
-            callbacks=callbacks_list # Pass the compiled list of callbacks
+            callbacks_list=callbacks_list
         )
+        self.logger.info("GANTrainerPlugin.train: TrainingCoordinator.train() completed.")
         return history
 
     def get_debug_info(self) -> Dict[str, Any]:

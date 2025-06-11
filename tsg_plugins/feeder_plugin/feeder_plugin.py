@@ -276,7 +276,42 @@ class FeederPlugin:
         except Exception as e:
             logger.error(f"Failed to encode data: {str(e)}")
             return None
-    
+
+    def create_sequences(self, data: np.ndarray, seq_len: int) -> Optional[np.ndarray]:
+        """
+        Create sequences from input data.
+
+        Args:
+            data: 2D numpy array (samples, features)
+            seq_len: Length of the sequences to create.
+
+        Returns:
+            Optional[np.ndarray]: 3D numpy array (num_sequences, seq_len, features), 
+                                 or None if data is too short.
+        """
+        if data is None:
+            logger.error("Input data for creating sequences is None.")
+            return None
+        if len(data) < seq_len:
+            logger.warning(
+                f"Data length ({len(data)}) is less than sequence length ({seq_len}). "
+                f"Cannot create sequences."
+            )
+            return None
+        
+        xs = []
+        for i in range(len(data) - seq_len + 1):
+            x = data[i:(i + seq_len)]
+            xs.append(x)
+        
+        if not xs:
+            logger.warning("No sequences were created. Resulting list is empty.")
+            return None
+            
+        sequences = np.array(xs)
+        logger.info(f"Created sequences with shape: {sequences.shape}")
+        return sequences
+
     def _fit_preprocessor(self, data: pd.DataFrame) -> bool:
         """Fit the data preprocessor on training data."""
         try:

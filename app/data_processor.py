@@ -46,7 +46,13 @@ def run_pipeline(config: Dict[str, Any],
     if operation_mode == "train":
         if not trainer_plugin:
             raise ValueError("Trainer plugin is required for train operation mode")
-        train_pipeline = TrainPipeline(config, trainer_plugin)
+        if not feeder_plugin:
+            raise ValueError("Feeder plugin is required for train operation mode")
+        if not generator_plugin:
+            raise ValueError("Generator plugin is required for train operation mode")
+        if not discriminator_plugin:
+            raise ValueError("Discriminator plugin is required for train operation mode")
+        train_pipeline = TrainPipeline(config, trainer_plugin, feeder_plugin, generator_plugin, discriminator_plugin)
         logger.info("Executing train pipeline...")
         train_pipeline.execute()
         logger.info("Finished executing train pipeline.")
@@ -63,7 +69,13 @@ def run_pipeline(config: Dict[str, Any],
         # Train first
         if not trainer_plugin:
             raise ValueError("Trainer plugin is required for train operation mode in 'train_then_generate'")
-        train_pipeline = TrainPipeline(config, trainer_plugin)
+        if not feeder_plugin:
+            raise ValueError("Feeder plugin is required for train operation mode in 'train_then_generate'")
+        if not generator_plugin:
+            raise ValueError("Generator plugin is required for train operation mode in 'train_then_generate'")
+        if not discriminator_plugin:
+            raise ValueError("Discriminator plugin is required for train operation mode in 'train_then_generate'")
+        train_pipeline = TrainPipeline(config, trainer_plugin, feeder_plugin, generator_plugin, discriminator_plugin)
         logger.info("Executing train pipeline (part of train_then_generate)...")
         train_pipeline.execute()
         logger.info("Finished executing train pipeline (part of train_then_generate).")

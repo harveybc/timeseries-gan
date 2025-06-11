@@ -33,18 +33,27 @@ class TrainPipeline:
     Attributes:
         config: Configuration dictionary containing training parameters
         trainer_plugin: Plugin instance responsible for GAN training coordination
+        feeder_plugin: Plugin instance for data feeding
+        generator_plugin: Plugin instance for the generator model
+        discriminator_plugin: Plugin instance for the discriminator model
     """
     
-    def __init__(self, config: Dict[str, Any], trainer_plugin):
+    def __init__(self, config: Dict[str, Any], trainer_plugin, feeder_plugin, generator_plugin, discriminator_plugin):
         """
         Initialize training pipeline with configuration and trainer plugin.
         
         Args:
             config: Configuration dictionary containing training parameters
             trainer_plugin: Plugin instance for GAN training coordination
+            feeder_plugin: Plugin instance for data feeding
+            generator_plugin: Plugin instance for the generator model
+            discriminator_plugin: Plugin instance for the discriminator model
         """
         self.config = config
         self.trainer_plugin = trainer_plugin
+        self.feeder_plugin = feeder_plugin
+        self.generator_plugin = generator_plugin
+        self.discriminator_plugin = discriminator_plugin
         
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -158,35 +167,26 @@ class TrainPipeline:
         self.logger.info("Starting GAN model training...")
         # Log training parameters that will be used by the trainer plugin
         # These should be sourced from the trainer_plugin's own params, which are set from global config
-        epochs = self.trainer_plugin.params.get('epochs', 'N/A')
-        batch_size = self.trainer_plugin.params.get('batch_size', 'N/A')
+        epochs = self.trainer_plugin.params.get('gan_epochs', self.config.get('gan_epochs', 'N/A')) # Use gan_epochs
+        batch_size = self.trainer_plugin.params.get('gan_batch_size', self.config.get('gan_batch_size', 'N/A')) # Use gan_batch_size
         self.logger.info(f"Training parameters - Epochs: {epochs}, Batch size: {batch_size}")
 
         try:
-            # The trainer_plugin.train method should use its internally stored configuration.
-            # We only pass the training_data. Epochs and batch_size can be passed if
-            # the train method signature supports overriding them.
-            # Based on the error, 'config' is not an expected argument.
-            
-            # Assuming trainer_plugin.train() might take epochs and batch_size as optional overrides
-            # Let's check its signature or common practice.
-            # For now, just pass training_data. If epochs/batch_size are needed, they should be
-            # part of the trainer_plugin's internal params or settable via set_params.
-            
             # The GANTrainerPlugin.train method signature is:
-            # train(self, training_data: pd.DataFrame, epochs: Optional[int] = None, batch_size: Optional[int] = None)
-            # So we can pass epochs and batch_size if we want to override its internal defaults for this specific call.
-            # Let's use the config values from the pipeline's config for this call.
+            # train(self, training_data: pd.DataFrame, feeder_plugin, generator_plugin, discriminator_plugin, epochs: Optional[int] = None, batch_size: Optional[int] = None)
             
-            train_epochs = self.config.get('trainer_epochs', self.trainer_plugin.params.get('epochs'))
-            train_batch_size = self.config.get('trainer_batch_size', self.trainer_plugin.params.get('batch_size'))
+            train_epochs = self.config.get('gan_epochs', self.trainer_plugin.params.get('gan_epochs'))
+            train_batch_size = self.config.get('gan_batch_size', self.trainer_plugin.params.get('gan_batch_size'))
 
             self.logger.info(f"Calling trainer_plugin.train with epochs={train_epochs}, batch_size={train_batch_size}")
             
             self.trainer_plugin.train(
                 training_data=training_data,
-                epochs=train_epochs, # Pass epochs if the method supports it
-                batch_size=train_batch_size  # Pass batch_size if the method supports it
+                feeder_plugin=self.feeder_plugin,
+                generator_plugin=self.generator_plugin,
+                discriminator_plugin=self.discriminator_plugin,
+                epochs=train_epochs, 
+                batch_size=train_batch_size
             )
             self.logger.info("GAN model training completed successfully.")
             # Optionally, save models or results here if train method doesn't handle it
