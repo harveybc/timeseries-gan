@@ -259,8 +259,8 @@ class GANTrainerPlugin(PluginBase):
 
         # Build the combined GAN model
         try:
-            # Ensure discriminator is not trainable during generator training phase
-            self.discriminator_model.trainable = False
+            # Create the GAN model with non-trainable discriminator for generator training
+            # but keep the original discriminator trainable for discriminator training
             
             # Generator takes 3 inputs: noise, conditions, context
             # These should match the inputs defined in GeneratorPlugin._build_composite_generator
@@ -273,7 +273,14 @@ class GANTrainerPlugin(PluginBase):
             context_input = self.generator_model.inputs[2]
             
             generated_sequence = self.generator_model([noise_input, conditions_input, context_input])
-            gan_output = self.discriminator_model(generated_sequence)
+            
+            # Create a copy of discriminator for GAN model 
+            # Keep it trainable since you want both generator and discriminator to be trainable
+            discriminator_for_gan = tf.keras.models.clone_model(self.discriminator_model)
+            discriminator_for_gan.set_weights(self.discriminator_model.get_weights())
+            discriminator_for_gan.trainable = True  # Keep trainable as requested
+            
+            gan_output = discriminator_for_gan(generated_sequence)
             
             self.gan_model = tf.keras.Model(
                 inputs=[noise_input, conditions_input, context_input],
