@@ -14,26 +14,10 @@ import traceback # Added traceback
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import (Dense, LSTM, RepeatVector, TimeDistributed, Input, 
-                                     Bidirectional, Conv1D, BatchNormalization, Dropout,
-                                     Concatenate, Reshape, Flatten, LeakyReLU, ReLU, Add) # Added Add
-from tensorflow.keras.models import Model
-from tensorflow.keras.regularizers import l2 # Added l2
-from tsg_plugins.plugin_base import PluginBase
-from app.utils.logging_utils import get_logger
+# Assuming BasePlugin is correctly imported, e.g.:
+# from app.plugins.base_plugin import BasePlugin
 
-# Imports for specialized modules
-from .model_loader import ModelLoader
-from .model_saver import ModelSaver
-from .initial_data_handler import InitialDataHandler
-from .feature_validator import FeatureValidator
-from .data_generator import DataGenerator
-from .technical_indicator_calculator import TechnicalIndicatorCalculator
-from .sequence_builder import SequenceBuilder
-
-logger = get_logger(__name__)
-
-class GeneratorPlugin(PluginBase):
+class GeneratorPlugin(PluginBase): # Replace BasePlugin with your actual base class
     """
     Generator Plugin for the TimeSeries GAN.
     Handles the generation of synthetic time series data.
