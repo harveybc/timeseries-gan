@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K # Add this import
+from tqdm import tqdm # Import tqdm
 
 class TrainingCoordinator:
     """Coordinates GAN training process with proper orchestration."""
@@ -175,14 +176,15 @@ class TrainingCoordinator:
 
         try:
             # Step 1: Get processed data from the plugin
-            # This call is expected to perform feature engineering and return either a DataFrame or a NumPy array.
+            self.logger.info("Calling generator_plugin.prepare_features_for_discriminator...")
             processed_data = self.generator_plugin.prepare_features_for_discriminator(training_data_df)
-            self.logger.info(f"Plugin `prepare_features_for_discriminator` returned type: {type(processed_data)}. Log from plugin: Successfully prepared features...")
+            # The log "Successfully prepared features..." is printed from WITHIN the call above.
+            self.logger.info(f"Plugin `prepare_features_for_discriminator` returned. Output type: {type(processed_data)}")
 
 
             # Step 2: Ensure it's a 2D NumPy array
             if isinstance(processed_data, pd.DataFrame):
-                self.logger.info("Converting processed DataFrame to NumPy array in chunks...")
+                self.logger.info("Output from plugin is DataFrame. Converting to NumPy array in chunks...")
                 num_rows = len(processed_data)
                 if num_rows == 0:
                     self.logger.info("Processed DataFrame is empty. Assigning empty NumPy array.")
@@ -192,18 +194,18 @@ class TrainingCoordinator:
                     num_chunks = (num_rows + chunk_size - 1) // chunk_size
                     np_arrays = []
                     self.logger.info(f"Will convert {num_rows} rows from DataFrame to NumPy in {num_chunks} chunks of approx {chunk_size} rows each.")
-                    for i in range(num_chunks):
+                    # Using tqdm for the DataFrame to NumPy conversion loop
+                    for i in tqdm(range(num_chunks), desc="Converting DataFrame to NumPy", unit="chunk"):
                         start_idx = i * chunk_size
                         end_idx = min((i + 1) * chunk_size, num_rows)
-                        df_chunk = processed_data.iloc[start_idx:end_idx] # Safe: processed_data is DataFrame
+                        df_chunk = processed_data.iloc[start_idx:end_idx] 
                         np_arrays.append(df_chunk.to_numpy())
-                        if (i + 1) % max(1, num_chunks // 10) == 0 or (i + 1) == num_chunks:
-                            self.logger.info(f"Converted DataFrame chunk {i+1}/{num_chunks} to NumPy array.")
+                        # Reduced logging frequency inside the loop as tqdm provides progress
                     data_array_2d = np.concatenate(np_arrays, axis=0)
-                    self.logger.info(f"Conversion from DataFrame to NumPy array complete. Final shape: {data_array_2d.shape}")
+                    self.logger.info(f"Conversion from DataFrame to NumPy array complete. Final shape: {data_array_2d.shape if data_array_2d is not None else 'None'}")
             
             elif isinstance(processed_data, np.ndarray):
-                self.logger.info(f"Data from plugin is already a NumPy array. Shape: {processed_data.shape}")
+                self.logger.info(f"Output from plugin is already a NumPy array. Shape: {processed_data.shape}")
                 if processed_data.ndim == 0 or (processed_data.ndim > 0 and processed_data.shape[0] == 0): 
                     self.logger.info("Processed NumPy array is empty or scalar. Assigning empty NumPy array.")
                     data_array_2d = np.array([])
@@ -219,7 +221,7 @@ class TrainingCoordinator:
             self.logger.error(f"Error during data preparation by plugin or conversion to 2D NumPy array: {e}", exc_info=True)
             raise
 
-        if data_array_2d is None: # Should not happen if logic above is correct, but as a safeguard
+        if data_array_2d is None: 
             self.logger.error("data_array_2d is None after processing and conversion attempts.")
             raise ValueError("Failed to produce a valid 2D NumPy array from the input data.")
 
@@ -228,10 +230,8 @@ class TrainingCoordinator:
              return np.array([])
 
         # Step 3: Validate the number of features of the 2D NumPy array
+        self.logger.info("Validating features of the 2D NumPy array...")
         expected_features = self.params.get("expected_feature_count_for_discriminator", 51) 
-        # Consider making "expected_feature_count_for_discriminator" a formal parameter in config.py
-        # Or derive from self.params.get("generator_full_feature_names_ordered", [])
-        # For now, using a direct param or a default.
 
         if data_array_2d.ndim != 2:
             self.logger.error(f"Processed data is not 2D after all conversions. Shape: {data_array_2d.shape}")
@@ -241,9 +241,10 @@ class TrainingCoordinator:
             self.logger.error(f"Feature mismatch in prepared real data: Processed data has {data_array_2d.shape[1]} features, expected {expected_features}.")
             raise ValueError(f"Processed data has {data_array_2d.shape[1]} features, expected {expected_features}.")
         
-        self.logger.info(f"Real data (2D NumPy array) successfully prepared with {data_array_2d.shape[1]} features. Shape: {data_array_2d.shape}")
+        self.logger.info(f"2D NumPy array successfully prepared and validated. Shape: {data_array_2d.shape}")
         
         # Step 4: Convert 2D data to 3D sequences for discriminator
+        self.logger.info("Starting conversion of 2D data to 3D sequences...")
         seq_len = self.params.get("seq_len", 144)
         num_samples, num_features_in_array = data_array_2d.shape
         
@@ -255,10 +256,13 @@ class TrainingCoordinator:
         
         self.logger.info(f"Allocating memory for {num_sequences} sequences of shape ({seq_len}, {num_features_in_array}).")
         sequences_array = np.empty((num_sequences, seq_len, num_features_in_array), dtype=data_array_2d.dtype)
-        for i in range(num_sequences):
+        
+        self.logger.info(f"Creating {num_sequences} sequences. This may take some time...")
+        # Add tqdm progress bar here for the sequence creation loop
+        for i in tqdm(range(num_sequences), desc="Creating 3D sequences", unit="sequence"):
             sequences_array[i] = data_array_2d[i:i + seq_len]
         
-        self.logger.info(f"Created {len(sequences_array)} sequences. Output shape {sequences_array.shape}")
+        self.logger.info(f"Successfully created {len(sequences_array)} sequences. Output shape {sequences_array.shape}")
         
         return sequences_array
     
