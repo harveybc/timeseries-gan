@@ -308,14 +308,14 @@ class GeneratorPlugin(PluginBase):
         to the VAE decoder, along with handling conditional inputs.
         """
         self.logger.info("Building VAE-based composite generator.")
-        self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}, Original trainable status: {vae_decoder_model.trainable}")
+        self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}")
 
-        noise_dim = self.params.get("noise_dim", 100) 
-        internal_z_seq_len = self.params.get("internal_z_sequence_length", 18) # Corrected to use params
-        internal_z_dim = self.params.get("internal_z_latent_dim", 32)       # Corrected to use params
+        noise_dim = self.params.get("noise_dim", 100) # Example: dimension of the input noise vector for Z-generator
+        internal_z_seq_len = 18 # self.params.get("internal_z_sequence_length", 18)
+        internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
 
-        conditional_dim = self.params.get("conditional_features_dim", 10) 
-        context_dim = self.params.get("context_vector_dim", 64) 
+        conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
+        context_dim = self.params.get("context_vector_dim", 64) # For decoder_input_h_context
 
         # 1. Define Input Layers for the Composite Generator
         self.logger.debug("Defining input layers for composite generator.")
@@ -326,28 +326,18 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
 
         # 2. Build or Get the Internal BiLSTM Z-Generator
-        self.logger.debug("Building internal BiLSTM Z-generator part.")
-        z_gen_layers_trainable_weights = 0
+        self.logger.debug("Building internal BiLSTM Z-generator.")
         
-        x = tf.keras.layers.Dense(internal_z_seq_len * internal_z_dim, activation='relu', kernel_regularizer=self._get_l2_reg(), name="z_gen_dense")(noise_input) # Corrected dense units
-        z_gen_layers_trainable_weights += len(x.parent.trainable_weights)
-        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}, Trainable weights in Dense: {len(x.parent.trainable_weights)}")
-        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim), name="z_gen_reshape")(x) 
+        x = tf.keras.layers.Dense(576, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
+        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
+        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
         self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
+        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
+        x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
+        self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
-        lstm_units = 64 # Example, consider making this configurable
-        lstm_layer_obj = tf.keras.layers.LSTM(lstm_units, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
-        # It's better to name the Bidirectional layer for clarity if needed, or the LSTM layer itself
-        bidirectional_lstm_layer = tf.keras.layers.Bidirectional(lstm_layer_obj, name="z_bilstm")
-        x = bidirectional_lstm_layer(x)
-        z_gen_layers_trainable_weights += len(bidirectional_lstm_layer.trainable_weights)
-        self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}, Trainable weights in BiLSTM: {len(bidirectional_lstm_layer.trainable_weights)}")
-        
-        conv1d_layer = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_vae_spec")
-        z_sequence_for_vae = conv1d_layer(x)
-        z_gen_layers_trainable_weights += len(conv1d_layer.trainable_weights)
-        self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}, Trainable weights in Conv1D: {len(conv1d_layer.trainable_weights)}")
-        self.logger.info(f"Total trainable weights in Z-generator part: {z_gen_layers_trainable_weights}")
+        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_vae_spec")(x)
+        self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
 
         # 3. Connect to the VAE Decoder
         self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
@@ -355,128 +345,60 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"  - context_input shape: {context_input.shape}")
         self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
 
-        # --- CRITICAL CHANGE: Ensure VAE decoder and its inner layers are trainable ---
         vae_decoder_model.trainable = True
-        self.logger.info(f"Set VAE decoder '{vae_decoder_model.name}' to trainable=True.")
-        self.logger.info(f"Attempting to set all inner layers of VAE decoder '{vae_decoder_model.name}' to trainable.")
-        for i, layer in enumerate(vae_decoder_model.layers):
-            if not layer.trainable:
-                self.logger.debug(f"  VAE Inner Layer {i} - {layer.name} was NOT trainable. Setting trainable=True.")
-            layer.trainable = True
-        
-        vae_decoder_trainable_weights_after_unfreeze = len(vae_decoder_model.trainable_weights)
-        self.logger.info(f"VAE decoder '{vae_decoder_model.name}' after unfreezing. Trainable status: {vae_decoder_model.trainable}, Trainable weights: {vae_decoder_trainable_weights_after_unfreeze}")
-        if not vae_decoder_model.trainable_weights:
-            self.logger.warning(f"VAE decoder '{vae_decoder_model.name}' STILL has no trainable weights after unfreezing inner layers. Detailed layer status:")
-            for i, layer in enumerate(vae_decoder_model.layers):
-                self.logger.debug(f"  VAE Inner Layer {i} - {layer.name}: trainable={layer.trainable}, num_trainable_weights={len(layer.trainable_weights)}")
-        # --- END CRITICAL CHANGE ---
+        self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
 
         if self.params.get("use_generator_l2_reg", False):
             self.logger.info(f"Applying L2 regularization to trainable layers of VAE decoder '{vae_decoder_model.name}'.")
-            for layer in vae_decoder_model.layers: # Iterate through layers of vae_decoder_model
-                if layer.trainable: # Check if the layer is now trainable
-                    if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
+            for layer in vae_decoder_model.layers:
+                if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
+                    if layer.trainable:
                         self.logger.debug(f"Applying L2 to VAE decoder layer (kernel): {layer.name}")
                         layer.kernel_regularizer = self._get_l2_reg()
-                    elif isinstance(layer, tf.keras.layers.LSTM): 
+                elif isinstance(layer, tf.keras.layers.LSTM): # Includes Bidirectional wrapped LSTMs if VAE has them
+                    if layer.trainable:
                         self.logger.debug(f"Applying L2 to VAE decoder LSTM layer (kernel/recurrent): {layer.name}")
                         layer.kernel_regularizer = self._get_l2_reg()
                         layer.recurrent_regularizer = self._get_l2_reg()
-                    elif isinstance(layer, tf.keras.layers.Bidirectional):
-                        # For Bidirectional, L2 should be applied to its wrapped layer(s)
-                        if hasattr(layer, 'forward_layer') and layer.forward_layer.trainable:
-                             if isinstance(layer.forward_layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D, tf.keras.layers.LSTM)):
-                                self.logger.debug(f"Applying L2 to VAE Bidirectional forward layer: {layer.forward_layer.name}")
-                                layer.forward_layer.kernel_regularizer = self._get_l2_reg()
-                                if isinstance(layer.forward_layer, tf.keras.layers.LSTM):
-                                    layer.forward_layer.recurrent_regularizer = self._get_l2_reg()
-                        if hasattr(layer, 'backward_layer') and layer.backward_layer.trainable:
-                             if isinstance(layer.backward_layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D, tf.keras.layers.LSTM)):
-                                self.logger.debug(f"Applying L2 to VAE Bidirectional backward layer: {layer.backward_layer.name}")
-                                layer.backward_layer.kernel_regularizer = self._get_l2_reg()
-                                if isinstance(layer.backward_layer, tf.keras.layers.LSTM):
-                                    layer.backward_layer.recurrent_regularizer = self._get_l2_reg()
         
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
             self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
-            # Ensure the order of inputs matches the VAE decoder's expectation
-            # Based on REFERENCE.md: decoder_input_z_seq, decoder_input_h_context, decoder_input_conditions
-            # The VAE model might have specific input names. Let's assume the order from REFERENCE.md for now.
-            # The names are: "decoder_input_z_seq", "decoder_input_h_context", "decoder_input_conditions"
-            # Our current inputs are: z_sequence_for_vae, context_input, conditional_input
-            # This matches the order if vae_decoder_model.inputs are [z, context, conditions]
-            
-            # Check VAE input structure
-            if len(vae_decoder_model.inputs) == 3:
-                 # Default order: z_sequence, context, conditions
-                vae_decoder_inputs_list = [z_sequence_for_vae, context_input, conditional_input]
-                # If specific names are configured and match, use them to build a dict
-                # This part can be made more robust if input names are strictly defined in config
-                # For now, relying on the order [z_sequence, context, conditional_input]
-                self.logger.info(f"Passing inputs to VAE decoder in order: z_sequence, context, conditions.")
-            else:
-                self.logger.warning(f"VAE decoder expects {len(vae_decoder_model.inputs)} inputs, but we are preparing 3. This might lead to errors. Expected names: {vae_input_names}")
-                # Fallback or raise error
-                # For now, we'll proceed with the 3 inputs, this might need adjustment based on the exact VAE model.
-                vae_decoder_inputs_list = [z_sequence_for_vae, context_input, conditional_input]
-
-
-            vae_decoder_output = vae_decoder_model(vae_decoder_inputs_list)
+            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
             self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
             
-            post_proc_trainable_weights = 0
             # Post-process VAE decoder output to match discriminator input requirements
+            # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
             self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
             
-            target_features = self.params.get("num_features", 51)
-            decoder_output_seq_len = self.params.get("decoder_input_window_size", 144)
-
-            feature_expansion_layer = tf.keras.layers.Dense(target_features, activation='linear', name="feature_expansion")
-            expanded_features = feature_expansion_layer(vae_decoder_output)
-            post_proc_trainable_weights += len(feature_expansion_layer.trainable_weights)
-            self.logger.debug(f"Expanded features shape: {expanded_features.shape}, Trainable weights in Dense 'feature_expansion': {len(feature_expansion_layer.trainable_weights)}")
+            # Expand 23 features to 51 features using a Dense layer
+            expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
+            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
             
-            repeat_vector_layer = tf.keras.layers.RepeatVector(decoder_output_seq_len)
-            sequence_output_repeated = repeat_vector_layer(expanded_features)
-            # RepeatVector itself has no trainable weights
-            self.logger.debug(f"RepeatVector output shape: {sequence_output_repeated.shape}")
+            # Repeat the feature vector across 144 timesteps
+            # RepeatVector expects 2D input (batch_size, features) and outputs (batch_size, timesteps, features)
+            sequence_output = tf.keras.layers.RepeatVector(144)(expanded_features)
+            self.logger.debug(f"RepeatVector output shape: {sequence_output.shape}")
             
-            reshape_layer = tf.keras.layers.Reshape((decoder_output_seq_len, target_features), name="final_reshape")
-            sequence_output = reshape_layer(sequence_output_repeated)
-            # Reshape layer has no trainable weights
+            # Ensure final shape is correct (batch_size, 144, 51)
+            sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
+            
             self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
-            self.logger.info(f"Total trainable weights in post-processing part: {post_proc_trainable_weights}")
             
         except Exception as e:
-            self.logger.error(f"Error when calling the VAE decoder model or during post-processing: {e}", exc_info=True)
-            self.logger.error(f"VAE Decoder inputs used: {[inp.name for inp in vae_decoder_inputs_list if hasattr(inp, 'name')]}")
-            self.logger.error(f"  z_sequence_for_vae: {z_sequence_for_vae}")
-            self.logger.error(f"  context_input: {context_input}")
-            self.logger.error(f"  conditional_input: {conditional_input}")
+            self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
+            self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
+            self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
+            self.logger.error(f"Provided context_input: {context_input}")
+            self.logger.error(f"Provided conditional_input: {conditional_input}")
             raise
 
         composite_generator_model = tf.keras.Model(
-            inputs=[noise_input, conditional_input, context_input], # Order matters for calling
+            inputs=[noise_input, conditional_input, context_input],
             outputs=sequence_output,
             name="Composite_VAE_GAN_Generator"
         )
         self.logger.info("Composite VAE-GAN Generator model built successfully.")
-        
-        total_trainable_weights = len(composite_generator_model.trainable_weights)
-        self.logger.info(f"Final Composite Generator '{composite_generator_model.name}': Trainable status: {composite_generator_model.trainable}, Total trainable weights: {total_trainable_weights}")
-
-        if not composite_generator_model.trainable_weights:
-            self.logger.error(f"CRITICAL: Composite Generator '{composite_generator_model.name}' has NO trainable weights after construction.")
-            self.logger.error(f"  Breakdown: Z-gen part ~{z_gen_layers_trainable_weights}, VAE decoder part ~{vae_decoder_trainable_weights_after_unfreeze}, Post-proc part ~{post_proc_trainable_weights}")
-            # Detailed layer check for the composite model
-            # for layer_idx, layer_obj in enumerate(composite_generator_model.layers):
-            #     self.logger.debug(f"  Composite Layer {layer_idx} - {layer_obj.name}: trainable={layer_obj.trainable}, num_trainable_weights={len(layer_obj.trainable_weights)}")
-            #     if isinstance(layer_obj, tf.keras.Model): # If it's a nested model (like the VAE decoder itself)
-            #         self.logger.debug(f"    Details for nested model {layer_obj.name}:")
-            #         for sub_layer_idx, sub_layer_obj in enumerate(layer_obj.layers):
-            #             self.logger.debug(f"      Sub-Layer {sub_layer_idx} - {sub_layer_obj.name}: trainable={sub_layer_obj.trainable}, num_trainable_weights={len(sub_layer_obj.trainable_weights)}")
         
         if self.params.get("print_model_summary", False):
             self.logger.info("Composite VAE-GAN Generator Summary:")
@@ -780,29 +702,12 @@ class GeneratorPlugin(PluginBase):
     def get_model(self):
         """Get the generator model for training."""
         if self.model is None:
-            self.logger.warning("Generator model is None in get_model(). Attempting to load/build model.")
+            self.logger.warning("Generator model is None. Attempting to load/build model.")
             try:
-                self._load_model() # This will call _build_vae_generator if paths are set for it
+                self._load_model()
             except Exception as e:
-                self.logger.error(f"Failed to load/build model in get_model: {e}", exc_info=True)
-                # self.model remains None
-                return None # Explicitly return None on failure
-        
-        if self.model:
-            self.logger.info(f"GeneratorPlugin.get_model(): Returning model '{self.model.name}'.")
-            self.logger.info(f"  Model trainable status: {self.model.trainable}")
-            num_trainable_w = len(self.model.trainable_weights)
-            self.logger.info(f"  Number of trainable weights in '{self.model.name}': {num_trainable_w}")
-            if num_trainable_w == 0:
-                self.logger.error(f"CRITICAL from get_model: Model '{self.model.name}' has NO trainable weights when being retrieved.")
-                # You can add more detailed logging here if needed, like iterating through self.model.layers
-                # for layer in self.model.layers:
-                #     self.logger.debug(f"    Layer {layer.name}: trainable={layer.trainable}, num_weights={len(layer.trainable_weights)}")
-                #     if isinstance(layer, tf.keras.Model):
-                #         self.logger.debug(f"      Nested model {layer.name} trainable_weights: {len(layer.trainable_weights)}")
-        else:
-            self.logger.error("GeneratorPlugin.get_model(): self.model is STILL None after load/build attempt.")
-            
+                self.logger.error(f"Failed to load/build model in get_model: {e}")
+                return None
         return self.model
 
     def _expand_features_to_51(self, raw_output: np.ndarray, n_samples: int) -> np.ndarray:

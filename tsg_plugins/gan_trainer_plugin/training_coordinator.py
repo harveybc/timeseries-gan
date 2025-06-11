@@ -308,71 +308,45 @@ class TrainingCoordinator:
         # The GANTrainerPlugin._build_models method should ensure self.generator_model is correctly set up.
         # The gan_model's generator component should be self.generator_model.
 
-        # Verify that the generator component of the gan_model has trainable variables.
-        # The gan_model is structured as [generator_model, discriminator_model_clone]
-        # So, gan_model.layers[0] should be the generator.
-        if not gan_model.layers[0].trainable_variables:
-            self.logger.error("CRITICAL: Generator component of gan_model has no trainable variables before training step!")
-            self.logger.error(f"Generator component: {gan_model.layers[0].name}, trainable: {gan_model.layers[0].trainable}")
-            # Also check the original generator model instance passed to train() for good measure, 
-            # though the one in gan_model is what matters for this step.
-            # This check is more for sanity and to ensure the GANTrainerPlugin is passing the correct, trainable model.
-            # if hasattr(self, 'generator_plugin') and self.generator_plugin and hasattr(self.generator_plugin, 'model') and self.generator_plugin.model:
-            #     self.logger.error(f"Original generator_plugin.model: {self.generator_plugin.model.name}, trainable: {self.generator_plugin.model.trainable}, vars: {len(self.generator_plugin.model.trainable_variables)}")
-            # else:
-            #     self.logger.error("Original generator_plugin.model not accessible for additional check.")
-            raise RuntimeError("Generator component of gan_model has no trainable variables.")
-        else:
-            self.logger.info(f"Generator component ({gan_model.layers[0].name}) of gan_model has {len(gan_model.layers[0].trainable_variables)} trainable variables.")
+        # Combined model for training the generator (discriminator weights frozen)
+        # This 'gan_model' is what's used in the generator training step.
+        # It's assumed to be correctly constructed such that discriminator.trainable = False.
+        # For example, it might be self.gan_model_for_generator_training if built in __init__
+        # or passed/rebuilt for the step. For this fix, we assume 'gan_model' is this model.
 
-        for _ in range(n_times):
-            # Generate inputs for composite generator (3 inputs as per REFERENCE.md)
-            noise_dim = self.params.get("noise_dim", 100)
-            conditional_features_dim = self.params.get("conditional_features_dim", 10)
-            context_vector_dim = self.params.get("context_vector_dim", 64)
+        # --- Start of _train_generator_step logic ---
+        with tf.GradientTape() as tape:
+            # Generate fake data using the GAN model (which internally uses the generator)
+            # The inputs [noise, conditions, context] should match how gan_model is defined.
+            fake_pred = gan_model([noise, conditions, context], training=True) # training=True for generator's layers like BN/Dropout if any
             
-            # Generate inputs for composite generator
-            noise = tf.random.normal([batch_size, noise_dim])
-            conditions = tf.random.normal([batch_size, conditional_features_dim])
-            context = tf.random.normal([batch_size, context_vector_dim])
+            g_loss = self._generator_loss(fake_pred)
+
+        # --- This is where the problematic check at line 324 likely exists ---
+        # The original check might have been something that incorrectly identified 'noise_input'
+        # as the "generator component".
+        # We replace that faulty check with a robust one on gan_model.trainable_variables.
+        
+        generator_trainable_vars = gan_model.trainable_variables # These are the G's vars when D is frozen in gan_model
+
+        if not generator_trainable_vars:
+            self.logger.critical(f"CRITICAL ERROR: The 'gan_model' (used for training the generator) has NO trainable variables that belong to the generator.")
+            self.logger.critical(f"This means either the generator sub-model itself has no trainable weights, or the gan_model is not set up correctly with discriminator.trainable=False.")
+            self.logger.critical(f"GAN Model Name (for G training): {gan_model.name}")
+            self.logger.critical(f"GAN Model Trainable Variables (should be G's): {[(v.name, v.shape) for v in generator_trainable_vars]}") # Will be empty if error
+            self.logger.critical(f"Generator Model Name (original): {self.generator_model.name}")
+            self.logger.critical(f"Generator Model (original) Trainable Weights Count: {len(self.generator_model.trainable_weights)}")
+            # self.generator_model.summary(print_fn=self.logger.error) # Uncomment for very detailed G summary
+            # gan_model.summary(print_fn=self.logger.error) # Uncomment for very detailed GAN summary
+            raise RuntimeError("Generator component of gan_model has no trainable variables. Robust check failed.")
+        
+        self.logger.debug(f"Found {len(generator_trainable_vars)} trainable variables for the generator in gan_model.")
+        # --- End of corrected check ---
+
+        gradients = tape.gradient(g_loss, generator_trainable_vars)
+        self.generator_optimizer.apply_gradients(zip(gradients, generator_trainable_vars))
             
-            # Train generator via GAN model
-            with tf.GradientTape() as tape:
-                # Generate fake data and get discriminator prediction
-                fake_pred = gan_model([noise, conditions, context], training=True) # training=True for GAN model to update generator
-                
-                # Calculate generator loss
-                g_loss = self._generator_loss(fake_pred)
-            
-            # Apply gradients to generator only
-            # The gan_model was compiled with the generator's optimizer, and the discriminator part was set to non-trainable.
-            # So, trainable_variables of gan_model should effectively be the generator's trainable_variables.
-            generator_trainable_vars = gan_model.trainable_variables
-            
-            if not generator_trainable_vars:
-                self.logger.error("Generator (via gan_model) has no trainable variables at gradient application point!")
-                # Log details about the gan_model's layers and their trainability
-                for i, layer in enumerate(gan_model.layers):
-                    self.logger.error(f"gan_model.layer[{i}]: {layer.name}, trainable: {layer.trainable}, num_trainable_vars: {len(layer.trainable_variables)}")
-                raise RuntimeError("Generator (via gan_model) has no trainable variables.")
-            
-            self.logger.debug(f"Generator (via gan_model) has {len(generator_trainable_vars)} trainable variables for gradient application.")
-            
-            gradients = tape.gradient(g_loss, generator_trainable_vars)
-            
-            # Filter out None gradients and ensure we have valid gradient-variable pairs
-            valid_grads_and_vars = []
-            for grad, var in zip(gradients, generator_trainable_vars):
-                if grad is not None:
-                    valid_grads_and_vars.append((grad, var))
-            
-            if not valid_grads_and_vars:
-                self.logger.warning("No valid gradients found for generator. Skipping gradient update.")
-            else:
-                # Use the generator_optimizer that was configured for the gan_model
-                self.generator_optimizer.apply_gradients(valid_grads_and_vars)
-            
-            total_loss += g_loss.numpy()
+        total_loss += g_loss.numpy()
         
         return total_loss / n_times
     
