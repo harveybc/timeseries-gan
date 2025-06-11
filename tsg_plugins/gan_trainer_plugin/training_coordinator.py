@@ -102,11 +102,31 @@ class TrainingCoordinator:
         # Prepare real data for training
         self.logger.info("Calling _prepare_real_data...")
         real_data = self._prepare_real_data(training_data) # Removed batch_size argument
-        self.logger.info(f"Real data preparation complete. Shape: {real_data.shape}")
+        self.logger.info(f"_prepare_real_data returned. Type of real_data: {type(real_data)}")
         
-        self.logger.info("Starting training loop...")
+        if isinstance(real_data, np.ndarray):
+            self.logger.info(f"real_data is a NumPy array. Attempting to access shape. Dtype: {real_data.dtype}, Size: {real_data.size}")
+            if real_data.size == 0 and epochs > 0: # Check if data is empty but epochs are expected
+                self.logger.error("real_data is empty but training epochs are scheduled. This will likely lead to errors.")
+                # Potentially raise an error or handle as appropriate
+                # For now, just log and let it proceed to see the error or if it handles it
+            
+            shape_info = real_data.shape # Access shape here
+            self.logger.info(f"Real data preparation complete. Shape: {shape_info}")
+        else:
+            self.logger.warning(f"Real data preparation complete, but real_data is not a NumPy array. Type: {type(real_data)}. This might cause issues.")
+
+        self.logger.info("Checking if epochs > 0 before starting training loop...")
+        if not isinstance(epochs, int) or epochs <= 0:
+            self.logger.warning(f"Number of epochs is '{epochs}' (type: {type(epochs)}). Training loop will not run or will cause an error.")
+            if isinstance(epochs, int) and epochs <=0:
+                 self.logger.info("GAN training considered complete as epochs <= 0.")
+                 return self.training_history # Exit if no epochs to run
+            # If not an int, it might error out in range(epochs) anyway, but good to log.
+
+        self.logger.info(f"Starting training loop for {epochs} epochs...")
         # Training loop
-        for epoch in range(epochs):
+        for epoch in tqdm(range(epochs), desc="Overall Training Progress", unit="epoch"):
             self.current_epoch = epoch
             epoch_start_time = time.time()
             
@@ -263,7 +283,7 @@ class TrainingCoordinator:
             sequences_array[i] = data_array_2d[i:i + seq_len]
         
         self.logger.info(f"Successfully created {len(sequences_array)} sequences. Output shape {sequences_array.shape}")
-        
+        self.logger.info(f"Preparing to return sequences_array from _prepare_real_data. Type: {type(sequences_array)}, Dtype: {sequences_array.dtype}, Size: {sequences_array.size}")
         return sequences_array
     
     def _train_discriminator_step(self, real_data: tf.Tensor, generator: tf.keras.Model,
