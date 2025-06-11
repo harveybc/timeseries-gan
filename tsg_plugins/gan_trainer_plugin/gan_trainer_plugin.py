@@ -385,6 +385,18 @@ class GANTrainerPlugin(PluginBase):
         if hasattr(self.training_coordinator, 'set_params'):
              self.training_coordinator.set_params(**self.params)
 
+        # Construct full paths for output directories
+        base_dir = self.params.get("results_base_dir", "results")
+        model_save_subdir = self.params.get("save_model_dir", "models")
+        # plot_save_subdir = self.params.get("save_plot_dir", "plots") # For future use
+        # metrics_save_subdir = self.params.get("save_metrics_dir", "metrics") # For future use
+
+        models_dir_path = os.path.join(base_dir, model_save_subdir)
+        # plots_dir_path = os.path.join(base_dir, plot_save_subdir) # For future use
+        # metrics_dir_path = os.path.join(base_dir, metrics_save_subdir) # For future use
+
+        self.logger.info(f"GANTrainerPlugin: Models will be saved to: {models_dir_path}")
+
         try:
             # Ensure models are set for the ReduceLROnPlateau callbacks initialized in __init__
             if self.lr_scheduler_g and self.generator_model:
@@ -405,6 +417,9 @@ class GANTrainerPlugin(PluginBase):
                 discriminator=self.discriminator_model,
                 gan_model=self.gan_model,
                 feeder_plugin=self.feeder_plugin,
+                models_dir=models_dir_path, # Pass the constructed models_dir_path
+                # plots_dir=plots_dir_path, # Pass for future use
+                # metrics_dir=metrics_dir_path, # Pass for future use
                 lr_scheduler_g=self.lr_scheduler_g, # Pass LR schedulers
                 lr_scheduler_d=self.lr_scheduler_d, # Pass LR schedulers
                 early_stopping_callback=self.early_stopping_callback # Pass ES callback
