@@ -243,7 +243,7 @@ class GANTrainerPlugin(PluginBase):
         if self.generator_model is None:
             self.logger.error("GANTrainer: Generator model not available from plugin.")
             return False
-        self.logger.info("GANTrainer: Generator model retrieved successfully.")
+        self.logger.info(f"GANTrainer: Generator model retrieved: {self.generator_model.name}")
 
         if self.discriminator_plugin is None:
             self.logger.error("GANTrainer: Discriminator plugin instance not available.")
@@ -255,15 +255,18 @@ class GANTrainerPlugin(PluginBase):
         if self.discriminator_model is None:
             self.logger.error("GANTrainer: Discriminator model not available from plugin.")
             return False
-        self.logger.info("GANTrainer: Discriminator model retrieved successfully.")
+        self.logger.info(f"GANTrainer: Discriminator model retrieved: {self.discriminator_model.name}")
+
+        # Log initial trainable status of generator and discriminator
+        self.logger.info(f"GANTrainer: Initial generator_model.name: {self.generator_model.name}, trainable: {self.generator_model.trainable}, num_trainable_vars: {len(self.generator_model.trainable_variables)}")
+        self.logger.info(f"GANTrainer: Initial discriminator_model.name: {self.discriminator_model.name}, trainable: {self.discriminator_model.trainable}, num_trainable_vars: {len(self.discriminator_model.trainable_variables)}")
 
         # Build the combined GAN model
         try:
-            # Create the GAN model with non-trainable discriminator for generator training
-            # but keep the original discriminator trainable for discriminator training
-            
-            # Generator takes 3 inputs: noise, conditions, context
-            # These should match the inputs defined in GeneratorPlugin._build_composite_generator
+            # Ensure the generator_model itself is marked as trainable for the GAN.
+            self.generator_model.trainable = True
+            self.logger.info(f"GANTrainer: Set self.generator_model.trainable = True. Current num_trainable_vars: {len(self.generator_model.trainable_variables)}")
+
             if not isinstance(self.generator_model.inputs, list) or len(self.generator_model.inputs) < 3:
                 self.logger.error(f"GANTrainer: Generator model inputs are not as expected (list of 3). Got: {self.generator_model.inputs}")
                 return False
@@ -274,11 +277,12 @@ class GANTrainerPlugin(PluginBase):
             
             generated_sequence = self.generator_model([noise_input, conditions_input, context_input])
             
-            # Create a copy of discriminator for GAN model 
-            # Keep it trainable since you want both generator and discriminator to be trainable
+            # For the combined GAN model used to train the generator, the discriminator's weights should be frozen.
+            # The original self.discriminator_model remains trainable for its separate training step.
             discriminator_for_gan = tf.keras.models.clone_model(self.discriminator_model)
             discriminator_for_gan.set_weights(self.discriminator_model.get_weights())
-            discriminator_for_gan.trainable = True  # Keep trainable as requested
+            discriminator_for_gan.trainable = False # Standard GAN practice
+            self.logger.info(f"GANTrainer: discriminator_for_gan.trainable set to {discriminator_for_gan.trainable}. Num_trainable_vars: {len(discriminator_for_gan.trainable_variables)}")
             
             gan_output = discriminator_for_gan(generated_sequence)
             
@@ -288,14 +292,39 @@ class GANTrainerPlugin(PluginBase):
                 name="combined_gan_model"
             )
             
+            # Log layers of gan_model and their trainable status
+            self.logger.info(f"GANTrainer: GAN model layers: {[layer.name for layer in self.gan_model.layers]}")
+            if len(self.gan_model.layers) > 0:
+                gen_layer_in_gan = self.gan_model.layers[0]
+                self.logger.info(f"GANTrainer: GAN model layer 0 ({gen_layer_in_gan.name}) "
+                                 f"trainable: {gen_layer_in_gan.trainable}, "
+                                 f"num_vars: {len(gen_layer_in_gan.variables)}, "
+                                 f"num_trainable_vars: {len(gen_layer_in_gan.trainable_variables)}")
+            if len(self.gan_model.layers) > 1:
+                disc_layer_in_gan = self.gan_model.layers[1]
+                self.logger.info(f"GANTrainer: GAN model layer 1 ({disc_layer_in_gan.name}) "
+                                 f"trainable: {disc_layer_in_gan.trainable}, "
+                                 f"num_vars: {len(disc_layer_in_gan.variables)}, "
+                                 f"num_trainable_vars: {len(disc_layer_in_gan.trainable_variables)}")
+            
             generator_optimizer_config = {
-                'learning_rate': self.params.get('generator_learning_rate', 1e-4),
-                'beta_1': self.params.get('generator_beta_1', 0.5) 
+                'learning_rate': self.params.get('generator_lr', 1e-4), # Corrected key
+                'beta_1': self.params.get('generator_beta1', 0.5)     # Corrected key
             }
+            self.logger.info(f"GANTrainer: Generator optimizer config for GAN: {generator_optimizer_config}")
             gan_optimizer = tf.keras.optimizers.Adam(**generator_optimizer_config)
 
             self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
             self.logger.info("GANTrainer: Combined GAN model built and compiled successfully.")
+            
+            # Log trainable variables of the compiled GAN model and its layers again
+            self.logger.info(f"GANTrainer: Compiled GAN model ({self.gan_model.name}) "
+                             f"trainable: {self.gan_model.trainable}, "
+                             f"num_trainable_vars: {len(self.gan_model.trainable_variables)}")
+            if len(self.gan_model.layers) > 0:
+                self.logger.info(f"GANTrainer: After GAN compilation, gan_model.layers[0] ({self.gan_model.layers[0].name}) "
+                                 f"trainable: {self.gan_model.layers[0].trainable}, "
+                                 f"num_trainable_vars: {len(self.gan_model.layers[0].trainable_variables)}")
             # self.gan_model.summary(print_fn=self.logger.info)
 
         except Exception as e:
