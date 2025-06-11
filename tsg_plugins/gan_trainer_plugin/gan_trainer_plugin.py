@@ -139,6 +139,10 @@ class GANTrainerPlugin(PluginBase):
         self.discriminator_model: Optional[tf.keras.Model] = None
         self.gan_model: Optional[tf.keras.Model] = None
         
+        # Initialize optimizer instances
+        self.generator_optimizer_instance: Optional[tf.keras.optimizers.Optimizer] = None
+        self.discriminator_optimizer_instance: Optional[tf.keras.optimizers.Optimizer] = None
+
         # Initialize TrainingCoordinator
         # Pass self.params which should now be populated
         self.training_coordinator = TrainingCoordinator(
@@ -417,11 +421,30 @@ class GANTrainerPlugin(PluginBase):
                 'amsgrad': self.params.get('generator_amsgrad', keras_adam_defaults['amsgrad'])
             }
             self.logger.info(f"GANTrainer: Compiling GAN model with Generator optimizer config: {generator_optimizer_config}")
-            gan_optimizer = tf.keras.optimizers.Adam(**generator_optimizer_config)
+            # Store the generator optimizer instance
+            self.generator_optimizer_instance = tf.keras.optimizers.Adam(**generator_optimizer_config)
 
-            self.gan_model.compile(optimizer=gan_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+            self.gan_model.compile(optimizer=self.generator_optimizer_instance, loss='binary_crossentropy', metrics=['accuracy'])
             self.logger.info("GANTrainer: Combined GAN model built and compiled successfully.")
+
+            # Create and compile discriminator optimizer
+            discriminator_optimizer_config = {
+                'learning_rate': self.params.get('discriminator_lr', default_lr),
+                'beta_1': self.params.get('discriminator_beta1', keras_adam_defaults['beta_1']),
+                'beta_2': self.params.get('discriminator_beta2', keras_adam_defaults['beta_2']),
+                'epsilon': self.params.get('discriminator_epsilon', keras_adam_defaults['epsilon']),
+                'amsgrad': self.params.get('discriminator_amsgrad', keras_adam_defaults['amsgrad'])
+            }
+            self.logger.info(f"GANTrainer: Compiling Discriminator model with Discriminator optimizer config: {discriminator_optimizer_config}")
+            self.discriminator_optimizer_instance = tf.keras.optimizers.Adam(**discriminator_optimizer_config)
             
+            if self.discriminator_model:
+                self.discriminator_model.compile(optimizer=self.discriminator_optimizer_instance, loss='binary_crossentropy', metrics=['accuracy'])
+                self.logger.info("GANTrainer: Discriminator model compiled successfully with its own optimizer.")
+            else:
+                self.logger.error("GANTrainer: Discriminator model is None, cannot compile.")
+                return False
+
             # Log trainable variables of the compiled GAN model and its layers again
             self.logger.info(f"GANTrainer: Compiled GAN model ({self.gan_model.name}) "
                              f"trainable: {self.gan_model.trainable}, "
@@ -471,6 +494,15 @@ class GANTrainerPlugin(PluginBase):
                 current_batch_size = self.plugin_params['gan_batch_size']
 
         self.logger.info(f"GANTrainerPlugin.train: Resolved current_epochs to: {current_epochs}, current_batch_size to: {current_batch_size}")
+
+        # Assign optimizers to TrainingCoordinator
+        if self.generator_optimizer_instance and self.discriminator_optimizer_instance:
+            self.training_coordinator.g_optimizer = self.generator_optimizer_instance
+            self.training_coordinator.d_optimizer = self.discriminator_optimizer_instance
+            self.logger.info("GANTrainerPlugin.train: Assigned optimizer instances to TrainingCoordinator.")
+        else:
+            self.logger.error("GANTrainerPlugin.train: Optimizer instances are not available after _build_models. Aborting.")
+            return {}
 
         # Ensure models are compiled and LR schedulers are associated
         # This needs to happen after models are built but before training starts.

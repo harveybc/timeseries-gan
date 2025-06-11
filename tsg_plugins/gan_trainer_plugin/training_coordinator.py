@@ -240,7 +240,7 @@ class TrainingCoordinator:
                         
                         logger.info(f"  ReduceLROnPlateau ({callback.monitor}):")
                         logger.info(f"    Patience: {callback.patience}, Wait: {callback.wait}, Cooldown: {callback.cooldown_counter}/{callback.cooldown}")
-                        logger.info(f"    Best: {callback.best:.4f}, Current: {monitored_value:.4f if monitored_value is not None else 'N/A'}, Mode: {callback.mode}, MinDelta: {callback.min_delta}")
+                        logger.info(f"    Best: {callback.best:.4f}, Current: {f'{monitored_value:.4f}' if monitored_value is not None else 'N/A'}, Mode: {callback.mode}, MinDelta: {callback.min_delta}")
                         if optimizer_to_log:
                             logger.info(f"    LR (before on_epoch_end): {K.get_value(optimizer_to_log.learning_rate):.7f}")
                         else:
