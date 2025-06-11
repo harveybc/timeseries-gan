@@ -9,26 +9,28 @@ date feature generation, and data assembly for the main generation process.
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Optional
+import logging
 
 
 class DataGenerator:
     """Handles data generation and feature assembly for synthetic sequence creation."""
     
     def __init__(self, params: Dict[str, Any], feature_to_idx: Dict[str, int],
-                 normalization_handler, ti_calculator):
+                 ti_calculator, logger: logging.Logger): # Removed normalization_handler
         """
         Initialize the data generator.
         
         Args:
             params: Plugin parameters
             feature_to_idx: Mapping from feature names to indices  
-            normalization_handler: Instance for normalization/denormalization
             ti_calculator: Technical indicator calculator
+            logger: Logger instance
         """
         self.params = params
         self.feature_to_idx = feature_to_idx
-        self.normalization_handler = normalization_handler
         self.ti_calculator = ti_calculator
+        self.logger = logger # Store logger
+        self.logger.debug("DataGenerator initialized.") # Use logger
     
     def pre_fill_derived_features_in_window(self, current_input_feature_window: np.ndarray,
                                           initial_datetimes_for_window: pd.Series,

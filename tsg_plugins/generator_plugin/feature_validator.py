@@ -7,23 +7,28 @@ are subsets of the full feature names ordered list.
 """
 
 from typing import Dict, Any, List, Set
+import logging
 
 
 class FeatureValidator:
     """Validates feature name consistency across different feature lists."""
     
-    def __init__(self, full_feature_names_ordered: List[str]):
+    def __init__(self, full_feature_names_ordered: List[str], logger: logging.Logger):
         """
         Initialize validator with the master feature list.
         
         Args:
             full_feature_names_ordered: Complete ordered list of all features
+            logger: Logger instance
         """
         self.full_feature_names_ordered = full_feature_names_ordered
         self.full_set = set(full_feature_names_ordered)
+        self.logger = logger
         
         if not self.full_set:
+            self.logger.error("'full_feature_names_ordered' is empty.")
             raise ValueError("'full_feature_names_ordered' cannot be empty and must be configured.")
+        self.logger.debug(f"FeatureValidator initialized with {len(full_feature_names_ordered)} features.")
     
     def validate_feature_name_consistency(self, params: Dict[str, Any]) -> None:
         """
@@ -36,7 +41,7 @@ class FeatureValidator:
         Raises:
             ValueError: If validation fails
         """
-        print("FeatureValidator: Validating feature name consistency...")
+        self.logger.info("FeatureValidator: Validating feature name consistency...")
         
         # Validate critical feature lists
         self._check_subset("decoder_output_feature_names", params, critical=True)
@@ -52,7 +57,7 @@ class FeatureValidator:
         # Validate decoder input names
         self._validate_decoder_input_names(params)
         
-        print("FeatureValidator: Feature name consistency validation complete.")
+        self.logger.info("FeatureValidator: Feature name consistency validation complete.")
     
     def _check_subset(self, list_name: str, params: Dict[str, Any], critical: bool = False) -> None:
         """
@@ -77,7 +82,7 @@ class FeatureValidator:
                 f"'full_feature_names_ordered'."
             )
         
-        print(f"FeatureValidator: Feature list '{list_name}' validated successfully against 'full_feature_names_ordered'.")
+        self.logger.debug(f"FeatureValidator: Feature list '{list_name}' validated successfully against 'full_feature_names_ordered'.")
     
     def _validate_date_conditional_features(self, params: Dict[str, Any]) -> None:
         """
@@ -107,7 +112,7 @@ class FeatureValidator:
                 f"Ensure sin/cos versions of date features are in 'full_feature_names_ordered'."
             )
         
-        print("FeatureValidator: Transformed date conditional features validated successfully.")
+        self.logger.debug("FeatureValidator: Transformed date conditional features validated successfully.")
     
     def _validate_decoder_input_names(self, params: Dict[str, Any]) -> None:
         """
@@ -130,7 +135,7 @@ class FeatureValidator:
                     f"in GeneratorPlugin.params."
                 )
         
-        print("FeatureValidator: All decoder input name parameters are configured.")
+        self.logger.debug("FeatureValidator: All decoder input name parameters are configured.")
     
     def create_feature_index_mapping(self) -> Dict[str, int]:
         """

@@ -10,6 +10,7 @@ import sys
 import os
 import traceback
 from typing import Dict, Any
+import logging # Added import
 
 from app.cli import parse_args
 from app.config import DEFAULT_VALUES
@@ -29,6 +30,9 @@ def main():
     High-level orchestration: Parse CLI args, load/merge configurations, 
     initialize plugins, then dispatch to unified pipeline.
     """
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
     print("Starting TimeSeries-GAN pipeline...")
     
     # Parse CLI arguments

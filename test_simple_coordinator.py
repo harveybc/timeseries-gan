@@ -32,13 +32,19 @@ def test_training_coordinator_call():
             'discriminator_lr': 1e-4,
             'batch_size': 4,
             'seq_len': 144,
-            'feeder_noise_dim': 32,
+            'noise_dim': 100,  # FIXED: Use correct noise dimension for generator
+            'feeder_noise_dim': 32,  # Keep feeder dimension separate
             'conditional_features_dim': 10,
             'context_vector_dim': 64
         }
         
-        # Initialize coordinator
-        coordinator = TrainingCoordinator(params, logger)
+        # Initialize coordinator with mock generator_plugin
+        class MockGeneratorPlugin:
+            def prepare_features_for_discriminator(self, data):
+                return data.values if hasattr(data, 'values') else data
+        
+        mock_generator_plugin = MockGeneratorPlugin()
+        coordinator = TrainingCoordinator(params, logger, mock_generator_plugin)
         print("✓ TrainingCoordinator initialized successfully")
         
         # Create dummy training data

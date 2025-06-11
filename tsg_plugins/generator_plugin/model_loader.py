@@ -87,6 +87,18 @@ class ModelLoader:
             self.logger.error(f"Error loading model from {model_path}: {e}")
             return None
     
+    def load_model(self, model_path: str) -> Optional[Model]:
+        """
+        Load Keras model from specified path (wrapper for load_model_from_path).
+        
+        Args:
+            model_path: Path to the model file
+            
+        Returns:
+            Loaded Keras model or None if loading fails
+        """
+        return self.load_model_from_path(model_path)
+
     def _validate_model(self, model: Model) -> bool:
         """
         Validate loaded model structure.
