@@ -417,6 +417,8 @@ class GANTrainerPlugin(PluginBase):
                 discriminator=self.discriminator_model,
                 gan_model=self.gan_model,
                 feeder_plugin=self.feeder_plugin,
+                epochs=current_epochs,  # Explicitly pass current_epochs
+                batch_size=current_batch_size,  # Explicitly pass current_batch_size
                 models_dir=models_dir_path, # Pass the constructed models_dir_path
                 # plots_dir=plots_dir_path, # Pass for future use
                 # metrics_dir=metrics_dir_path, # Pass for future use

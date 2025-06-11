@@ -72,13 +72,15 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 *   **Learning Rate Scheduling**: `ReduceLROnPlateau` is used for dynamic learning rate adjustment for both generator and discriminator.
     *   Callbacks are configured in `GANTrainerPlugin` and monitor `g_loss` and `d_loss`.
     *   `TrainingCoordinator` calls their `on_epoch_end` method after each epoch.
-*   **Early Stopping (Planned)**:
-    *   Parameters for early stopping are configured in `GANTrainerPlugin`.
-    *   **Status**: Integration into the training loop in `TrainingCoordinator` is pending.
+*   **Early Stopping**:
+    *   Parameters for early stopping are configured in `GANTrainerPlugin` (e.g., `enable_early_stopping`, `es_patience`, `es_min_delta`, `es_monitor_metric`).
+    *   The `EarlyStopping` callback is initialized in `GANTrainerPlugin`.
+    *   The `TrainingCoordinator` calls `early_stopping_callback.on_train_begin()` and `early_stopping_callback.on_epoch_end()` appropriately.
+    *   If `early_stopping_callback.model.stop_training` becomes `True`, the training loop is terminated, and final models are saved.
 *   **Model Saving**:
-    *   The `TrainingCoordinator` saves the generator, discriminator, and the combined GAN model (for generator training) once after all training epochs complete.
-    *   Filenames are epoch-based (e.g., `generator_epoch_{total_epochs}.keras`) within the configured `models_dir`.
-    *   Alignment with specific final model paths from `app/config.py` (like `save_generator_sequential_model_file`) is pending for the final save action.
+    *   The `TrainingCoordinator` saves the generator and discriminator models.
+    *   If training completes all epochs or is stopped early, the final models are saved using filenames specified in `app/config.py`: `save_generator_sequential_model_file` and `save_discriminator_sequential_model_file`. These are saved in the directory constructed from `results_base_dir` and `save_model_dir`.
+    *   The composite GAN model (generator + non-trainable discriminator used for generator training) is not explicitly saved with a final name by default, but intermediate epoch-based saves would include it if enabled.
 
 ## 3. Operational Modes Detailed
 
@@ -87,16 +89,16 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 *   **Purpose**: To train the GAN, specifically improving the Composite GAN Generator and the Discriminator through adversarial learning.
 *   **Core Process**:
     1.  Load real training and validation data.
-    2.  Load the pre-trained VAE decoder (specified by `config["decoder_model_path"]`) into the `GeneratorPlugin`. The VAE decoder is set to `trainable=True` for fine-tuning.
+    2.  Load the pre-trained VAE decoder (specified by `config["generator_vae_decoder_model_path_param"]`) into the `GeneratorPlugin`. The VAE decoder is set to `trainable=True` for fine-tuning.
     3.  The `GeneratorPlugin` builds the composite GAN generator, which includes the VAE decoder and an internal BiLSTM Z-generator.
     4.  The `DiscriminatorPlugin` builds the discriminator model.
     5.  The `GANTrainerPlugin` orchestrates the training via `TrainingCoordinator`:
         *   Iterative training of discriminator and generator.
         *   Detailed per-epoch logging (losses, learning rates, timing, `ReduceLROnPlateau` info).
         *   Dynamic learning rate adjustment using `ReduceLROnPlateau`.
-        *   (Planned: Early stopping).
-    6.  Save trained model checkpoints (currently one final save after all epochs) to `models_dir`. The generator saved is the full composite GAN generator.
-*   **Key Inputs**: Real training data, pre-trained VAE decoder model file (`config["decoder_model_path"]`).
+        *   Early stopping based on configured metric and patience.
+    6.  Save trained models. The final generator (full composite GAN generator) and discriminator models are saved to paths specified by `config["save_generator_sequential_model_file"]` and `config["save_discriminator_sequential_model_file"]` respectively, within the `models_dir`.
+*   **Key Inputs**: Real training data, pre-trained VAE decoder model file (via `config["generator_vae_decoder_model_path_param"]`).
 *   **Key Outputs**: Improved/trained Composite GAN Generator model, trained Discriminator model, training logs, and loss metrics.
 
 ### 3.2. Generate Mode

@@ -110,7 +110,7 @@ The pre-trained autoencoder models (located in `examples/results/phase_4_3/`) im
 - **Architecture**: Details of the decoder's internal layers (e.g., LSTMs, Dense layers).
 - **Output**: Reconstructed features (e.g., 23 base features of shape `(batch_size, 23)`).
 - **Integration in GAN Generator**:
-    *   The `GeneratorPlugin` loads this pre-trained VAE decoder from the path specified in `config["decoder_model_path"]` (via `sequential_model_file` parameter).
+    *   The `GeneratorPlugin` loads this pre-trained VAE decoder from the path specified in `config["generator_vae_decoder_model_path_param"]`.
     *   The VAE decoder's weights are set to `trainable=True` to allow fine-tuning during the adversarial GAN training process.
     *   It forms a core part of the composite GAN generator, which also includes an internal BiLSTM Z-generator (to produce `z_seq` from noise) and handles the various inputs.
 
