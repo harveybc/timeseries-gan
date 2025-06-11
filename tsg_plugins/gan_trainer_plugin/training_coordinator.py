@@ -154,110 +154,109 @@ class TrainingCoordinator:
     def _prepare_real_data(self, training_data: pd.DataFrame) -> np.ndarray:
         self.logger.info("Preparing real data for discriminator...")
         if not self.generator_plugin:
+            self.logger.error("GeneratorPlugin not initialized in TrainingCoordinator.")
             raise RuntimeError("GeneratorPlugin not initialized in TrainingCoordinator.")
 
-        # Ensure training_data is a DataFrame
+        # Ensure training_data is a DataFrame or can be converted
+        training_data_df: pd.DataFrame
         if not isinstance(training_data, pd.DataFrame):
-            if hasattr(training_data, 'df') and isinstance(training_data.df, pd.DataFrame):
-                training_data_df = training_data.df.copy()
-                self.logger.info("Extracted DataFrame from training_data object.")
+            if hasattr(training_data, 'df') and isinstance(getattr(training_data, 'df'), pd.DataFrame):
+                training_data_df = getattr(training_data, 'df').copy()
+                self.logger.info("Extracted DataFrame from training_data object's 'df' attribute.")
             else:
-                self.logger.error(f"training_data is not a DataFrame and has no 'df' attribute. Type: {type(training_data)}")
+                self.logger.error(f"training_data is not a DataFrame and has no 'df' attribute of type DataFrame. Actual type: {type(training_data)}")
                 raise TypeError("training_data must be a pandas DataFrame or an object with a 'df' attribute that is a DataFrame.")
         else:
             training_data_df = training_data.copy()
 
-        self.logger.debug(f"Input training_data_df shape: {training_data_df.shape}, columns: {training_data_df.columns.tolist()}")
+        self.logger.debug(f"Input training_data_df shape: {training_data_df.shape}, columns: {training_data_df.columns.tolist() if isinstance(training_data_df, pd.DataFrame) else 'N/A'}")
+
+        data_array_2d: Optional[np.ndarray] = None 
 
         try:
-            # processed_data_df is the DataFrame returned by prepare_features_for_discriminator
-            processed_data_df = self.generator_plugin.prepare_features_for_discriminator(training_data)
-            # The log "Successfully prepared features..." is printed from the call above.
-            
-            self.logger.info("Converting processed DataFrame to NumPy array in chunks...")
-            num_rows = len(processed_data_df)
-            # You can configure this chunk size in your parameters if needed
-            chunk_size = self.params.get("data_conversion_chunk_size", 1000)
-            
-            if num_rows == 0:
-                self.logger.info("Processed DataFrame is empty. Returning an empty NumPy array.")
-                return np.array([])
+            # Step 1: Get processed data from the plugin
+            # This call is expected to perform feature engineering and return either a DataFrame or a NumPy array.
+            processed_data = self.generator_plugin.prepare_features_for_discriminator(training_data_df)
+            self.logger.info(f"Plugin `prepare_features_for_discriminator` returned type: {type(processed_data)}. Log from plugin: Successfully prepared features...")
 
-            num_chunks = (num_rows + chunk_size - 1) // chunk_size
-            np_arrays = []
 
-            self.logger.info(f"Will convert {num_rows} rows to NumPy in {num_chunks} chunks of approximately {chunk_size} rows each.")
-
-            # To add a tqdm progress bar here:
-            # 1. Make sure tqdm is installed: pip install tqdm
-            # 2. Import it at the top of the file: from tqdm import tqdm
-            # 3. Wrap range(num_chunks) with tqdm: for i in tqdm(range(num_chunks), desc="Converting to NumPy"):
-            for i in range(num_chunks):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, num_rows)
-                df_chunk = processed_data_df.iloc[start_idx:end_idx]
-                np_arrays.append(df_chunk.to_numpy())
-                
-                # Log progress periodically (e.g., every 10% or last chunk)
-                if (i + 1) % max(1, num_chunks // 10) == 0 or (i + 1) == num_chunks:
-                    self.logger.info(f"Converted chunk {i+1}/{num_chunks} to NumPy array.")
+            # Step 2: Ensure it's a 2D NumPy array
+            if isinstance(processed_data, pd.DataFrame):
+                self.logger.info("Converting processed DataFrame to NumPy array in chunks...")
+                num_rows = len(processed_data)
+                if num_rows == 0:
+                    self.logger.info("Processed DataFrame is empty. Assigning empty NumPy array.")
+                    data_array_2d = np.array([])
+                else:
+                    chunk_size = self.params.get("data_conversion_chunk_size", 1000)
+                    num_chunks = (num_rows + chunk_size - 1) // chunk_size
+                    np_arrays = []
+                    self.logger.info(f"Will convert {num_rows} rows from DataFrame to NumPy in {num_chunks} chunks of approx {chunk_size} rows each.")
+                    for i in range(num_chunks):
+                        start_idx = i * chunk_size
+                        end_idx = min((i + 1) * chunk_size, num_rows)
+                        df_chunk = processed_data.iloc[start_idx:end_idx] # Safe: processed_data is DataFrame
+                        np_arrays.append(df_chunk.to_numpy())
+                        if (i + 1) % max(1, num_chunks // 10) == 0 or (i + 1) == num_chunks:
+                            self.logger.info(f"Converted DataFrame chunk {i+1}/{num_chunks} to NumPy array.")
+                    data_array_2d = np.concatenate(np_arrays, axis=0)
+                    self.logger.info(f"Conversion from DataFrame to NumPy array complete. Final shape: {data_array_2d.shape}")
             
-            real_data_np = np.concatenate(np_arrays, axis=0)
-            self.logger.info(f"Conversion to NumPy array complete. Final shape: {real_data_np.shape}")
-            return real_data_np
+            elif isinstance(processed_data, np.ndarray):
+                self.logger.info(f"Data from plugin is already a NumPy array. Shape: {processed_data.shape}")
+                if processed_data.ndim == 0 or (processed_data.ndim > 0 and processed_data.shape[0] == 0): 
+                    self.logger.info("Processed NumPy array is empty or scalar. Assigning empty NumPy array.")
+                    data_array_2d = np.array([])
+                else:
+                    data_array_2d = processed_data
+            
+            else:
+                err_msg = f"Unexpected data type from generator_plugin.prepare_features_for_discriminator: {type(processed_data)}. Expected pd.DataFrame or np.ndarray."
+                self.logger.error(err_msg)
+                raise TypeError(err_msg)
+
         except Exception as e:
-            self.logger.error(f"Error during generator_plugin.prepare_features_for_discriminator: {e}", exc_info=True)
+            self.logger.error(f"Error during data preparation by plugin or conversion to 2D NumPy array: {e}", exc_info=True)
             raise
 
-        # Validate the number of features after processing
-        # Align with the 51-feature architecture (23 base + 8 cyclical + 20 TIs)
-        expected_features = 51 # As per updated REFERENCE.md and config.py
-        
-        # More robust way to get expected_features if params are reliably populated
-        # full_feature_list = self.params.get("generator_full_feature_names_ordered", [])
-        # datetime_col_name = self.params.get("datetime_col_name", "DATE_TIME")
-        # if full_feature_list:
-        #     calculated_expected_features = len([f for f in full_feature_list if f != datetime_col_name])
-        #     if calculated_expected_features > 0:
-        #         expected_features = calculated_expected_features
-        #     else:
-        #         self.logger.warning(f"'generator_full_feature_names_ordered' resulted in 0 numeric features. Defaulting to {expected_features}.")
-        # else:
-        #     self.logger.warning(f"'generator_full_feature_names_ordered' not found in params. Defaulting to {expected_features} features.")
+        if data_array_2d is None: # Should not happen if logic above is correct, but as a safeguard
+            self.logger.error("data_array_2d is None after processing and conversion attempts.")
+            raise ValueError("Failed to produce a valid 2D NumPy array from the input data.")
 
+        if data_array_2d.size == 0:
+             self.logger.warning("Resulting 2D data array is empty. Returning empty array. This might cause issues downstream.")
+             return np.array([])
 
-        if processed_df.shape[1] != expected_features:
-            if isinstance(processed_df, np.ndarray):
-                self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}.")
-            else:
-                self.logger.error(f"Feature mismatch in prepared real data: Processed data has {processed_df.shape[1]} features, but expected {expected_features}. Columns: {processed_df.columns.tolist()}")
-            raise ValueError(f"Processed data has {processed_df.shape[1]} features, expected {expected_features}.")
+        # Step 3: Validate the number of features of the 2D NumPy array
+        expected_features = self.params.get("expected_feature_count_for_discriminator", 51) 
+        # Consider making "expected_feature_count_for_discriminator" a formal parameter in config.py
+        # Or derive from self.params.get("generator_full_feature_names_ordered", [])
+        # For now, using a direct param or a default.
+
+        if data_array_2d.ndim != 2:
+            self.logger.error(f"Processed data is not 2D after all conversions. Shape: {data_array_2d.shape}")
+            raise ValueError(f"Processed data must be 2D for feature validation, but got shape {data_array_2d.shape}")
+
+        if data_array_2d.shape[1] != expected_features:
+            self.logger.error(f"Feature mismatch in prepared real data: Processed data has {data_array_2d.shape[1]} features, expected {expected_features}.")
+            raise ValueError(f"Processed data has {data_array_2d.shape[1]} features, expected {expected_features}.")
         
-        self.logger.info(f"Real data successfully prepared with {processed_df.shape[1]} features.")
+        self.logger.info(f"Real data (2D NumPy array) successfully prepared with {data_array_2d.shape[1]} features. Shape: {data_array_2d.shape}")
         
-        # Convert to numpy array
-        if isinstance(processed_df, np.ndarray):
-            data_array = processed_df
-        else:
-            data_array = processed_df.values
-        
-        # Convert 2D data to 3D sequences for discriminator
-        # Discriminator expects (batch_size, sequence_length, features)
+        # Step 4: Convert 2D data to 3D sequences for discriminator
         seq_len = self.params.get("seq_len", 144)
+        num_samples, num_features_in_array = data_array_2d.shape
         
-        # Create sequences from the data
-        # Using a more efficient way to create sequences with pre-allocated NumPy array
-        num_samples, num_features = data_array.shape
+        if num_samples < seq_len : 
+            self.logger.error(f"Cannot create sequences of length {seq_len} from data with only {num_samples} samples.")
+            raise ValueError(f"Not enough data ({num_samples} samples) to create sequences of length {seq_len}.")
+
         num_sequences = num_samples - seq_len + 1
         
-        if num_sequences <= 0:
-            self.logger.error(f"Cannot create sequences of length {seq_len} from data with {num_samples} samples")
-            raise ValueError(f"Not enough data to create sequences of length {seq_len}")
-        
-        self.logger.info(f"Allocating memory for {num_sequences} sequences of shape ({seq_len}, {num_features}).")
-        sequences_array = np.empty((num_sequences, seq_len, num_features), dtype=data_array.dtype)
+        self.logger.info(f"Allocating memory for {num_sequences} sequences of shape ({seq_len}, {num_features_in_array}).")
+        sequences_array = np.empty((num_sequences, seq_len, num_features_in_array), dtype=data_array_2d.dtype)
         for i in range(num_sequences):
-            sequences_array[i] = data_array[i:i + seq_len]
+            sequences_array[i] = data_array_2d[i:i + seq_len]
         
         self.logger.info(f"Created {len(sequences_array)} sequences. Output shape {sequences_array.shape}")
         
