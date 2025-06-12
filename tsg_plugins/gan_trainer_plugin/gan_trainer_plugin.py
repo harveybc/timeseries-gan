@@ -510,8 +510,6 @@ class GANTrainerPlugin(PluginBase):
             self.gan_model.summary(print_fn=lambda x: debug_info["gan_model_summary"].append(x))
         return debug_info
 
-    def add_debug_info(self, key: str, value: Any) -> None:
-        """Add custom debug information (not standard)."""
-        if not hasattr(self, '_custom_debug_info'):
-            self._custom_debug_info = {}
-        self._custom_debug_info[key] = value
+    def add_debug_info(self, debug_info: Dict[str, Any]) -> None:
+        """Add plugin debug information to the given dictionary."""
+        debug_info.update(self.get_debug_info())
