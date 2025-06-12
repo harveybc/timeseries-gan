@@ -1,9 +1,0 @@
-{
-  "operation_mode": "generate",
-  "n_samples": 5,
-  "x_train_file": "examples/results/phase_4_3/x_train_normalized.csv",
-  "output_file": "test_pipeline_output.csv",
-  "generator_model_path": "examples/models/23f_generator_d4_2559.h5",
-  "vae_decoder_model_path_param": "examples/models/23f_generator_d4_2559.h5",
-  "print_model_summary": false
-}

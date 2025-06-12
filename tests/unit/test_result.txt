@@ -1,0 +1,20 @@
+2025-06-03 05:12:21.836947: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1748945541.849510   56718 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1748945541.853572   56718 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1748945541.864379   56718 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1748945541.864416   56718 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1748945541.864420   56718 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1748945541.864424   56718 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2025-06-03 05:12:21.867272: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Generator plugin instance not provided
+Generator not available - models not built
+Traceback (most recent call last):
+  File "<string>", line 23, in <module>
+TypeError: GANTrainerPlugin.add_debug_info() takes 2 positional arguments but 3 were given
+Testing GAN trainer plugin import...
+SUCCESS: GANTrainerPlugin imported
+SUCCESS: Plugin instantiated
+SUCCESS: All mandatory methods present
+ERROR: GANTrainerPlugin.add_debug_info() takes 2 positional arguments but 3 were given
