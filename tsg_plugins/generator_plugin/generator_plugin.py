@@ -334,19 +334,17 @@ class GeneratorPlugin(PluginBase):
             operation_mode = self.main_config.get("operation_mode", "train")
             
             if operation_mode == "generate":
-                # === GENERATE MODE: Expand to 44 features ===
+                # === GENERATE MODE: Expand to 44 features with proper sequence generation ===
                 self.logger.info("Generate mode: Expanding VAE output from 23 to 44 features")
                 
-                # Use Keras layer for feature expansion (works with KerasTensors)
+                # Instead of expanding once and repeating, we need to generate diverse sequences
+                # First expand the single timestep to get base pattern
                 expansion_layer = FeatureExpansionLayer(name="feature_expansion")
-                expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
-                self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
+                base_expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
+                self.logger.debug(f"Base expanded features shape: {base_expanded_features.shape}")
                 
-                # Create sequences by expanding the single timestep to 144 timesteps
-                sequence_base = tf.keras.layers.RepeatVector(144)(expanded_features)  # (batch_size, 144, 44)
-                
-                # Add small random variations to make realistic time sequences
-                sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
+                # Generate diverse sequence by creating variations of the base pattern
+                sequence_output = self._create_diverse_sequence_from_base(base_expanded_features, 144)
                 
                 self.logger.debug(f"Final sequence output shape (44 features): {sequence_output.shape}")
                 
@@ -448,11 +446,37 @@ class GeneratorPlugin(PluginBase):
         raw_output = self.model.predict([noise, initial_conditions, conditions], verbose=0)
         self.logger.debug(f"Raw generator output shape: {raw_output.shape}")
         
-        # The new architecture outputs sequences directly (batch_size, 144, 23)
-        # No need for expansion - return sequences as-is
-        self.logger.debug(f"Final sequences shape: {raw_output.shape}")
+        # Check if we need to expand 23 base features to 44 features for generate mode
+        operation_mode = self.main_config.get("operation_mode", "train") if hasattr(self, 'main_config') and self.main_config else "train"
         
-        return raw_output
+        if operation_mode == "generate":
+            # Check if the model already outputs 44 features (sequence shape: batch_size, seq_len, features)
+            if len(raw_output.shape) == 3 and raw_output.shape[2] == 44:
+                self.logger.info(f"Generate mode: Model already outputs 44 features. Shape: {raw_output.shape}")
+                return raw_output
+            elif len(raw_output.shape) == 3 and raw_output.shape[2] == 23:
+                self.logger.info(f"Generate mode: Expanding sequence data from 23 to 44 features. Input shape: {raw_output.shape}")
+                
+                # For sequence data, we need to expand each timestep
+                batch_size, seq_len, num_features = raw_output.shape
+                expanded_sequences = []
+                
+                for t in range(seq_len):
+                    timestep_data = raw_output[:, t, :]  # Shape: (batch_size, 23)
+                    expanded_timestep = self._expand_vae_output_to_44_features(timestep_data)  # Shape: (batch_size, 44)
+                    expanded_sequences.append(expanded_timestep)
+                
+                # Stack to create sequence: (batch_size, seq_len, 44)
+                expanded_output = tf.stack(expanded_sequences, axis=1)
+                self.logger.debug(f"Expanded sequence output shape: {expanded_output.shape}")
+                return expanded_output.numpy()
+            else:
+                self.logger.error(f"Unexpected raw output shape in generate mode: {raw_output.shape}")
+                return raw_output
+        else:
+            # Training mode: Return 23 base features as-is
+            self.logger.debug(f"Training mode: Returning 23 features as-is. Shape: {raw_output.shape}")
+            return raw_output
 
     def _iterative_generation_with_composite_model(
         self, 
