@@ -267,7 +267,7 @@ class GeneratorPlugin(PluginBase):
         lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm_internal")(x)
         
-        z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_target_dim")(x)
+        z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='tanh', padding='same', name="z_conv1d_to_target_dim")(x)
         
         model = tf.keras.Model(inputs=noise_input, outputs=z_sequence_output, name="Internal_BiLSTM_Z_Generator")
         
@@ -311,7 +311,7 @@ class GeneratorPlugin(PluginBase):
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
-        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_vae_spec")(x)
+        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='tanh', padding='same', name="z_conv1d_to_vae_spec")(x)
         self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
 
         # 3. Connect to the VAE Decoder

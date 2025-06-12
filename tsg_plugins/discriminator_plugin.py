@@ -190,6 +190,7 @@ class DiscriminatorPlugin:
             kernel_size = conv_kernel_sizes[i] if i < len(conv_kernel_sizes) else conv_kernel_sizes[-1]
             strides = conv_strides[i] if i < len(conv_strides) else conv_strides[-1]
             x = Conv1D(
+            
             filters=filters, 
             kernel_size=kernel_size, 
             strides=strides, 
@@ -205,11 +206,13 @@ class DiscriminatorPlugin:
         # LSTM layer
         if use_bidirectional_lstm:
             x = Bidirectional(LSTM(lstm_units, 
+                       conv_activation='tanh', # Use tanh for LSTM activation
                        kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                        recurrent_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                        name="lstm_core"), name="bidirectional_lstm")(x) 
         else:
             x = LSTM(lstm_units, 
+                 activation='tanh', # Use tanh for LSTM activation   
                  kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                  recurrent_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                  name="lstm_core")(x) 
