@@ -70,7 +70,7 @@ class GANTrainerPlugin(PluginBase):
         
         # Early stopping - these keys MUST exist in the final config.
         "enable_early_stopping": True, 
-        "es_patience": 50, # More aggressive default for plugin_params, config.py has 10
+        "es_patience": 120, # FIXED: Use config.py value (early_stopping_patience)
         "es_min_delta": 0.001, 
         "es_monitor_metric": "g_loss",
         "es_restore_best_weights": False, # Added default
@@ -238,6 +238,11 @@ class GANTrainerPlugin(PluginBase):
                 if "discriminator_lr" not in self.main_config:
                     self.params["discriminator_lr"] = general_lr
                     self.logger.info(f"Set self.params['discriminator_lr'] to general 'learning_rate': {general_lr}")
+            
+            # Map config.py parameter names to plugin parameter names
+            if "early_stopping_patience" in self.main_config:
+                self.params["es_patience"] = self.main_config["early_stopping_patience"]
+                self.logger.info(f"Mapped 'early_stopping_patience' from config to 'es_patience': {self.params['es_patience']}")
             
             # Ensure trainer-prefixed parameters from main_config also override:
             # e.g. if main_config has "trainer_generator_lr", it should set self.params["generator_lr"]

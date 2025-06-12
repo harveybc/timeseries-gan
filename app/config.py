@@ -181,6 +181,7 @@ DEFAULT_VALUES = {
     "fp16": False,
     "tf32": True,
     "autocast": True,
+    
 
     # Added: L2 Regularization for Generator
     "l2_regularization": 1e-4,
