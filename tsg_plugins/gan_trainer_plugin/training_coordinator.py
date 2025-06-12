@@ -743,21 +743,20 @@ class TrainingCoordinator:
                 fake_data = None
                 real_sample = None
                 if self.params.get("enable_mmd_loss", False):
-                    # Extract generator from gan_model (should be the first layer/model)
+                    # Extract generator from gan_model by calling it directly if it's available in training coordinator
                     try:
-                        # Assuming gan_model is a Sequential or Functional model with generator as first part
-                        if hasattr(gan_model, 'layers') and len(gan_model.layers) > 0:
-                            generator_layer = gan_model.layers[0]
-                            fake_data = generator_layer([noise, conditions, context], training=True)
+                        # Use the stored generator reference from the training loop
+                        if hasattr(self, 'current_generator_for_mmd') and self.current_generator_for_mmd is not None:
+                            fake_data = self.current_generator_for_mmd([noise, conditions, context], training=True)
+                            self.logger.debug(f"Successfully extracted generator output for MMD: shape={fake_data.shape}")
                         else:
-                            # Fallback: try to access generator directly if it's stored
-                            if hasattr(self, 'current_generator_for_mmd'):
-                                fake_data = self.current_generator_for_mmd([noise, conditions, context], training=True)
+                            self.logger.warning("Generator model not available for MMD calculation in training coordinator")
                         
                         # Sample real data for MMD comparison (use stored real data from training loop)
                         if hasattr(self, 'current_real_data_for_mmd') and fake_data is not None:
                             real_indices = tf.random.uniform([batch_size], 0, tf.shape(self.current_real_data_for_mmd)[0], dtype=tf.int32)
                             real_sample = tf.gather(self.current_real_data_for_mmd, real_indices)
+                            self.logger.debug(f"Real sample for MMD: shape={real_sample.shape}")
                     except Exception as e:
                         self.logger.warning(f"Could not extract generator output for MMD calculation: {e}")
                         fake_data = None
