@@ -263,7 +263,7 @@ class TrainingCoordinator:
             # Log progress every epoch with comprehensive PhD-level metrics
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
-                # Format losses with scientific notation for small values
+                # Format primary losses with scientific notation for small values
                 g_loss_str = f"{g_loss:.4e}" if g_loss < 1e-3 else f"{g_loss:.4f}"
                 d_loss_str = f"{d_loss_avg:.4e}" if d_loss_avg < 1e-3 else f"{d_loss_avg:.4f}"
                 d_real_str = f"{d_loss_real_avg:.4e}" if d_loss_real_avg < 1e-3 else f"{d_loss_real_avg:.4f}"
@@ -273,7 +273,11 @@ class TrainingCoordinator:
                 current_g_lr = K.get_value(self.generator_optimizer.learning_rate)
                 current_d_lr = K.get_value(self.discriminator_optimizer.learning_rate)
                 
-                # Primary metrics
+                # Helper function for formatting small values
+                def format_metric(value, threshold=1e-3):
+                    return f"{value:.4e}" if abs(value) < threshold else f"{value:.4f}"
+                
+                # PRIMARY METRICS LINE - Core GAN losses and learning rates
                 log_msg = (
                     f"Epoch {epoch+1}/{final_epochs} │ "
                     f"G_loss: {g_loss_str} │ D_loss: {d_loss_str} │ "
@@ -281,19 +285,59 @@ class TrainingCoordinator:
                     f"G_LR: {current_g_lr:.2e} │ D_LR: {current_d_lr:.2e}"
                 )
                 
-                # Learning rate scheduler patience (ReduceLROnPlateau)
+                # ACCURACY METRICS LINE - How well models perform their classification tasks
+                accuracy_metrics = (
+                    f"           ACC │ "
+                    f"G_acc: {g_metrics['g_accuracy']:.3f} │ D_acc: {d_metrics['d_total_accuracy']:.3f} │ "
+                    f"D_real_acc: {d_metrics['d_real_accuracy']:.3f} │ D_fake_acc: {d_metrics['d_fake_accuracy']:.3f}"
+                )
+                
+                # GRADIENT METRICS LINE - Training dynamics and convergence indicators
+                gradient_metrics = (
+                    f"          GRAD │ "
+                    f"G_grad_norm: {format_metric(g_metrics['g_gradient_norm'])} │ "
+                    f"D_grad_norm: {format_metric(d_metrics['d_gradient_norm'])} │ "
+                    f"G_valid_grads: {g_metrics['g_valid_grad_ratio']:.2f} │ "
+                    f"D_valid_grads: {d_metrics['d_valid_grad_ratio']:.2f}"
+                )
+                
+                # PREDICTION STATISTICS LINE - Model output analysis
+                prediction_stats = (
+                    f"          PRED │ "
+                    f"D_real_mean: {format_metric(d_metrics['d_real_pred_mean'])} │ "
+                    f"D_fake_mean: {format_metric(d_metrics['d_fake_pred_mean'])} │ "
+                    f"G_fake_mean: {format_metric(g_metrics['g_fake_pred_mean'])} │ "
+                    f"D_pred_gap: {format_metric(d_metrics['d_prediction_gap'])}"
+                )
+                
+                # PREDICTION VARIABILITY LINE - Output distribution analysis
+                variability_stats = (
+                    f"           STD │ "
+                    f"D_real_std: {format_metric(d_metrics['d_real_pred_std'])} │ "
+                    f"D_fake_std: {format_metric(d_metrics['d_fake_pred_std'])} │ "
+                    f"G_fake_std: {format_metric(g_metrics['g_fake_pred_std'])}"
+                )
+                
+                # TRAINING CONFIGURATION LINE - Batch sizes and step counts
+                config_stats = (
+                    f"          CONF │ "
+                    f"G_batch: {g_metrics['g_batch_size']} │ D_batch: {d_metrics['d_batch_size']} │ "
+                    f"G_steps: {g_metrics['g_training_steps']} │ D_steps: {d_metrics['d_training_steps']}"
+                )
+                
+                # PATIENCE AND SCHEDULING LINE - Learning rate and early stopping status
                 lr_patience_info = ""
                 if lr_scheduler_g and hasattr(lr_scheduler_g, 'wait'):
                     g_wait = getattr(lr_scheduler_g, 'wait', 0)
                     g_patience = getattr(lr_scheduler_g, 'patience', 0)
                     g_cooldown = getattr(lr_scheduler_g, 'cooldown_counter', 0)
-                    lr_patience_info += f" │ LR_G: {g_wait}/{g_patience} (cd:{g_cooldown})"
+                    lr_patience_info += f"LR_G: {g_wait}/{g_patience} (cd:{g_cooldown}) │ "
                 
                 if lr_scheduler_d and hasattr(lr_scheduler_d, 'wait'):
                     d_wait = getattr(lr_scheduler_d, 'wait', 0)
                     d_patience = getattr(lr_scheduler_d, 'patience', 0)
                     d_cooldown = getattr(lr_scheduler_d, 'cooldown_counter', 0)
-                    lr_patience_info += f" │ LR_D: {d_wait}/{d_patience} (cd:{d_cooldown})"
+                    lr_patience_info += f"LR_D: {d_wait}/{d_patience} (cd:{d_cooldown}) │ "
                 
                 # Early stopping patience
                 es_patience_info = ""
@@ -301,11 +345,20 @@ class TrainingCoordinator:
                     es_wait = getattr(early_stopping_callback, 'wait', 0)
                     es_patience = getattr(early_stopping_callback, 'patience', self.params.get('es_patience', 0))
                     monitor_metric = getattr(early_stopping_callback, 'monitor', 'loss')
-                    es_patience_info = f" │ ES: {es_wait}/{es_patience} ({monitor_metric})"
+                    es_patience_info = f"ES: {es_wait}/{es_patience} ({monitor_metric})"
                 
-                # Complete log message
-                log_msg += lr_patience_info + es_patience_info + f" │ Time: {epoch_time:.2f}s"
+                patience_line = f"         SCHED │ {lr_patience_info}{es_patience_info} │ Time: {epoch_time:.2f}s"
+                
+                # Log all lines with clear structure
+                self.logger.info("═" * 120)
                 self.logger.info(log_msg)
+                self.logger.info(accuracy_metrics)
+                self.logger.info(gradient_metrics)
+                self.logger.info(prediction_stats)
+                self.logger.info(variability_stats)
+                self.logger.info(config_stats)
+                self.logger.info(patience_line)
+                self.logger.info("═" * 120)
             
             # Save models at intervals - THIS SECTION IS REMOVED
             # if epoch % save_interval == 0 and epoch > 0:
@@ -437,7 +490,7 @@ class TrainingCoordinator:
     
     def _train_discriminator_step(self, real_data: tf.Tensor, generator: tf.keras.Model,
                                   discriminator: tf.keras.Model, batch_size: int,
-                                  n_times: int) -> float:
+                                  n_times: int) -> Tuple[float, float, float, Dict[str, float]]:
         """
         Train discriminator for n_times steps.
         
@@ -453,12 +506,23 @@ class TrainingCoordinator:
                 - Average total discriminator loss (float)
                 - Average discriminator loss on real samples (float)
                 - Average discriminator loss on fake samples (float)
+                - Additional training metrics (Dict[str, float])
         """
         total_d_loss_val = 0.0
         total_d_real_loss_val = 0.0
         total_d_fake_loss_val = 0.0
         
-        for _ in range(n_times):
+        # Additional metrics tracking
+        total_d_real_acc = 0.0
+        total_d_fake_acc = 0.0
+        total_grad_norm = 0.0
+        total_real_pred_mean = 0.0
+        total_fake_pred_mean = 0.0
+        total_real_pred_std = 0.0
+        total_fake_pred_std = 0.0
+        valid_gradient_steps = 0
+        
+        for step in range(n_times):
             # Sample real data batch
             batch_indices = tf.random.uniform([batch_size], 0, tf.shape(real_data)[0], dtype=tf.int32)
             real_batch = tf.gather(real_data, batch_indices)
@@ -491,11 +555,29 @@ class TrainingCoordinator:
                 real_pred = discriminator(real_batch, training=True)
                 fake_pred = discriminator(fake_batch, training=True)
                 
+                # Calculate prediction statistics
+                real_pred_mean = tf.reduce_mean(real_pred)
+                fake_pred_mean = tf.reduce_mean(fake_pred)
+                real_pred_std = tf.math.reduce_std(real_pred)
+                fake_pred_std = tf.math.reduce_std(fake_pred)
+                
+                # Calculate accuracy-like metrics (how often discriminator is correct)
+                real_acc = tf.reduce_mean(tf.cast(real_pred > 0.5, tf.float32))
+                fake_acc = tf.reduce_mean(tf.cast(fake_pred < 0.5, tf.float32))
+                
                 # Calculate loss components
                 d_loss, d_real_loss, d_fake_loss = self._discriminator_loss(real_pred, fake_pred)
             
-            # Apply gradients
+            # Apply gradients with gradient norm tracking
             gradients = tape.gradient(d_loss, discriminator.trainable_variables)
+            
+            # Calculate gradient norm
+            grad_norm = 0.0
+            if gradients:
+                grad_norms = [tf.norm(g) for g in gradients if g is not None]
+                if grad_norms:
+                    grad_norm = tf.reduce_sum([tf.square(gn) for gn in grad_norms])
+                    grad_norm = tf.sqrt(grad_norm)
             
             # Debug: Check discriminator trainable variables
             if len(discriminator.trainable_variables) == 0:
@@ -513,16 +595,53 @@ class TrainingCoordinator:
             if len(valid_grads_and_vars) == 0:
                 self.logger.warning("No valid gradients found for discriminator. Skipping gradient update.")
             else:
-                self.discriminator_optimizer.apply_gradients(valid_grads_and_vars)
+                # Apply gradient clipping if enabled
+                if self.params.get("clip_gradients", True):
+                    max_grad_norm = self.params.get("max_grad_norm", 10.0)
+                    clipped_grads = [tf.clip_by_norm(g, max_grad_norm) for g, v in valid_grads_and_vars]
+                    clipped_grads_and_vars = list(zip(clipped_grads, [v for g, v in valid_grads_and_vars]))
+                    self.discriminator_optimizer.apply_gradients(clipped_grads_and_vars)
+                else:
+                    self.discriminator_optimizer.apply_gradients(valid_grads_and_vars)
+                valid_gradient_steps += 1
             
+            # Accumulate metrics
             total_d_loss_val += d_loss.numpy()
             total_d_real_loss_val += d_real_loss.numpy()
             total_d_fake_loss_val += d_fake_loss.numpy()
+            total_d_real_acc += real_acc.numpy()
+            total_d_fake_acc += fake_acc.numpy()
+            total_grad_norm += grad_norm.numpy() if isinstance(grad_norm, tf.Tensor) else grad_norm
+            total_real_pred_mean += real_pred_mean.numpy()
+            total_fake_pred_mean += fake_pred_mean.numpy()
+            total_real_pred_std += real_pred_std.numpy()
+            total_fake_pred_std += fake_pred_std.numpy()
         
-        return total_d_loss_val / n_times, total_d_real_loss_val / n_times, total_d_fake_loss_val / n_times
+        # Calculate averages
+        avg_d_loss = total_d_loss_val / n_times
+        avg_d_real_loss = total_d_real_loss_val / n_times
+        avg_d_fake_loss = total_d_fake_loss_val / n_times
+        
+        # Additional metrics
+        metrics = {
+            "d_real_accuracy": total_d_real_acc / n_times,
+            "d_fake_accuracy": total_d_fake_acc / n_times,
+            "d_total_accuracy": (total_d_real_acc + total_d_fake_acc) / (2 * n_times),
+            "d_gradient_norm": total_grad_norm / n_times,
+            "d_real_pred_mean": total_real_pred_mean / n_times,
+            "d_fake_pred_mean": total_fake_pred_mean / n_times,
+            "d_real_pred_std": total_real_pred_std / n_times,
+            "d_fake_pred_std": total_fake_pred_std / n_times,
+            "d_prediction_gap": abs(total_real_pred_mean - total_fake_pred_mean) / n_times,
+            "d_valid_grad_ratio": valid_gradient_steps / n_times,
+            "d_batch_size": batch_size,
+            "d_training_steps": n_times
+        }
+        
+        return avg_d_loss, avg_d_real_loss, avg_d_fake_loss, metrics
     
     def _train_generator_step(self, gan_model: tf.keras.Model, batch_size: int,
-                             n_times: int) -> float:
+                             n_times: int) -> Tuple[float, Dict[str, float]]:
         """
         Train generator for n_times steps.
         
@@ -532,9 +651,18 @@ class TrainingCoordinator:
             n_times: Number of training steps for the generator in this call
         
         Returns:
-            Average generator loss
+            Tuple containing:
+                - Average generator loss (float)
+                - Additional training metrics (Dict[str, float])
         """
         total_loss = 0.0
+        
+        # Additional metrics tracking
+        total_grad_norm = 0.0
+        total_fake_pred_mean = 0.0
+        total_fake_pred_std = 0.0
+        total_generator_accuracy = 0.0
+        valid_gradient_steps = 0
         
         # Retrieve necessary dimensions from self.params, consistent with _train_discriminator_step
         # These are defined in app/config.py and documented in REFERENCE_Config_FileTree.md
@@ -544,7 +672,7 @@ class TrainingCoordinator:
 
         self.logger.debug(f"Generator step: noise_dim={noise_dim}, cond_dim={conditional_features_dim}, ctx_dim={context_vector_dim}, batch_size={batch_size}")
 
-        for _ in range(n_times):
+        for step in range(n_times):
             # Generate inputs for the composite generator model, which expects 3 inputs:
             # 1. Noise vector
             # 2. Conditional features vector (e.g., cyclical date/time)
@@ -562,6 +690,13 @@ class TrainingCoordinator:
                 # The gan_model here is expected to have the discriminator's layers frozen.
                 # It takes the generator's inputs and passes them through G, then D.
                 fake_pred = gan_model([noise, conditions, context], training=True) # training=True for G's layers
+                
+                # Calculate prediction statistics
+                fake_pred_mean = tf.reduce_mean(fake_pred)
+                fake_pred_std = tf.math.reduce_std(fake_pred)
+                
+                # Calculate generator accuracy (how often it fools the discriminator)
+                generator_acc = tf.reduce_mean(tf.cast(fake_pred > 0.5, tf.float32))
                 
                 g_loss = self._generator_loss(fake_pred)
 
@@ -583,6 +718,14 @@ class TrainingCoordinator:
 
             gradients = tape.gradient(g_loss, generator_trainable_vars)
             
+            # Calculate gradient norm
+            grad_norm = 0.0
+            if gradients:
+                grad_norms = [tf.norm(g) for g in gradients if g is not None]
+                if grad_norms:
+                    grad_norm = tf.reduce_sum([tf.square(gn) for gn in grad_norms])
+                    grad_norm = tf.sqrt(grad_norm)
+            
             # Filter out None gradients and ensure we have valid gradient-variable pairs
             valid_grads_and_vars = []
             for grad, var in zip(gradients, generator_trainable_vars):
@@ -592,11 +735,38 @@ class TrainingCoordinator:
             if not valid_grads_and_vars: # Check if the list is empty
                 self.logger.warning("No valid gradients found for generator. Skipping gradient update.")
             else:
-                self.generator_optimizer.apply_gradients(valid_grads_and_vars)
+                # Apply gradient clipping if enabled
+                if self.params.get("clip_gradients", True):
+                    max_grad_norm = self.params.get("max_grad_norm", 10.0)
+                    clipped_grads = [tf.clip_by_norm(g, max_grad_norm) for g, v in valid_grads_and_vars]
+                    clipped_grads_and_vars = list(zip(clipped_grads, [v for g, v in valid_grads_and_vars]))
+                    self.generator_optimizer.apply_gradients(clipped_grads_and_vars)
+                else:
+                    self.generator_optimizer.apply_gradients(valid_grads_and_vars)
+                valid_gradient_steps += 1
                 
+            # Accumulate metrics
             total_loss += g_loss.numpy()
+            total_grad_norm += grad_norm.numpy() if isinstance(grad_norm, tf.Tensor) else grad_norm
+            total_fake_pred_mean += fake_pred_mean.numpy()
+            total_fake_pred_std += fake_pred_std.numpy()
+            total_generator_accuracy += generator_acc.numpy()
         
-        return total_loss / n_times
+        # Calculate averages
+        avg_g_loss = total_loss / n_times
+        
+        # Additional metrics
+        metrics = {
+            "g_accuracy": total_generator_accuracy / n_times,
+            "g_gradient_norm": total_grad_norm / n_times,
+            "g_fake_pred_mean": total_fake_pred_mean / n_times,
+            "g_fake_pred_std": total_fake_pred_std / n_times,
+            "g_valid_grad_ratio": valid_gradient_steps / n_times,
+            "g_batch_size": batch_size,
+            "g_training_steps": n_times
+        }
+        
+        return avg_g_loss, metrics
     
     def _discriminator_loss(self, real_pred: tf.Tensor, fake_pred: tf.Tensor) -> tf.Tensor:
         """
