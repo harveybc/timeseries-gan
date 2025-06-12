@@ -62,7 +62,7 @@ class GeneratorPlugin(PluginBase):
         "feeder_noise_dim": 32, # Default noise dim, aligned with config.py
         "context_vector_dim": 64, # For decoder_input_h_context
         "conditional_features_dim": 10, # For decoder_input_conditions
-        "num_features": 44, # Updated: Target output features (44 expanded features to match training data)
+        "num_features": 23, # Training: Use 23 base features for GAN training
         "base_feature_names_ordered": [] # Added for _post_process_to_target_features if needed
     }
 
@@ -329,31 +329,38 @@ class GeneratorPlugin(PluginBase):
             vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
             self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
             
-            # Post-process VAE decoder output to match training data requirements  
-            # VAE decoder outputs 23 base features, need to expand to 44 features to match training data
-            self.logger.info("Post-processing VAE decoder output to match training data requirements")
+            # Post-process VAE decoder output based on operation mode  
+            # VAE decoder outputs 23 base features
+            operation_mode = self.main_config.get("operation_mode", "train")
             
-            # === 44-FEATURE ARCHITECTURE (UPDATED) ===
-            # Expand 23 VAE features to 44 features to match training data structure
-            self.logger.info("Using 44-feature architecture - expanding VAE output to match training data")
-            
-            # Use Keras layer for feature expansion (works with KerasTensors)
-            expansion_layer = FeatureExpansionLayer(name="feature_expansion")
-            expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
-            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
-            
-            # Create sequences by expanding the single timestep to 144 timesteps
-            # expanded_features shape: (batch_size, 44)
-            # We need: (batch_size, 144, 44)
-            
-            # Use RepeatVector to create sequences, then add small noise for variation
-            # Expand to sequence length
-            sequence_base = tf.keras.layers.RepeatVector(144)(expanded_features)  # (batch_size, 144, 44)
-            
-            # Add small random variations to make realistic time sequences
-            sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
-            
-            self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
+            if operation_mode == "generate":
+                # === GENERATE MODE: Expand to 44 features ===
+                self.logger.info("Generate mode: Expanding VAE output from 23 to 44 features")
+                
+                # Use Keras layer for feature expansion (works with KerasTensors)
+                expansion_layer = FeatureExpansionLayer(name="feature_expansion")
+                expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
+                self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
+                
+                # Create sequences by expanding the single timestep to 144 timesteps
+                sequence_base = tf.keras.layers.RepeatVector(144)(expanded_features)  # (batch_size, 144, 44)
+                
+                # Add small random variations to make realistic time sequences
+                sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
+                
+                self.logger.debug(f"Final sequence output shape (44 features): {sequence_output.shape}")
+                
+            else:
+                # === TRAINING MODE: Keep 23 base features ===
+                self.logger.info("Training mode: Using 23 base features directly from VAE decoder")
+                
+                # Create sequences directly from 23 base features
+                sequence_base = tf.keras.layers.RepeatVector(144)(vae_decoder_output)  # (batch_size, 144, 23)
+                
+                # Add small random variations to make realistic time sequences
+                sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
+                
+                self.logger.debug(f"Final sequence output shape (23 features): {sequence_output.shape}")
             
         except Exception as e:
             self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
@@ -1169,8 +1176,8 @@ class FeatureExpansionLayer(tf.keras.layers.Layer):
             bc_bo, bh_bl, bh_bo, bo_bl,
             # External market data fourth (2)
             sp500_close, vix_close,
-            # Sub-periodicity fifth (16)
-            close_15m_ticks, close_30m_ticks,
+            # Sub-periodicity fifth (16) - Generate constraint-based ticks
+            self._generate_sub_periodicity_ticks_keras(open_val, high_val, low_val, close_val),
             # Raw date features sixth (3)
             raw_date_features
         ])
@@ -1264,6 +1271,154 @@ class FeatureExpansionLayer(tf.keras.layers.Layer):
         day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
         
         return tf.keras.layers.Concatenate(axis=1)([day_of_month, hour_of_day, day_of_week])
+    
+    def _generate_sub_periodicity_ticks_keras(self, open_val, high_val, low_val, close_val):
+        """
+        Generate constraint-based sub-periodicity ticks using OHLC constraints.
+        
+        Creates realistic 15-minute and 30-minute tick sequences where:
+        - First tick = Open value (constraint)
+        - Last tick = Close value (constraint)
+        - At least one tick reaches High value (constraint)
+        - At least one tick reaches Low value (constraint)
+        - Realistic price movement between constraints
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            
+        Returns:
+            Sub-periodicity ticks tensor (batch_size, 16)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Generate 15-minute ticks (8 ticks)
+        ticks_15m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Generate 30-minute ticks (8 ticks) 
+        ticks_30m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Concatenate both tick sequences
+        return tf.keras.layers.Concatenate(axis=1)([ticks_15m, ticks_30m])
+    
+    def _generate_tick_sequence_keras(self, open_val, high_val, low_val, close_val, num_ticks):
+        """
+        Generate a single tick sequence satisfying OHLC constraints.
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1) 
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            num_ticks: Number of ticks to generate
+            
+        Returns:
+            Tick sequence tensor (batch_size, num_ticks)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Initialize tick sequence
+        ticks = []
+        
+        for i in range(num_ticks):
+            if i == 0:
+                # First tick = Open value (constraint)
+                tick_val = open_val
+            elif i == num_ticks - 1:
+                # Last tick = Close value (constraint)
+                tick_val = close_val
+            else:
+                # Intermediate ticks with constraints
+                # Calculate position along the sequence
+                position = tf.cast(i, tf.float32) / tf.cast(num_ticks - 1, tf.float32)
+                
+                # Linear interpolation between open and close as base
+                base_val = open_val + position * (close_val - open_val)
+                
+                # Add constrained variation to ensure high/low are reachable
+                # Calculate range and bias towards high/low at certain positions
+                ohlc_range = high_val - low_val
+                range_center = (high_val + low_val) / 2.0
+                
+                # Determine if this tick should bias towards high or low
+                # Middle ticks more likely to reach extremes
+                mid_position = tf.abs(position - 0.5) * 2.0  # 0 at middle, 1 at ends
+                bias_strength = (1.0 - mid_position) * 0.6  # Stronger bias in middle
+                
+                # Random bias towards high or low
+                high_bias = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+                bias_direction = tf.where(high_bias > 0.5, 1.0, -1.0)
+                
+                # Calculate biased value
+                bias_amount = bias_direction * bias_strength * ohlc_range * 0.3
+                biased_val = base_val + bias_amount
+                
+                # Ensure the value stays within OHLC bounds
+                tick_val = tf.clip_by_value(biased_val, low_val, high_val)
+                
+                # Add small random noise for realism
+                noise = tf.random.normal([batch_size, 1], mean=0.0, stddev=0.01)
+                tick_val = tick_val + noise * ohlc_range * 0.05
+                
+                # Final clipping to maintain constraints
+                tick_val = tf.clip_by_value(tick_val, low_val, high_val)
+            
+            ticks.append(tick_val)
+        
+        # Ensure high and low are actually reached in the sequence
+        ticks = self._enforce_high_low_constraints_keras(ticks, high_val, low_val)
+        
+        return tf.keras.layers.Concatenate(axis=1)(ticks)
+    
+    def _enforce_high_low_constraints_keras(self, ticks, high_val, low_val):
+        """
+        Ensure that at least one tick reaches the high value and one reaches the low value.
+        
+        Args:
+            ticks: List of tick tensors [(batch_size, 1), ...]
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            
+        Returns:
+            Modified list of tick tensors with constraints enforced
+        """
+        if len(ticks) < 3:  # Need at least 3 ticks (open, something, close)
+            return ticks
+            
+        # Find middle positions to place high/low constraints
+        num_ticks = len(ticks)
+        high_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        low_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        
+        # Ensure high and low positions are different
+        low_pos = tf.cond(
+            tf.equal(high_pos, low_pos),
+            lambda: tf.cond(
+                tf.equal(high_pos, 1),
+                lambda: high_pos + 1,
+                lambda: high_pos - 1
+            ),
+            lambda: low_pos
+        )
+        
+        # Create modified ticks list
+        modified_ticks = []
+        for i, tick in enumerate(ticks):
+            # Set specific positions to high/low values
+            tick_val = tf.cond(
+                tf.equal(i, high_pos),
+                lambda: high_val,
+                lambda: tf.cond(
+                    tf.equal(i, low_pos),
+                    lambda: low_val,
+                    lambda: tick
+                )
+            )
+            modified_ticks.append(tick_val)
+        
+        return modified_ticks
     
     def get_config(self):
         return super(FeatureExpansionLayer, self).get_config()

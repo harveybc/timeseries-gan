@@ -3,7 +3,7 @@
 Discriminator Plugin for VAE-GAN System
 
 Implements a discriminator that evaluates the quality of synthetic vs real time series data.
-The discriminator takes full 57-feature sequences and outputs binary classification (real/fake).
+The discriminator takes 44-feature sequences and outputs binary classification (real/fake).
 
 Author: TimeSeries-GAN Team
 """
@@ -26,7 +26,7 @@ class DiscriminatorPlugin:
     Discriminator plugin for distinguishing real vs synthetic time series data.
     
     Architecture:
-    - Input: (batch_size, sequence_length, num_features) where num_features = 51 (aligned)
+    - Input: (batch_size, sequence_length, num_features) where num_features = 23 (training)
     - Conv1D layers for feature extraction
     - Bidirectional LSTM for temporal pattern recognition
     - Dense layers for classification
@@ -34,9 +34,9 @@ class DiscriminatorPlugin:
     """
     
     plugin_params = {
-        # Input configuration - Updated for 23-feature architecture
+        # Input configuration - Updated for 44-feature architecture
         "sequence_length": 144,  # Standard sequence length from REFERENCE.md
-        "num_features": 23,      # Updated: Use 23 base features instead of 51
+        "num_features": 23,      # Training: Use 23 base features for GAN training
         "feature_names": [],     # Will be populated from config
         
         # Architecture parameters

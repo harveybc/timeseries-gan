@@ -6,17 +6,17 @@ The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework
 
 ### Key Functional Highlights:
 
-*   **23-Feature Base Architecture**: Generates time series data comprising 23 core base features with deterministic post-processing for additional features. This includes:
-    *   OHLC (Open, High, Low, Close) prices.
-    *   Market indicators (VIX, S&P500).
-    *   Bid/Ask spreads (BC-BO, BH-BL).
-    *   Sub-periodicity ticks (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8).
-    *   Post-processing: 20+ technical indicators (RSI, MACD, Bollinger Bands) calculated mathematically from base features.
-    *   Post-processing: Cyclical date/time features (hour of day, day of week, day of year) generated deterministically.
+*   **23-Feature Training Architecture**: 
+    *   **Training Mode**: GAN trains using only 23 core base features (generator outputs 23, discriminator expects 23)
+    *   **Generate Mode**: Generates 23 base features, then post-processes to add technical indicators + seasonal features + sub-periodicity ticks
+    *   **Base Features**: OHLC prices, market indicators (VIX, S&P500), bid/ask spreads, sub-periodicity ticks
+    *   **Post-processing**: 15 technical indicators + 16 interpolated tick values (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8) + 3 seasonal features calculated deterministically from 23 base features
+    *   **Sub-Periodicity Generation**: 15-min and 30-min tick values interpolated from hourly CLOSE prices with realistic temporal noise
+    *   **Final Output**: 23 base + 15 technical + 16 ticks + 3 seasonal = 57 total features
 *   **Operational Modes**: Supports three distinct operational modes, each managed by dedicated pipeline modules:
-    *   **Train Mode**: For training the GAN components using the 23-feature architecture.
-    *   **Generate Mode**: For producing synthetic 23-feature data with optional post-processing expansion.
-    *   **Optimize Mode**: For hyperparameter tuning and model optimization.
+    *   **Train Mode**: Trains GAN components using 23-feature architecture only
+    *   **Generate Mode**: Generates 23-feature synthetic data, then post-processes to 44 features
+    *   **Optimize Mode**: For hyperparameter tuning and model optimization
 *   **Pre-trained Model Integration**: Leverages pre-trained VAE decoder outputting 23 base features, which serves as the core component of the generator.
 *   **Improved Training Efficiency**: Smaller networks (23 vs 51+ features) with better authenticity, faster training, and eliminated feature expansion complexity.
 *   **Modular Plugin Architecture**: Allows for easy extension and customization through plugins for data feeding, generation, evaluation, and optimization.
@@ -58,22 +58,23 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 
 *   **Input**: The generation process starts with an initial noise vector and a sequence of date/time information for conditioning.
 *   **Feeder Plugin**: Prepares the initial noise, date/time conditions, and potentially initial context for the generator.
-*   **Generator Process (23-Feature Base Architecture)**:
+*   **Generator Process (23-Feature Training Architecture)**:
     1.  The internal BiLSTM Z-generator creates latent sequences from noise.
     2.  The VAE decoder takes these latent sequences and current timestep conditions to produce 23 base features:
         *   OHLC (Open, High, Low, Close) prices
         *   Market indicators (VIX close, S&P500 close)
         *   Bid/Ask spreads (BC-BO, BH-BL)
         *   Sub-periodicity ticks (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8)
-    3.  The generator outputs these 23 base features directly to the discriminator for adversarial training.
-    4.  This process is repeated iteratively to form a sequence, using the previous step's output as context.
-*   **Post-Processing Pipeline (Optional)**:
-    1.  Technical indicators (RSI, MACD, EMA, Bollinger Bands, etc.) are calculated mathematically from the 23 base features.
-    2.  Cyclical date/time features are generated deterministically from timestamps.
-    3.  All features can be assembled into expanded feature sets when needed for downstream tasks.
+    3.  **Training Mode**: Generator outputs these 23 base features directly to discriminator for adversarial training.
+    4.  **Generate Mode**: After generation, post-processing expands 23 features to 44 features.
+    5.  This process is repeated iteratively to form a sequence, using the previous step's output as context.
+*   **Post-Processing Pipeline (Generate Mode Only)**:
+    1.  Technical indicators (15 features: RSI, MACD, EMA, Bollinger Bands, etc.) calculated from 23 base features.
+    2.  Seasonal features (3 features: cyclical encodings) generated from timestamps.
+    3.  Features expanded from 23 → 44 total features when needed for downstream tasks.
 *   **Output**: 
-    *   **Core GAN Output**: Synthetic time series with 23 base features per timestep. Shape: `(batch_size, sequence_length, 23)`
-    *   **Post-Processed Output**: Expanded feature sets with technical indicators and datetime features when required.
+    *   **Training Mode**: Synthetic time series with 23 base features per timestep. Shape: `(batch_size, sequence_length, 23)`
+    *   **Generate Mode**: Post-processed synthetic time series with 44 features per timestep. Shape: `(batch_size, sequence_length, 44)`
 
 ### 2.3. Training Process Specifics
 

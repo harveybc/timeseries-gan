@@ -4,9 +4,20 @@
 
 This section details the configuration parameters used in the `timeseries-gan` project, as defined in `app/config.py`. These parameters control various aspects of the data generation, model training, and evaluation processes for the **23-Feature Base Architecture**.
 
-### 23-Feature Architecture Overview
+### 23-Feature Training Architecture Overview
 
-The system now implements a streamlined 23-feature base architecture that significantly improves upon the previous 51/57-feature approach:
+The system implements a **23-feature training architecture** with two distinct operational phases:
+
+**Training Mode (23 Features Only):**
+- **Generator**: Outputs 23 base features only
+- **Discriminator**: Expects 23 base features only  
+- **Adversarial Training**: GAN learns relationships between 23 core features
+- **No Feature Expansion**: Post-processing disabled during training for computational efficiency
+
+**Generate Mode (23 → 44 Features):**
+- **Generation Phase**: Load trained models, generate 23 base features
+- **Post-Processing Phase**: Expand to 44 features (23 base + 15 technical + 3 seasonal + 3 additional)
+- **Final Output**: Complete feature set for downstream tasks
 
 **Core Benefits:**
 - **Authenticity**: GAN focuses on learning core relationships between 23 base features
@@ -21,10 +32,15 @@ The system now implements a streamlined 23-feature base architecture that signif
 3. **Bid/Ask Spreads**: BC-BO, BH-BL spreads (2 features)
 4. **Sub-periodicity Ticks**: CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8 (15 features)
 
-**Post-Processing Pipeline:**
-- **Technical Indicators**: 20+ indicators (RSI, MACD, EMA, Bollinger Bands, etc.) calculated from base features
-- **Datetime Features**: Cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) generated deterministically
-- **Derived Features**: Additional features calculated from the 23 base features when required
+**Post-Processing Pipeline (Generate Mode Only):**
+- **Technical Indicators**: 15 indicators (RSI, MACD, EMA, Bollinger Bands, etc.) calculated from base features
+- **Sub-Periodicity Tick Generation**: 16 tick features (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8) generated with OHLC constraints:
+  - **Open/Close Constraints**: First tick = Open, Last tick = Close
+  - **High/Low Constraints**: At least one tick reaches High, at least one reaches Low  
+  - **Realistic Movement**: Smooth price transitions following financial market patterns
+- **Seasonal Features**: 3 cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) generated deterministically
+- **Additional Features**: 3 derived features calculated from the 23 base features when required
+- **Total Output**: 23 + 15 + 16 + 3 + 3 = 60 features (+ DATE_TIME column = 61 columns)
 
 ### Plugin Selection
 -   `"feeder"`: `"default_feeder"` (Plugin for providing input data/noise to the generator)
@@ -46,8 +62,11 @@ The system now implements a streamlined 23-feature base architecture that signif
 -   `"target_column"`: `"CLOSE"` (Target column name in the dataset)
 -   `"predicted_horizons"`: `[24, 48, 72, 96, 120, 144]` (Prediction horizons for forecasting tasks, if applicable)
 -   `"dataset_periodicity"`: `"1h"` (Frequency of the time series data, e.g., "1h" for hourly)
--   `"base_features_count"`: `23` (Number of base features output by generator and expected by discriminator)
--   `"post_processing_features_enabled"`: `False` (Enable post-processing to expand beyond 23 base features)
+-   `"base_features_count"`: `23` (Number of base features for training - generator outputs 23, discriminator expects 23)
+-   `"training_features_count"`: `23` (Features used during GAN training phase)
+-   `"generate_features_count"`: `44` (Features in final output after post-processing in generate mode)
+-   `"post_processing_enabled_in_training"`: `False` (Disable feature expansion during training for 23-feature architecture)
+-   `"post_processing_enabled_in_generate"`: `True` (Enable feature expansion during generate mode to reach 44 features)
 
 ### Generation and Model Parameters (23-Feature Architecture)
 -   `"n_samples"`: `12600` (Number of synthetic samples to generate)

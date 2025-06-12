@@ -17,7 +17,7 @@ The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework
 
 ### Key Features
 
-- **23-Feature Base Architecture**: Generates 23 core base features (OHLC, market data, sub-periodicity ticks) with deterministic post-processing for technical indicators and datetime features
+- **23-Feature Training Architecture**: During training, GAN generates and discriminates only 23 core base features (OHLC, market data, sub-periodicity ticks). Post-processing to 44 features occurs only in generate mode.
 - **Three Operation Modes**: Train, Generate, and Optimize with dedicated pipeline modules
 - **Pre-trained Models**: Ready-to-use encoder/decoder models trained on EUR/USD hourly data
 - **Extreme Modularity**: Largest module under 630 lines, with generator plugin fully modularized into 10 modules under 420 lines each
@@ -108,8 +108,14 @@ By applying this consistent feature preparation pipeline to the real data, the s
 When full feature sets are needed (e.g., for evaluation or downstream tasks), post-processing is applied after generation:
 
 1.  **Technical Indicators**: Calculate mathematically correct indicators from the 23 base features (RSI, MACD, EMA, Bollinger Bands, etc.)
-2.  **Datetime Features**: Generate cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) based on timestamps
-3.  **Derived Features**: Any additional features calculated from the 23 base features
+2.  **Sub-Periodicity Tick Generation**: Generate realistic 15-minute and 30-minute tick sequences (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8) that are constrained by hourly OHLC values:
+    - **Open Constraint**: First tick equals the hourly Open value
+    - **Close Constraint**: Last tick equals the hourly Close value  
+    - **High Constraint**: At least one tick must reach the hourly High value
+    - **Low Constraint**: At least one tick must reach the hourly Low value
+    - **Realistic Movement**: Tick sequences follow plausible price movement patterns between constraint points
+3.  **Datetime Features**: Generate cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) based on timestamps
+4.  **Derived Features**: Any additional features calculated from the 23 base features
 
 This approach ensures that technical indicators are mathematically accurate rather than AI-generated approximations.
 

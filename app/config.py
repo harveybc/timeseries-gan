@@ -120,11 +120,11 @@ DEFAULT_VALUES = {
         "day_of_year_sin", "day_of_year_cos"
     ],
     
-    # Configuration for 23-feature architecture  
+    # Configuration for 44-feature architecture  
     "base_features_count": 23,
     "post_processing_features_enabled": True,  # Changed to True to generate full feature sets for compatibility
     "base_features_output_dim": 23,
-    "discriminator_input_dim": 23,
+    "discriminator_input_dim": 23,  # Training: Discriminator expects 23 base features only
     
     # Full feature names ordered to match training data structure (45 features total)
     # Order: DATE_TIME, Technical Indicators (15), OHLC (4), Market Data & Derived Features (26)
@@ -205,14 +205,14 @@ DEFAULT_VALUES = {
     # Added: L2 Regularization for Generator
     "l2_regularization": 1e-5,
 
-    # Added: Discriminator Architecture Parameters - Updated for 23-feature architecture
+    # Added: Discriminator Architecture Parameters - Updated for 44-feature architecture
     "discriminator_conv_filters": [32, 16, 8],       # Decreasing filter sizes for proper dimensionality reduction
     "discriminator_conv_kernel_size": 5,             # Larger kernel for better feature extraction
     "discriminator_conv_strides": [2, 2, 2],         # Stride=2 for downsampling at each layer
     "discriminator_lstm_units": 32,                  # Reduced LSTM units 
     "discriminator_dense_units": [16, 8],            # Decreasing dense layer sizes
     "discriminator_dropout_rate": 0.3,
-    "num_features": 23,                              # Updated: Use 23 base features instead of 51
+    "num_features": 23,                              # Training: Use 23 base features for GAN training
 
     # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
     "enable_mmd_loss": True,          # Enable/disable MMD loss
