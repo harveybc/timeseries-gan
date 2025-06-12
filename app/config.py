@@ -90,7 +90,7 @@ DEFAULT_VALUES = {
     "generator_base_feature_names_ordered": [
         "OPEN", "HIGH", "LOW", "CLOSE", 
         "vix_close", "S&P500_Close",
-        "BC-BO", "BH-BL",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
@@ -100,7 +100,7 @@ DEFAULT_VALUES = {
         # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
         "OPEN", "HIGH", "LOW", "CLOSE", 
         "vix_close", "S&P500_Close",
-        "BC-BO", "BH-BL",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
@@ -130,7 +130,7 @@ DEFAULT_VALUES = {
     "discriminator_base_feature_names_ordered": [
         "OPEN", "HIGH", "LOW", "CLOSE", 
         "vix_close", "S&P500_Close",
-        "BC-BO", "BH-BL",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
