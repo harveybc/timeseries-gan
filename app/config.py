@@ -153,7 +153,7 @@ DEFAULT_VALUES = {
     "max_grad_norm": 10.0,
     "loss": "mse", # Mean Squared Error
 
-    # Logging and output
+    # Logging and output 
     "log_interval": 100,
     "save_model_interval": 5000,
     "output_dir": "examples/results/phase_4_3/",
