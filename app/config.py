@@ -76,11 +76,11 @@ DEFAULT_VALUES = {
     "save_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
     
     # Default load paths for  trained models for generation
-    "load_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", # Retained for now, but ensure clarity
+    "load_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_generator_model.keras", # MODIFIED: Point to the full generator model
     "load_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
 
     # Output filename for the generation mode
-    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o.csv",
+    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o.csv", # User's value retained
 
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
