@@ -285,9 +285,14 @@ class GeneratePipeline:
         print(f"Shape of synthetic data before concat: {generated_features_df.shape}")
         print(f"Shape of real data segment before concat: {real_data_segment_df.shape}")
 
+        # CRITICAL: Prepend synthetic data BEFORE real data (no sorting by datetime)
+        # Synthetic data should have earlier datetimes, so it naturally comes first
         combined_data_df = pd.concat([generated_features_df, real_data_segment_df], ignore_index=True)
-        combined_data_df = combined_data_df.sort_values(by=datetime_col_name).reset_index(drop=True)
+        # DO NOT sort by datetime - data is already in correct chronological order
         print(f"Shape of combined data: {combined_data_df.shape}")
+        print(f"✓ Synthetic data prepended successfully. First datetime: {combined_data_df[datetime_col_name].iloc[0]}")
+        print(f"✓ Last synthetic datetime: {generated_features_df[datetime_col_name].iloc[-1]}")
+        print(f"✓ First real datetime: {real_data_segment_df[datetime_col_name].iloc[0]}")
         
         return combined_data_df
 
@@ -295,11 +300,10 @@ class GeneratePipeline:
         """
         Generates `n_samples` datetimes before `end_datetime_exclusive`, skipping weekends.
         Returns datetimes in chronological order.
+        The last generated datetime should be exactly one period before end_datetime_exclusive.
         """
-        datetimes_reversed = []
-        current_dt = end_datetime_exclusive
-
-        # Ensure timedelta is accessible here
+        print(f"Generating {n_samples} synthetic datetimes before {end_datetime_exclusive}")
+        
         time_delta_map = {
             "1h": timedelta(hours=1), "1H": timedelta(hours=1),
             "15min": timedelta(minutes=15), "15T": timedelta(minutes=15), "15m": timedelta(minutes=15),
@@ -308,22 +312,44 @@ class GeneratePipeline:
         }
         time_step = time_delta_map.get(periodicity.lower(), timedelta(hours=1))
 
-        samples_collected = 0
-        max_attempts = n_samples * 7
-        attempts = 0
-
-        while samples_collected < n_samples and attempts < max_attempts:
-            current_dt -= time_step
-            attempts += 1
-            if current_dt.weekday() >= 5: # Monday is 0 and Sunday is 6
-                continue
-            datetimes_reversed.append(current_dt)
-            samples_collected += 1
+        # Start from exactly one time_step before the end_datetime_exclusive
+        last_synthetic_datetime = end_datetime_exclusive - time_step
         
-        if samples_collected < n_samples:
-            print(f"Warning: Could only generate {samples_collected}/{n_samples} valid weekday datetimes after {max_attempts} attempts.")
+        # Ensure the last synthetic datetime is a weekday
+        while last_synthetic_datetime.weekday() >= 5:  # Saturday or Sunday
+            last_synthetic_datetime -= timedelta(days=1)
+            
+        print(f"Last synthetic datetime will be: {last_synthetic_datetime}")
+        
+        # Generate datetimes backwards from last_synthetic_datetime
+        datetimes_list = []
+        current_dt = last_synthetic_datetime
+        
+        for i in range(n_samples):
+            # Add current datetime to list
+            datetimes_list.append(current_dt)
+            
+            # Move to previous time step
+            current_dt -= time_step
+            
+            # Skip weekends by moving to previous Friday if needed
+            while current_dt.weekday() >= 5:  # Saturday or Sunday
+                current_dt -= timedelta(days=1)
+                # Adjust time to end of Friday if we moved from weekend
+                if time_step < timedelta(days=1):
+                    current_dt = current_dt.replace(hour=23, minute=0, second=0)
+        
+        # Reverse to get chronological order (earliest first)
+        datetimes_list.reverse()
+        
+        print(f"Generated {len(datetimes_list)} synthetic datetimes.")
+        print(f"First synthetic datetime: {datetimes_list[0]}")
+        print(f"Last synthetic datetime: {datetimes_list[-1]}")
+        
+        if len(datetimes_list) < n_samples:
+            print(f"Warning: Could only generate {len(datetimes_list)}/{n_samples} valid weekday datetimes.")
 
-        return sorted(datetimes_reversed)
+        return datetimes_list
 
     def _process_real_data(self) -> Optional[pd.DataFrame]:
         """

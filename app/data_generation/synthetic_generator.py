@@ -426,7 +426,7 @@ class SyntheticDataGenerator:
                 conditions_input = np.random.normal(0, 1, (n_samples, 10))
             
             # Generate 23 base features using the model
-            model_inputs = [noise_input, context_input, conditions_input]
+            model_inputs = [noise_input,  conditions_input, context_input]
             base_features_23 = generator_model.predict(model_inputs, verbose=0)
             
             print(f"  Generated base features shape: {base_features_23.shape}")
