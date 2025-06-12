@@ -333,18 +333,19 @@ class GeneratorPlugin(PluginBase):
             # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
             self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
             
-            # PROPER SOLUTION: Expand 23 features to 51 features by adding:
-            # 1. Technical indicators calculated from OHLC data
-            # 2. Cyclical datetime features (hour, day of week, day of month)
-            expanded_features = self._expand_vae_output_to_51_features(vae_decoder_output)
-            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
+            # === 23-FEATURE ARCHITECTURE ===
+            # With the 23-feature architecture, VAE decoder directly outputs 23 base features
+            # No expansion to 51 features is needed - pass directly to discriminator
+            self.logger.info("Using 23-feature architecture - VAE decoder output used directly")
+            base_features = vae_decoder_output  # Shape: (batch_size, 23)
+            self.logger.debug(f"Base features shape: {base_features.shape}")
             
-            # Create realistic time sequences (144 timesteps) with proper temporal relationships
-            sequence_output = self._create_realistic_time_sequences(expanded_features, 144)
+            # Create realistic time sequences (144 timesteps) with the 23 base features
+            sequence_output = self._create_realistic_time_sequences(base_features, 144)
             self.logger.debug(f"Realistic time sequence output shape: {sequence_output.shape}")
             
-            # Ensure final shape is correct (batch_size, 144, 51)
-            sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
+            # Ensure final shape is correct (batch_size, 144, 23)
+            sequence_output = tf.keras.layers.Reshape((144, 23))(sequence_output)
             
             self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
             
@@ -1002,19 +1003,20 @@ class GeneratorPlugin(PluginBase):
         
         return date_features
 
-    def _create_realistic_time_sequences(self, expanded_features, sequence_length):
+    def _create_realistic_time_sequences(self, base_features, sequence_length):
         """
-        Create realistic time sequences from expanded features using TensorFlow operations.
+        Create realistic time sequences from base features using TensorFlow operations.
+        Updated for 23-feature architecture.
         
         Args:
-            expanded_features: Expanded features tensor (batch_size, 51)
+            base_features: Base features tensor (batch_size, 23)
             sequence_length: Length of sequences to create (144)
             
         Returns:
-            Time sequences tensor (batch_size, sequence_length, 51)
+            Time sequences tensor (batch_size, sequence_length, 23)
         """
-        batch_size = tf.shape(expanded_features)[0]
-        num_features = tf.shape(expanded_features)[1]
+        batch_size = tf.shape(base_features)[0]
+        num_features = tf.shape(base_features)[1]  # Should be 23
         
         # Initialize sequences tensor
         sequences = tf.TensorArray(dtype=tf.float32, size=sequence_length, clear_after_read=False)
@@ -1029,7 +1031,7 @@ class GeneratorPlugin(PluginBase):
             variations = tf.random.normal([batch_size, num_features], mean=0.0, stddev=noise_factor) * time_decay
             
             # Apply variations to base features
-            timestep_features = expanded_features + variations
+            timestep_features = base_features + variations
             
             # For OHLC features (first 4), ensure realistic price relationships
             if t > 0:
@@ -1050,7 +1052,7 @@ class GeneratorPlugin(PluginBase):
                 high_price = tf.maximum(prev_close, new_close) + tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
                 low_price = tf.minimum(prev_close, new_close) - tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
                 
-                # Update OHLC in timestep features
+                # Update OHLC in timestep features (assumes OHLC are first 4 features)
                 ohlc_updated = tf.concat([open_price, high_price, low_price, close_price], axis=1)
                 timestep_features = tf.concat([ohlc_updated, timestep_features[:, 4:]], axis=1)
             
