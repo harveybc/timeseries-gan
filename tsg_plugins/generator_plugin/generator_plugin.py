@@ -1141,9 +1141,9 @@ class FeatureExpansionLayer(tf.keras.layers.Layer):
         vae_decoder_output = inputs
         
         # Extract the 23 VAE features using Keras ops
-        open_val = vae_decoder_output[:, 0:1]   # OPEN
-        low_val = vae_decoder_output[:, 1:2]    # LOW  
-        high_val = vae_decoder_output[:, 2:3]   # HIGH
+        raw_open = vae_decoder_output[:, 0:1]   # OPEN
+        raw_low = vae_decoder_output[:, 1:2]    # LOW  
+        raw_high = vae_decoder_output[:, 2:3]   # HIGH
         vix_close = vae_decoder_output[:, 3:4]  # vix_close
         bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
         bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
@@ -1151,8 +1151,18 @@ class FeatureExpansionLayer(tf.keras.layers.Layer):
         close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
         close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
         
-        # Calculate CLOSE (typical price approximation)
-        close_val = (open_val + high_val + low_val) / 3.0
+        # Calculate raw CLOSE (typical price approximation)
+        raw_close = (raw_open + raw_high + raw_low) / 3.0
+        
+        # Fix OHLC constraints: Ensure High >= max(Open, Close) and Low <= min(Open, Close)
+        raw_ohlc = tf.keras.layers.Concatenate(axis=1)([raw_open, raw_high, raw_low, raw_close])
+        fixed_ohlc = self._fix_ohlc_constraints_keras(raw_ohlc)
+        
+        # Extract fixed OHLC values
+        open_val = fixed_ohlc[:, 0:1]
+        high_val = fixed_ohlc[:, 1:2]
+        low_val = fixed_ohlc[:, 2:3]
+        close_val = fixed_ohlc[:, 3:4]
         
         # Calculate missing bid/ask spreads
         bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
@@ -1422,3 +1432,38 @@ class FeatureExpansionLayer(tf.keras.layers.Layer):
     
     def get_config(self):
         return super(FeatureExpansionLayer, self).get_config()
+    
+    def _fix_ohlc_constraints_keras(self, ohlc_tensor):
+        """
+        Fix OHLC constraint violations using TensorFlow operations.
+        Ensures High >= max(Open, Close) and Low <= min(Open, Close)
+        
+        Strategy: Sort the 4 values and assign:
+        - Low = minimum value
+        - High = maximum value  
+        - Open = second lowest value (more conservative)
+        - Close = second highest value
+        
+        Args:
+            ohlc_tensor: Tensor of shape (batch_size, 4) with [Open, High, Low, Close]
+            
+        Returns:
+            Fixed OHLC tensor with constraints satisfied
+        """
+        # Sort values for each sample
+        sorted_values = tf.sort(ohlc_tensor, axis=1)  # Shape: (batch_size, 4)
+        
+        # Assign values to ensure constraints:
+        # - Low = minimum (index 0)
+        # - Open = second minimum (index 1) 
+        # - Close = second maximum (index 2)
+        # - High = maximum (index 3)
+        low_val = sorted_values[:, 0:1]    # Minimum
+        open_val = sorted_values[:, 1:2]   # Second minimum
+        close_val = sorted_values[:, 2:3]  # Second maximum  
+        high_val = sorted_values[:, 3:4]   # Maximum
+        
+        # Concatenate fixed OHLC [Open, High, Low, Close]
+        fixed_ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
+        
+        return fixed_ohlc
