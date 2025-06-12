@@ -14,8 +14,9 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
-    "operation_mode": "train", # Added: Default operation mode, possible values: "train", "generate", "optimize"
+    "operation_mode": "generate", # Added: Default operation mode, possible values: "train", "generate", "optimize"
     "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
+    "use_evaluation": False, # Added: Enable/disable evaluation phase in generate mode
 
     # Data for evaluation and base for generation
     # "real_data_file": "examples/data/phase_3/normalized_d4.csv", # REMOVED - Redundant, use x_train_file

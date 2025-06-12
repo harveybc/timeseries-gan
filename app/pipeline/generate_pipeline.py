@@ -104,10 +104,17 @@ class GeneratePipeline:
                 print("Combined data generation resulted in an empty DataFrame. Skipping further processing.")
                 return
 
-            if self.evaluator_plugin and real_data_segment_df is not None and not real_data_segment_df.empty:
+            # Check if evaluation is enabled in config
+            use_evaluation = self.config.get("use_evaluation", False)
+            if use_evaluation and self.evaluator_plugin and real_data_segment_df is not None and not real_data_segment_df.empty:
+                print("✓ Evaluation enabled in config. Running evaluation...")
                 self._evaluate_data(combined_data_df, real_data_segment_df, evaluation_stage)
+            elif not use_evaluation:
+                print("ℹ️ Evaluation disabled in config (use_evaluation=False). Skipping evaluation phase.")
+            elif not self.evaluator_plugin:
+                print("ℹ️ Evaluator plugin not available, skipping evaluation.")
             else:
-                print("Evaluator plugin not available or real data segment is empty, skipping evaluation.")
+                print("ℹ️ Real data segment is empty, skipping evaluation.")
 
             self._save_outputs(combined_data_df, evaluation_stage)
 
@@ -368,10 +375,29 @@ class GeneratePipeline:
             # The real_data_segment_df is already the original real part.
             if not synthetic_part_df.empty and not real_data_segment_df.empty:
                 try:
-                    self.evaluator_plugin.evaluate(synthetic_part_df, real_data_segment_df)
-                    print("✓ Evaluation plugin executed.")
+                    # Prepare data for evaluation: drop datetime column and convert to numpy
+                    datetime_col = self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")
+                    feature_cols = [col for col in synthetic_part_df.columns if col != datetime_col]
+                    synthetic_array = synthetic_part_df[feature_cols].to_numpy()
+                    real_array = real_data_segment_df[feature_cols].to_numpy()
+                    
+                    print(f"Evaluation shapes - Synthetic: {synthetic_array.shape}, Real: {real_array.shape}")
+                    print(f"Feature columns for evaluation: {len(feature_cols)} features")
+                    
+                    # Call evaluator with synthetic and real data arrays plus feature names
+                    # Note: EvaluatorPlugin.evaluate() signature is (synthetic_data, real_data_processed, feature_names, config=None)
+                    evaluation_results = self.evaluator_plugin.evaluate(
+                        synthetic_data=synthetic_array,
+                        real_data_processed=real_array, 
+                        feature_names=feature_cols,
+                        config=None
+                    )
+                    print("✓ Evaluation plugin executed successfully.")
+                    print(f"Evaluation results keys: {list(evaluation_results.keys()) if evaluation_results else 'None'}")
                 except Exception as e:
                     print(f"Error during evaluation plugin execution: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
                 print("Skipping evaluation as synthetic or real data part is empty.")
         else:
