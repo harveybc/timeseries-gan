@@ -206,7 +206,7 @@ class DiscriminatorPlugin:
         # LSTM layer
         if use_bidirectional_lstm:
             x = Bidirectional(LSTM(lstm_units, 
-                       ctivation='tanh', # Use tanh for LSTM activation
+                       activation='tanh', # Use tanh for LSTM activation
                        kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                        recurrent_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
                        name="lstm_core"), name="bidirectional_lstm")(x) 
