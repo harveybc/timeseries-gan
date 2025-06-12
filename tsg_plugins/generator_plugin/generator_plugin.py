@@ -261,7 +261,7 @@ class GeneratorPlugin(PluginBase):
         noise_input = tf.keras.layers.Input(shape=(input_noise_dim,), name="z_generator_noise_input")
         
         dense_units = output_latent_seq_len * output_latent_dim
-        x = tf.keras.layers.Dense(dense_units, activation='relu')(noise_input)
+        x = tf.keras.layers.Dense(dense_units, activation='tanh')(noise_input)
         x = tf.keras.layers.Reshape((output_latent_seq_len, output_latent_dim))(x)
         
         lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
@@ -303,7 +303,7 @@ class GeneratorPlugin(PluginBase):
         # 2. Build or Get the Internal BiLSTM Z-Generator
         self.logger.debug("Building internal BiLSTM Z-generator.")
         
-        x = tf.keras.layers.Dense(576, activation='relu')(noise_input)
+        x = tf.keras.layers.Dense(576, activation='tanh')(noise_input)
         self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
         x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
         self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
@@ -334,7 +334,7 @@ class GeneratorPlugin(PluginBase):
             self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
             
             # Expand 23 features to 51 features using a Dense layer
-            expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
+            expanded_features = tf.keras.layers.Dense(51, activation='tanh', name="feature_expansion")(vae_decoder_output)
             self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
             
             # Repeat the feature vector across 144 timesteps
