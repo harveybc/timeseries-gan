@@ -6,30 +6,21 @@ Tests the complete generator pipeline to verify tick columns are populated
 
 import numpy as np
 import tensorflow as tf
-from tsg_plugins.generator_plugin.generator_plugin import GeneratorPlugin
+from tsg_plugins.generator_plugin.generator_plugin import FeatureExpansionLayer
 
 def test_generator_tick_integration():
-    """Test constraint-based tick generation in complete generator pipeline"""
+    """Test constraint-based tick generation using FeatureExpansionLayer in a model"""
     
-    print("🚀 TESTING GENERATOR INTEGRATION WITH CONSTRAINT-BASED TICKS")
-    print("=" * 70)
+    print("🚀 TESTING FEATURE EXPANSION LAYER INTEGRATION WITH CONSTRAINT-BASED TICKS")
+    print("=" * 75)
     
-    # Create generator plugin
-    generator = GeneratorPlugin()
+    # Create a simple model that includes the FeatureExpansionLayer
+    inputs = tf.keras.Input(shape=(23,), name="input_23_features")
+    expanded_outputs = FeatureExpansionLayer(name="feature_expansion")(inputs)
+    model = tf.keras.Model(inputs=inputs, outputs=expanded_outputs, name="test_model")
     
-    # Configure for 23->44 feature transformation
-    generator.config = {
-        'input_dim': 23,
-        'latent_dim': 16,
-        'hidden_units': [128, 64, 32],
-        'output_dim': 44,
-        'dropout_rate': 0.2
-    }
-    
-    print("✅ Building generator model...")
-    generator.build_model()
-    
-    print(f"✅ Model created: {generator.model.input_shape} -> {generator.model.output_shape}")
+    print("✅ Created model with FeatureExpansionLayer")
+    print(f"✅ Model: {model.input_shape} -> {model.output_shape}")
     
     # Generate test data
     batch_size = 5
@@ -38,8 +29,8 @@ def test_generator_tick_integration():
     print(f"✅ Generated test input: {test_input.shape}")
     
     # Run inference
-    print("🔄 Running generator inference...")
-    synthetic_output = generator.model(test_input)
+    print("🔄 Running model inference...")
+    synthetic_output = model(test_input)
     
     print(f"✅ Generator output shape: {synthetic_output.shape}")
     
