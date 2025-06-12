@@ -29,6 +29,9 @@ def test_live_comprehensive_logging():
     try:
         # Import required classes
         from tsg_plugins.gan_trainer_plugin.gan_trainer_plugin import GANTrainerPlugin
+        from tsg_plugins.generator_plugin.generator_plugin import GeneratorPlugin
+        from tsg_plugins.discriminator_plugin import DiscriminatorPlugin
+        from tsg_plugins.feeder_plugin.feeder_plugin import FeederPlugin
         from app.config import DEFAULT_VALUES
         
         # Create minimal training data
@@ -68,9 +71,24 @@ def test_live_comprehensive_logging():
         print(f"  Sequence length: {test_config['seq_len']}")
         print(f"  Features: {test_config['num_features']}")
         
+        # Create plugin dependencies
+        print("\n✓ Creating plugin dependencies...")
+        logger = logging.getLogger(__name__)
+        
+        generator_plugin = GeneratorPlugin(test_config, logger)
+        discriminator_plugin = DiscriminatorPlugin(test_config)
+        feeder_plugin = FeederPlugin(test_config)
+        
+        print("✓ Plugins created successfully")
+        
         # Initialize the GAN trainer plugin
         print("\n✓ Initializing GANTrainerPlugin...")
-        trainer_plugin = GANTrainerPlugin(config=test_config)
+        trainer_plugin = GANTrainerPlugin(
+            config=test_config,
+            generator_plugin=generator_plugin,
+            discriminator_plugin=discriminator_plugin,
+            feeder_plugin=feeder_plugin
+        )
         
         # Set training data
         print("✓ Setting training data...")
