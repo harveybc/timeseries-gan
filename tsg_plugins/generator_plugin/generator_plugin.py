@@ -330,11 +330,11 @@ class GeneratorPlugin(PluginBase):
         # 2. Build or Get the Internal BiLSTM Z-Generator
         self.logger.debug("Building internal BiLSTM Z-generator.")
         
-        x = tf.keras.layers.Dense(576, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
+        x = tf.keras.layers.Dense(576, activation='relu')(noise_input)
         self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
         x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
         self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
+        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
@@ -356,12 +356,12 @@ class GeneratorPlugin(PluginBase):
                 if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
                     if layer.trainable:
                         self.logger.debug(f"Applying L2 to VAE decoder layer (kernel): {layer.name}")
-                        layer.kernel_regularizer = self._get_l2_reg()
+                        #layer.kernel_regularizer = self._get_l2_reg()
                 elif isinstance(layer, tf.keras.layers.LSTM): # Includes Bidirectional wrapped LSTMs if VAE has them
                     if layer.trainable:
                         self.logger.debug(f"Applying L2 to VAE decoder LSTM layer (kernel/recurrent): {layer.name}")
-                        layer.kernel_regularizer = self._get_l2_reg()
-                        layer.recurrent_regularizer = self._get_l2_reg()
+                        #layer.kernel_regularizer = self._get_l2_reg()
+                        #layer.recurrent_regularizer = self._get_l2_reg()
         
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]

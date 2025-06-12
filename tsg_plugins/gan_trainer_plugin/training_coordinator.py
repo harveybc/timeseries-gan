@@ -260,23 +260,51 @@ class TrainingCoordinator:
                     self._save_checkpoint(epoch + 1, generator, discriminator, gan_model, models_dir, is_final_save=True)
                     break # Exit training loop
             
-            # Log progress every epoch
+            # Log progress every epoch with comprehensive PhD-level metrics
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
+                # Format losses with scientific notation for small values
+                g_loss_str = f"{g_loss:.4e}" if g_loss < 1e-3 else f"{g_loss:.4f}"
+                d_loss_str = f"{d_loss_avg:.4e}" if d_loss_avg < 1e-3 else f"{d_loss_avg:.4f}"
+                d_real_str = f"{d_loss_real_avg:.4e}" if d_loss_real_avg < 1e-3 else f"{d_loss_real_avg:.4f}"
+                d_fake_str = f"{d_loss_fake_avg:.4e}" if d_loss_fake_avg < 1e-3 else f"{d_loss_fake_avg:.4f}"
+                
+                # Get current learning rates
+                current_g_lr = K.get_value(self.generator_optimizer.learning_rate)
+                current_d_lr = K.get_value(self.discriminator_optimizer.learning_rate)
+                
+                # Primary metrics
                 log_msg = (
-                    f"Epoch {epoch+1}/{final_epochs} - "
-                    f"G_loss: {g_loss:.4f}, D_loss: {d_loss_avg:.4f} "
-                    f"(Real: {d_loss_real_avg:.4f}, Fake: {d_loss_fake_avg:.4f}), "
-                    f"G_LR: {K.get_value(self.generator_optimizer.learning_rate):.1e}, "
-                    f"D_LR: {K.get_value(self.discriminator_optimizer.learning_rate):.1e}, "
+                    f"Epoch {epoch+1}/{final_epochs} │ "
+                    f"G_loss: {g_loss_str} │ D_loss: {d_loss_str} │ "
+                    f"D_real: {d_real_str} │ D_fake: {d_fake_str} │ "
+                    f"G_LR: {current_g_lr:.2e} │ D_LR: {current_d_lr:.2e}"
                 )
+                
+                # Learning rate scheduler patience (ReduceLROnPlateau)
+                lr_patience_info = ""
                 if lr_scheduler_g and hasattr(lr_scheduler_g, 'wait'):
-                    log_msg += f"G_Patience: {getattr(lr_scheduler_g, 'wait', 'N/A')}/{getattr(lr_scheduler_g, 'patience', 'N/A')}, "
-                    log_msg += f"G_Cooldown: {getattr(lr_scheduler_g, 'cooldown_counter', 'N/A')}, "
+                    g_wait = getattr(lr_scheduler_g, 'wait', 0)
+                    g_patience = getattr(lr_scheduler_g, 'patience', 0)
+                    g_cooldown = getattr(lr_scheduler_g, 'cooldown_counter', 0)
+                    lr_patience_info += f" │ LR_G: {g_wait}/{g_patience} (cd:{g_cooldown})"
+                
                 if lr_scheduler_d and hasattr(lr_scheduler_d, 'wait'):
-                    log_msg += f"D_Patience: {getattr(lr_scheduler_d, 'wait', 'N/A')}/{getattr(lr_scheduler_d, 'patience', 'N/A')}, "
-                    log_msg += f"D_Cooldown: {getattr(lr_scheduler_d, 'cooldown_counter', 'N/A')}, "
-                log_msg += f"Time: {epoch_time:.2f}s"
+                    d_wait = getattr(lr_scheduler_d, 'wait', 0)
+                    d_patience = getattr(lr_scheduler_d, 'patience', 0)
+                    d_cooldown = getattr(lr_scheduler_d, 'cooldown_counter', 0)
+                    lr_patience_info += f" │ LR_D: {d_wait}/{d_patience} (cd:{d_cooldown})"
+                
+                # Early stopping patience
+                es_patience_info = ""
+                if early_stopping_callback and hasattr(early_stopping_callback, 'wait'):
+                    es_wait = getattr(early_stopping_callback, 'wait', 0)
+                    es_patience = getattr(early_stopping_callback, 'patience', self.params.get('es_patience', 0))
+                    monitor_metric = getattr(early_stopping_callback, 'monitor', 'loss')
+                    es_patience_info = f" │ ES: {es_wait}/{es_patience} ({monitor_metric})"
+                
+                # Complete log message
+                log_msg += lr_patience_info + es_patience_info + f" │ Time: {epoch_time:.2f}s"
                 self.logger.info(log_msg)
             
             # Save models at intervals - THIS SECTION IS REMOVED
