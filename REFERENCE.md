@@ -17,11 +17,12 @@ The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework
 
 ### Key Features
 
-- **51-Feature Time Series Generation**: Generates OHLC prices, 20 technical indicators, cyclical date features, and fundamental market data
+- **23-Feature Base Architecture**: Generates 23 core base features (OHLC, market data, sub-periodicity ticks) with deterministic post-processing for technical indicators and datetime features
 - **Three Operation Modes**: Train, Generate, and Optimize with dedicated pipeline modules
 - **Pre-trained Models**: Ready-to-use encoder/decoder models trained on EUR/USD hourly data
 - **Extreme Modularity**: Largest module under 630 lines, with generator plugin fully modularized into 10 modules under 420 lines each
 - **Plugin Architecture**: Extensible design supporting custom feeders, generators, evaluators, and optimizers
+- **Improved Training Efficiency**: Smaller networks with 23 features train faster with better authenticity than previous 51/57-feature expansion approaches
 
 ---
 
@@ -29,11 +30,21 @@ The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework
 
 ### Architecture Overview
 
-The system combines three key machine learning components in a sequential pipeline:
+The system implements a 23-feature base architecture that combines three key machine learning components in a sequential pipeline:
 
-1.  **Variational Autoencoder (VAE)**: A pre-trained VAE decoder is a core component of the GAN's generator.
-2.  **Conditional Generation**: Date/time features and previous step's synthetic output for temporal conditioning.
-3.  **Generative Adversarial Network (GAN)**: Adversarial training for improved synthetic data quality, where the generator is a composite model.
+1.  **Variational Autoencoder (VAE)**: A pre-trained VAE decoder that outputs 23 base features, serving as the core component of the GAN's generator.
+2.  **Conditional Generation**: Date/time features and context vectors provide temporal conditioning for sequential generation.
+3.  **Generative Adversarial Network (GAN)**: Adversarial training between a generator (outputting 23 features) and discriminator (expecting 23 features) for improved synthetic data quality.
+
+### 23-Feature Architecture Benefits
+
+The new architecture represents a significant improvement over previous 51/57-feature expansion approaches:
+
+- **Authenticity**: The GAN focuses on learning core relationships between 23 base features
+- **Computational Efficiency**: Smaller networks (23 vs 51+ features) train faster with reduced memory requirements
+- **Better Learning Quality**: The discriminator focuses on distinguishing realistic vs fake patterns in core features without confusion from artificially generated technical indicators
+- **Deterministic Post-Processing**: Technical indicators calculated from the 23 base features are mathematically correct
+- **Eliminated Complexity**: Removes problematic feature expansion methods that caused TensorFlow compatibility issues
 
 ### Training Process Enhancements
 
@@ -82,15 +93,25 @@ This targeted regularization approach aims to prevent the discriminator from bec
 
 ### Feature Engineering and Consistency
 
-A critical aspect of the SC-VAE-GAN's training stability is ensuring feature consistency between the synthetic data produced by the generator and the real data used to train the discriminator. Both data streams must present the same number and order of features to the discriminator.
+A critical aspect of the SC-VAE-GAN's training stability is ensuring feature consistency between the synthetic data produced by the generator and the real data used to train the discriminator. In the 23-feature architecture, both data streams present the same 23 base features to the discriminator.
 
-To address this, the `GeneratorPlugin` incorporates a dedicated method, `prepare_features_for_discriminator`. This method processes raw real data batches before they are fed to the discriminator during training. Its responsibilities include:
+The `GeneratorPlugin` incorporates a streamlined method, `prepare_features_for_discriminator`. This method processes raw real data batches before they are fed to the discriminator during training. Its responsibilities include:
 
-1.  **Calculating Technical Indicators**: It applies the same technical indicator calculations (e.g., RSI, MACD, Bollinger Bands) to the real data as those defined for the synthetic data generation process.
-2.  **Generating Cyclical Date/Time Features**: It computes cyclical representations of date and time components (e.g., hour of day, day of week) from the real data's timestamps.
-3.  **Feature Alignment and Ordering**: It ensures that the processed real data contains all 51 features specified in the system configuration (e.g., `full_feature_names_ordered`). Any features missing after the previous steps are padded (e.g., with 0.0 if necessary), and all features are arranged in the precise order expected by the discriminator.
+1.  **Base Feature Extraction**: Extracts the first 23 base features from real data, focusing on core financial features (OHLC, market data, sub-periodicity ticks).
+2.  **Feature Padding**: If the input data has fewer than 23 features, it pads with zeros to maintain the expected 23-feature format.
+3.  **Consistent Ordering**: Ensures that the processed real data maintains the same feature order as the generator output.
 
-By applying this consistent feature engineering pipeline to the real data, the system guarantees that the discriminator receives input with the expected shape (e.g., `(batch_size, sequence_length, 51)`), resolving potential feature mismatch errors and contributing to a more stable and effective adversarial training process. This preparation step is handled within the `TrainingCoordinator` by calling the `generator_plugin.prepare_features_for_discriminator()` method on real data batches.
+By applying this consistent feature preparation pipeline to the real data, the system guarantees that the discriminator receives input with the expected shape (e.g., `(batch_size, sequence_length, 23)`), providing a stable and effective adversarial training process. This preparation step is handled within the `TrainingCoordinator` by calling the `generator_plugin.prepare_features_for_discriminator()` method on real data batches.
+
+### Post-Processing Pipeline
+
+When full feature sets are needed (e.g., for evaluation or downstream tasks), post-processing is applied after generation:
+
+1.  **Technical Indicators**: Calculate mathematically correct indicators from the 23 base features (RSI, MACD, EMA, Bollinger Bands, etc.)
+2.  **Datetime Features**: Generate cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) based on timestamps
+3.  **Derived Features**: Any additional features calculated from the 23 base features
+
+This approach ensures that technical indicators are mathematically accurate rather than AI-generated approximations.
 
 ### Autoencoder Model Analysis
 
@@ -107,12 +128,21 @@ The pre-trained autoencoder models (located in `examples/results/phase_4_3/`) im
     1.  Latent sequence `z_seq` (e.g., shape `(batch_size, 18, 32)`), typically generated by an internal Z-generator.
     2.  Context vector `h_context` (e.g., shape `(batch_size, 64)`).
     3.  Conditional features (e.g., shape `(batch_size, 10)`).
-- **Architecture**: Details of the decoder's internal layers (e.g., LSTMs, Dense layers).
-- **Output**: Reconstructed features (e.g., 23 base features of shape `(batch_size, 23)`).
+- **Architecture**: Conv1DTranspose layers with attention mechanisms and normalization
+- **Output**: 23 base features (shape `(batch_size, 23)`) representing core financial data
 - **Integration in GAN Generator**:
     *   The `GeneratorPlugin` loads this pre-trained VAE decoder from the path specified in `config["generator_vae_decoder_model_path_param"]`.
-    *   The VAE decoder's weights are set to `trainable=True` to allow fine-tuning during the adversarial GAN training process.
-    *   It forms a core part of the composite GAN generator, which also includes an internal BiLSTM Z-generator (to produce `z_seq` from noise) and handles the various inputs.
+    *   The decoder is set to `trainable=True` during GAN training, allowing fine-tuning through transfer learning.
+    *   Forms the core component of the composite GAN generator, which also includes an internal BiLSTM Z-generator (to produce `z_seq` from noise) and handles the various inputs.
+
+#### 23 Base Features Output
+The VAE decoder produces 23 core features that represent the fundamental financial data:
+1. **OHLC Data**: Open, High, Low, Close prices  
+2. **Market Indicators**: VIX close, S&P500 close
+3. **Bid/Ask Spreads**: BC-BO, BH-BL spreads
+4. **Sub-periodicity Ticks**: CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8 (16 features)
+
+These 23 features serve as the foundation from which technical indicators and datetime features are calculated during post-processing.
 
 ---
 

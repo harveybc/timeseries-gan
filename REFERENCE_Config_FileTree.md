@@ -2,7 +2,29 @@
 
 ## Configuration Parameters (`app/config.py`)
 
-This section details the configuration parameters used in the `timeseries-gan` project, as defined in `app/config.py`. These parameters control various aspects of the data generation, model training, and evaluation processes.
+This section details the configuration parameters used in the `timeseries-gan` project, as defined in `app/config.py`. These parameters control various aspects of the data generation, model training, and evaluation processes for the **23-Feature Base Architecture**.
+
+### 23-Feature Architecture Overview
+
+The system now implements a streamlined 23-feature base architecture that significantly improves upon the previous 51/57-feature approach:
+
+**Core Benefits:**
+- **Authenticity**: GAN focuses on learning core relationships between 23 base features
+- **Efficiency**: Smaller networks train faster with reduced memory requirements  
+- **Quality**: Discriminator focuses on distinguishing realistic patterns without confusion from artificial indicators
+- **Mathematical Accuracy**: Technical indicators calculated deterministically from base features are mathematically correct
+- **Simplified Architecture**: Eliminates problematic feature expansion methods and TensorFlow compatibility issues
+
+**Base Features (23):**
+1. **OHLC Data**: Open, High, Low, Close prices (4 features)
+2. **Market Indicators**: VIX close, S&P500 close (2 features)  
+3. **Bid/Ask Spreads**: BC-BO, BH-BL spreads (2 features)
+4. **Sub-periodicity Ticks**: CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8 (15 features)
+
+**Post-Processing Pipeline:**
+- **Technical Indicators**: 20+ indicators (RSI, MACD, EMA, Bollinger Bands, etc.) calculated from base features
+- **Datetime Features**: Cyclical encodings (hour_sin/cos, day_of_week_sin/cos, etc.) generated deterministically
+- **Derived Features**: Additional features calculated from the 23 base features when required
 
 ### Plugin Selection
 -   `"feeder"`: `"default_feeder"` (Plugin for providing input data/noise to the generator)
@@ -24,8 +46,10 @@ This section details the configuration parameters used in the `timeseries-gan` p
 -   `"target_column"`: `"CLOSE"` (Target column name in the dataset)
 -   `"predicted_horizons"`: `[24, 48, 72, 96, 120, 144]` (Prediction horizons for forecasting tasks, if applicable)
 -   `"dataset_periodicity"`: `"1h"` (Frequency of the time series data, e.g., "1h" for hourly)
+-   `"base_features_count"`: `23` (Number of base features output by generator and expected by discriminator)
+-   `"post_processing_features_enabled"`: `False` (Enable post-processing to expand beyond 23 base features)
 
-### Generation and Model Parameters
+### Generation and Model Parameters (23-Feature Architecture)
 -   `"n_samples"`: `12600` (Number of synthetic samples to generate)
 -   `"max_steps_train"`: `25200` (Maximum number of real data rows for initial conditioning or training length)
 -   `"latent_shape"`: `[18, 32]` (Shape of the latent space vector: [sequence_length, latent_dim])
@@ -36,6 +60,8 @@ This section details the configuration parameters used in the `timeseries-gan` p
 -   `"noise_dim"`: `100` (Dimension of the noise vector input to the generator)
 -   `"conditional_features_dim"`: `10` (Dimension of the conditional features vector for the generator)
 -   `"context_vector_dim"`: `64` (Dimension of the context vector used for sequential generation)
+-   `"base_features_output_dim"`: `23` (Number of base features output by the generator VAE decoder)
+-   `"discriminator_input_dim"`: `23` (Number of features expected as input by the discriminator)
 
 ### Feeder Plugin Parameters (`FeederPlugin`)
 -   `"feeder_sampling_method"`: `"standard_normal"` (Method for sampling noise, e.g., "standard_normal")
@@ -62,20 +88,22 @@ This section details the configuration parameters used in the `timeseries-gan` p
 -   `"load_generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_generator_model.keras"` (Path to load a pre-trained full generator model for *generation mode*.)
 -   `"load_discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to load a pre-trained full discriminator model for *generation mode*.)
 -   `"generator_decoder_input_window_size"`: `144` (Input window size for the VAE decoder component)
--   `"generator_full_feature_names_ordered"`: List of 51 feature names in the exact order expected for the final generated output. Includes OHLC, technical indicators, cyclical date/time features, fundamental data, and placeholders.
-    *   Example: `["DATE_TIME", "OPEN", ..., "Market_Volatility_Idx"]`
--   `"generator_decoder_output_feature_names"`: List of 23 features that the VAE decoder part of the generator is expected to output. These are typically core features from which technical indicators are derived.
-    *   Example: `["OPEN", "LOW", ..., "CLOSE_30m_tick_8"]`
--   `"generator_ohlc_feature_names"`: `["OPEN", "HIGH", "LOW", "CLOSE"]` (Names of OHLC features)
--   `"generator_ti_feature_names"`: List of 15 technical indicator names.
-    *   Example: `["RSI", "MACD", ..., "ROC"]`
+-   `"generator_base_feature_names_ordered"`: List of 23 base feature names that the generator outputs directly. These are the core features from which technical indicators are calculated during post-processing.
+    *   Example: `["OPEN", "HIGH", "LOW", "CLOSE", "vix_close", "S&P500_Close", "BC-BO", "BH-BL", "CLOSE_15m_tick_1", ..., "CLOSE_30m_tick_8"]`
+-   `"generator_decoder_output_feature_names"`: List of 23 features that the VAE decoder part of the generator outputs. This matches `generator_base_feature_names_ordered`.
+    *   Example: `["OPEN", "HIGH", "LOW", "CLOSE", "vix_close", "S&P500_Close", "BC-BO", "BH-BL", "CLOSE_15m_tick_1", ..., "CLOSE_30m_tick_8"]`
+-   `"generator_ohlc_feature_names"`: `["OPEN", "HIGH", "LOW", "CLOSE"]` (Names of OHLC features within the 23 base features)
+-   `"generator_post_processing_ti_feature_names"`: List of technical indicator names calculated during post-processing from the 23 base features.
+    *   Example: `["RSI", "MACD", "EMA", "Bollinger_Upper", "Bollinger_Lower", "ATR", "Stoch_K", "Stoch_D", "Williams_R", "CCI", "MFI", "TSI", "UO", "ROC", "TRIX"]`
+-   `"generator_post_processing_datetime_feature_names"`: List of cyclical datetime features calculated during post-processing.
+    *   Example: `["hour_of_day_sin", "hour_of_day_cos", "day_of_week_sin", "day_of_week_cos", "day_of_month_sin", "day_of_month_cos", "month_of_year_sin", "month_of_year_cos", "day_of_year_sin", "day_of_year_cos"]`
 -   `"generator_l2_reg"`: `0.01` (L2 regularization factor for generator layers if `use_generator_l2_reg` is `True`)
 
 ### Discriminator Plugin Parameters (`DiscriminatorPlugin`)
--   `"discriminator_full_feature_names_ordered"`: List of 51 feature names in the exact order the discriminator expects as input. This should match `generator_full_feature_names_ordered`.
-    *   Example: `["DATE_TIME", "OPEN", ..., "Market_Volatility_Idx"]`
+-   `"discriminator_base_feature_names_ordered"`: List of 23 base feature names in the exact order the discriminator expects as input. This should match `generator_base_feature_names_ordered`.
+    *   Example: `["OPEN", "HIGH", "LOW", "CLOSE", "vix_close", "S&P500_Close", "BC-BO", "BH-BL", "CLOSE_15m_tick_1", ..., "CLOSE_30m_tick_8"]`
 -   `"discriminator_ohlc_feature_names"`: `["OPEN", "HIGH", "LOW", "CLOSE"]`
--   `"discriminator_ti_feature_names"`: List of 15 technical indicator names.
+-   `"discriminator_input_features"`: `23` (Number of input features expected by discriminator)
 
 ### Training Parameters (General & Optimizer)
 -   `"learning_rate"`: `0.0002` (Default learning rate, can be overridden by specific G/D LR)
@@ -183,7 +211,11 @@ timeseries-gan/
 ├── LICENSE
 ├── pyproject.toml              # Project metadata and build configuration
 ├── README.md                   # Main project README
-├── REFERENCE.md                # Main reference documentation (this file)
+├── REFERENCE.md                # Main reference documentation
+├── REFERENCE_Functionality.md  # Detailed functionality documentation
+├── REFERENCE_Config_FileTree.md # Configuration and file structure documentation (this file)
+├── ARCHITECTURE_23_FEATURES.md # 23-feature architecture documentation
+├── 23_FEATURE_IMPLEMENTATION_SUMMARY.md # Implementation summary for 23-feature architecture
 ├── requirements.txt            # Python package dependencies
 ├── sdg.py                      # Script to run the SDG application (symlink or wrapper for app.main)
 ├── setup.py                    # Python package setup script
@@ -195,11 +227,22 @@ timeseries-gan/
 *   **`app/`**: Core application logic, including the main entry point (`main.py`) and configuration (`config.py`).
 *   **`tsg_plugins/`**: Contains all custom plugins for the timeseries GAN, such as:
     *   `default_feeder_plugin/`: Handles data input, noise generation, and conditioning.
-    *   `generator_plugin/`: Defines the composite generator model (BiLSTM Z-gen + VAE Decoder).
-    *   `discriminator_plugin/`: Defines the discriminator model.
-    *   `gan_trainer_plugin/`: Orchestrates the GAN training process, including the `TrainingCoordinator`.
+    *   `generator_plugin/`: Defines the composite generator model (BiLSTM Z-gen + VAE Decoder) outputting 23 base features.
+    *   `discriminator_plugin/`: Defines the discriminator model expecting 23 base features as input.
+    *   `gan_trainer_plugin/`: Orchestrates the GAN training process using the 23-feature architecture, including the `TrainingCoordinator`.
 *   **`examples/`**: Provides example data, pre-trained models, and a place for output results and logs.
 *   **`tests/`**: Houses automated tests for the project.
-*   **Root Files**: Includes project setup (`setup.py`, `pyproject.toml`), dependencies (`requirements.txt`), and primary documentation (`README.md`, `REFERENCE.md`).
+*   **Root Files**: Includes project setup (`setup.py`, `pyproject.toml`), dependencies (`requirements.txt`), and comprehensive documentation:
+    *   `REFERENCE.md`: Main system reference with 23-feature architecture overview
+    *   `REFERENCE_Functionality.md`: Detailed functionality and operational modes
+    *   `REFERENCE_Config_FileTree.md`: Configuration parameters and file structure
+    *   `ARCHITECTURE_23_FEATURES.md`: Technical architecture documentation for 23-feature implementation
+    *   `23_FEATURE_IMPLEMENTATION_SUMMARY.md`: Implementation summary and benefits analysis
 
-This structure promotes modularity and separation of concerns, making the project easier to understand, maintain, and extend.
+**23-Feature Architecture Integration:**
+The file structure supports the new 23-feature base architecture with:
+*   Generator plugins outputting 23 core features directly to discriminator
+*   Discriminator plugins expecting 23-feature inputs
+*   Post-processing capabilities for technical indicators and datetime features
+*   Configuration parameters optimized for the smaller, more efficient feature space
+*   Comprehensive documentation of the architectural transition and benefits

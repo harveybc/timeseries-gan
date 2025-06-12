@@ -84,63 +84,59 @@ DEFAULT_VALUES = {
     # Output filename for the generation mode
     "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o.csv", # User's value retained
 
-    "generator_decoder_input_window_size": 144, 
-    "generator_full_feature_names_ordered": [
-        "DATE_TIME", 
+    "generator_decoder_input_window_size": 144,
+    
+    # 23-Feature Base Architecture Configuration
+    "generator_base_feature_names_ordered": [
         "OPEN", "HIGH", "LOW", "CLOSE", 
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
-        "day_of_month_sin", "day_of_month_cos",
-        "hour_of_day_sin", "hour_of_day_cos",
-        "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", 
-        "S&P500_Close", "vix_close",
+        "vix_close", "S&P500_Close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # Replace placeholders to maintain 51 features
-        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ], 
     "generator_decoder_output_feature_names": [
         # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
-        "OPEN", "LOW", "HIGH", "vix_close", 
-        "BC-BO", "BH-BL", 
-        "S&P500_Close",
+        "OPEN", "HIGH", "LOW", "CLOSE", 
+        "vix_close", "S&P500_Close",
+        "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ], 
     "generator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-    "generator_ti_feature_names": [
+    
+    # Post-processing features (calculated after generation, not during GAN training)
+    "generator_post_processing_ti_feature_names": [
         "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
         "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC"
     ],
-    "discriminator_full_feature_names_ordered": [
-        "DATE_TIME", 
-        "OPEN", "HIGH", "LOW", "CLOSE", 
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+    "generator_post_processing_datetime_feature_names": [
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", 
-        "S&P500_Close", "vix_close",
+        "day_of_year_sin", "day_of_year_cos"
+    ],
+    
+    # Configuration for 23-feature architecture
+    "base_features_count": 23,
+    "post_processing_features_enabled": False,  # Set to True when full feature sets are needed
+    "base_features_output_dim": 23,
+    "discriminator_input_dim": 23,
+    
+    # Discriminator configuration for 23-feature architecture
+    "discriminator_base_feature_names_ordered": [
+        "OPEN", "HIGH", "LOW", "CLOSE", 
+        "vix_close", "S&P500_Close",
         "BC-BO", "BH-BL",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # Replace placeholders to maintain 51 features
-        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ],
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-    "discriminator_ti_feature_names": [
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC"
-    ],
 
     # Training parameters
     "learning_rate": 0.001,
