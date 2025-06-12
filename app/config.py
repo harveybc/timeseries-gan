@@ -175,7 +175,7 @@ DEFAULT_VALUES = {
     "seq_len_eval": 288,
     "max_steps_eval": 1000,
     "eval_metric": "mse",
-    "early_stopping_patience": 10,
+    "early_stopping_patience": 120,
     "checkpointing": True,
     "resume_from_checkpoint": False,
     "fp16": False,
@@ -189,9 +189,9 @@ DEFAULT_VALUES = {
     "enable_reduce_lr_on_plateau": True,
     "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler
     "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
-    "lr_reduction_factor": 0.1,   # Factor by which LR is reduced
-    "lr_patience": 10,            # Epochs with no improvement before LR is reduced
-    "lr_min_delta": 0.0001,       # Minimum change to qualify as an improvement
+    "lr_reduction_factor": 0.5,   # Factor by which LR is reduced
+    "lr_patience": 40,            # Epochs with no improvement before LR is reduced
+    "lr_min_delta": 1e-7,       # Minimum change to qualify as an improvement
     "min_lr_g": 1e-7,             # Minimum LR for generator
     "min_lr_d": 1e-7,             # Minimum LR for discriminator
 }
