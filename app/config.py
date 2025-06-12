@@ -14,7 +14,7 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
-    "operation_mode": "train", # Added: Default operation mode, possible values: "train", "generate", "optimize"
+    "operation_mode": "generate", # Added: Default operation mode, possible values: "train", "generate", "optimize"
     "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
 
     # Data for evaluation and base for generation
@@ -80,7 +80,7 @@ DEFAULT_VALUES = {
     "load_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
 
     # Output filename for the generation mode
-    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o",
+    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o.csv",
 
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [
