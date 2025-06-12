@@ -186,6 +186,13 @@ DEFAULT_VALUES = {
     # Added: L2 Regularization for Generator
     "l2_regularization": 1e-4,
 
+    # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
+    "enable_mmd_loss": True,          # Enable/disable MMD loss
+    "mmd_lambda_g": 0.01,            # Weight for MMD loss in generator
+    "mmd_lambda_d": 0.001,           # Weight for MMD loss in discriminator (optional)
+    "mmd_gamma": None,               # RBF kernel bandwidth (None = auto)
+    "mmd_sample_size": 128,          # Number of samples for MMD computation (performance)
+
     # Added: ReduceLROnPlateau parameters
     "enable_reduce_lr_on_plateau": True,
     "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler

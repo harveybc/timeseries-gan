@@ -202,6 +202,11 @@ class TrainingCoordinator:
             # If not an int, it might error out in range(final_epochs) anyway, but good to log.
 
         self.logger.info(f"Starting training loop for {final_epochs} epochs...")
+        
+        # Store real data and generator for MMD calculations
+        self.current_real_data_for_mmd = real_data
+        self.current_generator_for_mmd = generator
+        
         # Training loop
         for epoch in range(final_epochs): # Use final_epochs
             self.current_epoch = epoch
@@ -325,6 +330,18 @@ class TrainingCoordinator:
                     f"G_steps: {g_metrics['g_training_steps']} │ D_steps: {d_metrics['d_training_steps']}"
                 )
                 
+                # MMD LOSS COMPONENTS LINE - Maximum Mean Discrepancy loss details
+                mmd_enabled = self.params.get("enable_mmd_loss", False)
+                if mmd_enabled:
+                    mmd_stats = (
+                        f"           MMD │ "
+                        f"G_mmd: {format_metric(g_metrics['g_mmd_loss'])} │ D_mmd: {format_metric(d_metrics['d_mmd_loss'])} │ "
+                        f"G_mmd_raw: {format_metric(g_metrics['g_mmd_raw'])} │ D_mmd_raw: {format_metric(d_metrics['d_mmd_raw'])} │ "
+                        f"G_adv: {format_metric(g_metrics['g_adversarial_loss'])} │ D_adv: {format_metric(d_metrics['d_adversarial_loss'])}"
+                    )
+                else:
+                    mmd_stats = f"           MMD │ DISABLED"
+                
                 # PATIENCE AND SCHEDULING LINE - Learning rate and early stopping status
                 lr_patience_info = ""
                 if lr_scheduler_g and hasattr(lr_scheduler_g, 'wait'):
@@ -357,6 +374,7 @@ class TrainingCoordinator:
                 self.logger.info(prediction_stats)
                 self.logger.info(variability_stats)
                 self.logger.info(config_stats)
+                self.logger.info(mmd_stats)
                 self.logger.info(patience_line)
                 self.logger.info("═" * 120)
             
@@ -522,6 +540,11 @@ class TrainingCoordinator:
         total_fake_pred_std = 0.0
         valid_gradient_steps = 0
         
+        # MMD loss component tracking
+        total_d_mmd_loss = 0.0
+        total_d_mmd_raw = 0.0
+        total_d_adversarial_loss = 0.0
+        
         for step in range(n_times):
             # Sample real data batch
             batch_indices = tf.random.uniform([batch_size], 0, tf.shape(real_data)[0], dtype=tf.int32)
@@ -565,8 +588,10 @@ class TrainingCoordinator:
                 real_acc = tf.reduce_mean(tf.cast(real_pred > 0.5, tf.float32))
                 fake_acc = tf.reduce_mean(tf.cast(fake_pred < 0.5, tf.float32))
                 
-                # Calculate loss components
-                d_loss, d_real_loss, d_fake_loss = self._discriminator_loss(real_pred, fake_pred)
+                # Calculate loss components including MMD if enabled
+                d_loss, d_real_loss, d_fake_loss, d_loss_components = self._discriminator_loss(
+                    real_pred, fake_pred, real_batch, fake_batch
+                )
             
             # Apply gradients with gradient norm tracking
             gradients = tape.gradient(d_loss, discriminator.trainable_variables)
@@ -616,6 +641,11 @@ class TrainingCoordinator:
             total_fake_pred_mean += fake_pred_mean.numpy()
             total_real_pred_std += real_pred_std.numpy()
             total_fake_pred_std += fake_pred_std.numpy()
+            
+            # Accumulate MMD loss components
+            total_d_mmd_loss += d_loss_components["d_mmd_loss"].numpy()
+            total_d_mmd_raw += d_loss_components["d_mmd_raw"].numpy()
+            total_d_adversarial_loss += d_loss_components["d_adversarial_loss"].numpy()
         
         # Calculate averages
         avg_d_loss = total_d_loss_val / n_times
@@ -635,7 +665,11 @@ class TrainingCoordinator:
             "d_prediction_gap": abs(total_real_pred_mean - total_fake_pred_mean) / n_times,
             "d_valid_grad_ratio": valid_gradient_steps / n_times,
             "d_batch_size": batch_size,
-            "d_training_steps": n_times
+            "d_training_steps": n_times,
+            # MMD loss components
+            "d_mmd_loss": total_d_mmd_loss / n_times,
+            "d_mmd_raw": total_d_mmd_raw / n_times,
+            "d_adversarial_loss": total_d_adversarial_loss / n_times
         }
         
         return avg_d_loss, avg_d_real_loss, avg_d_fake_loss, metrics
@@ -663,6 +697,11 @@ class TrainingCoordinator:
         total_fake_pred_std = 0.0
         total_generator_accuracy = 0.0
         valid_gradient_steps = 0
+        
+        # MMD loss component tracking
+        total_g_mmd_loss = 0.0
+        total_g_mmd_raw = 0.0
+        total_g_adversarial_loss = 0.0
         
         # Retrieve necessary dimensions from self.params, consistent with _train_discriminator_step
         # These are defined in app/config.py and documented in REFERENCE_Config_FileTree.md
@@ -698,7 +737,33 @@ class TrainingCoordinator:
                 # Calculate generator accuracy (how often it fools the discriminator)
                 generator_acc = tf.reduce_mean(tf.cast(fake_pred > 0.5, tf.float32))
                 
-                g_loss = self._generator_loss(fake_pred)
+                # For MMD calculation, we need to extract the generator output before discriminator
+                # The gan_model is Generator -> Discriminator, so we need the intermediate output
+                # We'll get fake_data by calling generator directly if MMD is enabled
+                fake_data = None
+                real_sample = None
+                if self.params.get("enable_mmd_loss", False):
+                    # Extract generator from gan_model (should be the first layer/model)
+                    try:
+                        # Assuming gan_model is a Sequential or Functional model with generator as first part
+                        if hasattr(gan_model, 'layers') and len(gan_model.layers) > 0:
+                            generator_layer = gan_model.layers[0]
+                            fake_data = generator_layer([noise, conditions, context], training=True)
+                        else:
+                            # Fallback: try to access generator directly if it's stored
+                            if hasattr(self, 'current_generator_for_mmd'):
+                                fake_data = self.current_generator_for_mmd([noise, conditions, context], training=True)
+                        
+                        # Sample real data for MMD comparison (use stored real data from training loop)
+                        if hasattr(self, 'current_real_data_for_mmd') and fake_data is not None:
+                            real_indices = tf.random.uniform([batch_size], 0, tf.shape(self.current_real_data_for_mmd)[0], dtype=tf.int32)
+                            real_sample = tf.gather(self.current_real_data_for_mmd, real_indices)
+                    except Exception as e:
+                        self.logger.warning(f"Could not extract generator output for MMD calculation: {e}")
+                        fake_data = None
+                        real_sample = None
+                
+                g_loss, g_loss_components = self._generator_loss(fake_pred, real_sample, fake_data)
 
             generator_trainable_vars = gan_model.trainable_variables 
 
@@ -751,6 +816,11 @@ class TrainingCoordinator:
             total_fake_pred_mean += fake_pred_mean.numpy()
             total_fake_pred_std += fake_pred_std.numpy()
             total_generator_accuracy += generator_acc.numpy()
+            
+            # Accumulate MMD loss components
+            total_g_mmd_loss += g_loss_components["g_mmd_loss"].numpy()
+            total_g_mmd_raw += g_loss_components["g_mmd_raw"].numpy()
+            total_g_adversarial_loss += g_loss_components["g_adversarial_loss"].numpy()
         
         # Calculate averages
         avg_g_loss = total_loss / n_times
@@ -763,24 +833,33 @@ class TrainingCoordinator:
             "g_fake_pred_std": total_fake_pred_std / n_times,
             "g_valid_grad_ratio": valid_gradient_steps / n_times,
             "g_batch_size": batch_size,
-            "g_training_steps": n_times
+            "g_training_steps": n_times,
+            # MMD loss components
+            "g_mmd_loss": total_g_mmd_loss / n_times,
+            "g_mmd_raw": total_g_mmd_raw / n_times,
+            "g_adversarial_loss": total_g_adversarial_loss / n_times
         }
         
         return avg_g_loss, metrics
     
-    def _discriminator_loss(self, real_pred: tf.Tensor, fake_pred: tf.Tensor) -> tf.Tensor:
+    def _discriminator_loss(self, real_pred: tf.Tensor, fake_pred: tf.Tensor, 
+                           real_data: Optional[tf.Tensor] = None, 
+                           fake_data: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Dict[str, tf.Tensor]]:
         """
-        Calculate discriminator loss and its components.
+        Calculate discriminator loss and its components, optionally including MMD loss.
         
         Args:
             real_pred: Discriminator predictions on real data
             fake_pred: Discriminator predictions on fake data
+            real_data: Real data tensors (for MMD calculation)
+            fake_data: Fake data tensors (for MMD calculation)
         
         Returns:
             A tuple containing:
                 - Total discriminator loss (tf.Tensor)
-                - Mean loss on real samples (tf.Tensor)
+                - Mean loss on real samples (tf.Tensor)  
                 - Mean loss on fake samples (tf.Tensor)
+                - Loss components dictionary for logging
         """
         real_loss = tf.keras.losses.binary_crossentropy(tf.ones_like(real_pred), real_pred)
         fake_loss = tf.keras.losses.binary_crossentropy(tf.zeros_like(fake_pred), fake_pred)
@@ -788,20 +867,208 @@ class TrainingCoordinator:
         d_real_loss_mean = tf.reduce_mean(real_loss)
         d_fake_loss_mean = tf.reduce_mean(fake_loss)
         
-        total_d_loss = d_real_loss_mean + d_fake_loss_mean # As per original formulation, sum of means
-        return total_d_loss, d_real_loss_mean, d_fake_loss_mean
+        # Base adversarial loss
+        adversarial_loss = d_real_loss_mean + d_fake_loss_mean
+        total_d_loss = adversarial_loss
+        
+        # Initialize loss components
+        loss_components = {
+            "d_adversarial_loss": adversarial_loss,
+            "d_real_loss": d_real_loss_mean,
+            "d_fake_loss": d_fake_loss_mean,
+            "d_mmd_loss": tf.constant(0.0, dtype=tf.float32),
+            "d_mmd_raw": tf.constant(0.0, dtype=tf.float32),
+            "d_mmd_lambda": tf.constant(0.0, dtype=tf.float32)
+        }
+        
+        # Add MMD loss if enabled and data is provided
+        if (self.params.get("enable_mmd_loss", False) and 
+            real_data is not None and fake_data is not None):
+            mmd_lambda = self.params.get("mmd_lambda_d", 0.001)
+            mmd_loss, mmd_components = self._calculate_mmd_loss(real_data, fake_data, mmd_lambda)
+            
+            total_d_loss = adversarial_loss + mmd_loss
+            
+            # Update loss components with MMD details
+            loss_components.update({
+                "d_mmd_loss": mmd_loss,
+                "d_mmd_raw": mmd_components["mmd_raw"],
+                "d_mmd_lambda": mmd_components["mmd_lambda"]
+            })
+        
+        return total_d_loss, d_real_loss_mean, d_fake_loss_mean, loss_components
     
-    def _generator_loss(self, fake_pred: tf.Tensor) -> tf.Tensor:
+    def _generator_loss(self, fake_pred: tf.Tensor, 
+                       real_data: Optional[tf.Tensor] = None,
+                       fake_data: Optional[tf.Tensor] = None) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
         """
-        Calculate generator loss.
+        Calculate generator loss, optionally including MMD loss.
         
         Args:
             fake_pred: Discriminator predictions on generated data
+            real_data: Real data tensors (for MMD calculation)
+            fake_data: Generated data tensors (for MMD calculation)
         
         Returns:
-            Generator loss
+            Tuple of (total_generator_loss, loss_components_dict)
         """
-        return tf.reduce_mean(tf.keras.losses.binary_crossentropy(tf.ones_like(fake_pred), fake_pred))
+        # Base adversarial loss
+        adversarial_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(tf.ones_like(fake_pred), fake_pred))
+        total_g_loss = adversarial_loss
+        
+        # Initialize loss components
+        loss_components = {
+            "g_adversarial_loss": adversarial_loss,
+            "g_mmd_loss": tf.constant(0.0, dtype=tf.float32),
+            "g_mmd_raw": tf.constant(0.0, dtype=tf.float32),
+            "g_mmd_lambda": tf.constant(0.0, dtype=tf.float32)
+        }
+        
+        # Add MMD loss if enabled and data is provided
+        if (self.params.get("enable_mmd_loss", False) and 
+            real_data is not None and fake_data is not None):
+            mmd_lambda = self.params.get("mmd_lambda_g", 0.01)
+            mmd_loss, mmd_components = self._calculate_mmd_loss(real_data, fake_data, mmd_lambda)
+            
+            total_g_loss = adversarial_loss + mmd_loss
+            
+            # Update loss components with MMD details
+            loss_components.update({
+                "g_mmd_loss": mmd_loss,
+                "g_mmd_raw": mmd_components["mmd_raw"],
+                "g_mmd_lambda": mmd_components["mmd_lambda"]
+            })
+        
+        return total_g_loss, loss_components
+    
+    def _calculate_mmd_rbf(self, X: tf.Tensor, Y: tf.Tensor, gamma: Optional[float] = None) -> tf.Tensor:
+        """
+        Calculate Maximum Mean Discrepancy (MMD) using RBF kernel in TensorFlow.
+        
+        Args:
+            X: First tensor (e.g., real data)
+            Y: Second tensor (e.g., fake data)
+            gamma: RBF kernel bandwidth parameter (None for auto)
+        
+        Returns:
+            MMD value as TensorFlow tensor
+        """
+        # Ensure tensors are float32 and 2D
+        X = tf.cast(X, tf.float32)
+        Y = tf.cast(Y, tf.float32)
+        
+        if len(X.shape) == 1:
+            X = tf.expand_dims(X, -1)
+        if len(Y.shape) == 1:
+            Y = tf.expand_dims(Y, -1)
+        
+        # Flatten sequences to feature vectors if 3D (batch, seq, features) -> (batch, seq*features)
+        if len(X.shape) == 3:
+            X = tf.reshape(X, [tf.shape(X)[0], -1])
+        if len(Y.shape) == 3:
+            Y = tf.reshape(Y, [tf.shape(Y)[0], -1])
+        
+        m = tf.shape(X)[0]
+        n = tf.shape(Y)[0]
+        
+        # Auto bandwidth if not specified
+        if gamma is None:
+            # Use simplified bandwidth calculation to avoid data type issues
+            combined = tf.concat([X, Y], axis=0)
+            
+            # Sample a subset for efficient bandwidth estimation
+            max_samples = tf.minimum(tf.shape(combined)[0], 50)
+            indices = tf.random.shuffle(tf.range(tf.shape(combined)[0]))[:max_samples]
+            sample_data = tf.gather(combined, indices)
+            
+            # Calculate mean pairwise distance
+            diffs = tf.expand_dims(sample_data, 1) - tf.expand_dims(sample_data, 0)
+            sq_dists = tf.reduce_sum(tf.square(diffs), axis=2)
+            # Remove diagonal elements (distance to self = 0)
+            mask = tf.logical_not(tf.eye(max_samples, dtype=tf.bool))
+            valid_sq_dists = tf.boolean_mask(sq_dists, mask)
+            mean_sq_dist = tf.reduce_mean(valid_sq_dists)
+            gamma = tf.cast(1.0 / (2.0 * mean_sq_dist + 1e-8), tf.float32)
+        
+        def rbf_kernel(x1, x2):
+            """RBF kernel computation"""
+            x1 = tf.cast(x1, tf.float32)
+            x2 = tf.cast(x2, tf.float32)
+            x1_expanded = tf.expand_dims(x1, 1)  # [m, 1, d]
+            x2_expanded = tf.expand_dims(x2, 0)  # [1, n, d]
+            sq_dists = tf.reduce_sum(tf.square(x1_expanded - x2_expanded), axis=2)
+            return tf.exp(-gamma * sq_dists)
+        
+        # Compute kernel matrices
+        K_XX = rbf_kernel(X, X)
+        K_YY = rbf_kernel(Y, Y)
+        K_XY = rbf_kernel(X, Y)
+        
+        # Calculate MMD terms
+        term1 = tf.cond(
+            m > 1,
+            lambda: tf.reduce_sum(K_XX - tf.linalg.diag(tf.linalg.diag_part(K_XX))) / tf.cast(m * (m - 1), tf.float32),
+            lambda: tf.constant(0.0, dtype=tf.float32)
+        )
+        
+        term2 = tf.cond(
+            n > 1,
+            lambda: tf.reduce_sum(K_YY - tf.linalg.diag(tf.linalg.diag_part(K_YY))) / tf.cast(n * (n - 1), tf.float32),
+            lambda: tf.constant(0.0, dtype=tf.float32)
+        )
+        
+        term3 = tf.cond(
+            tf.logical_and(m > 0, n > 0),
+            lambda: 2.0 * tf.reduce_sum(K_XY) / tf.cast(m * n, tf.float32),
+            lambda: tf.constant(0.0, dtype=tf.float32)
+        )
+        
+        mmd_sq = term1 + term2 - term3
+        return tf.sqrt(tf.maximum(mmd_sq, tf.constant(0.0, dtype=tf.float32)))
+    
+    def _calculate_mmd_loss(self, real_data: tf.Tensor, fake_data: tf.Tensor, 
+                           lambda_weight: float) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
+        """
+        Calculate MMD loss with detailed components for logging.
+        
+        Args:
+            real_data: Real data tensor
+            fake_data: Generated data tensor  
+            lambda_weight: Weight for MMD loss term
+            
+        Returns:
+            Tuple of (weighted_mmd_loss, mmd_components_dict)
+        """
+        # Sample a subset for efficient computation if needed
+        mmd_sample_size = self.params.get("mmd_sample_size", 128)
+        
+        real_sample = real_data
+        fake_sample = fake_data
+        
+        # Sample if batch is larger than mmd_sample_size
+        if tf.shape(real_data)[0] > mmd_sample_size:
+            indices = tf.random.uniform([mmd_sample_size], 0, tf.shape(real_data)[0], dtype=tf.int32)
+            real_sample = tf.gather(real_data, indices)
+        
+        if tf.shape(fake_data)[0] > mmd_sample_size:
+            indices = tf.random.uniform([mmd_sample_size], 0, tf.shape(fake_data)[0], dtype=tf.int32)
+            fake_sample = tf.gather(fake_data, indices)
+        
+        # Calculate MMD
+        gamma = self.params.get("mmd_gamma", None)
+        mmd_value = self._calculate_mmd_rbf(real_sample, fake_sample, gamma)
+        weighted_mmd = lambda_weight * mmd_value
+        
+        # Return components for detailed logging
+        mmd_components = {
+            "mmd_raw": mmd_value,
+            "mmd_weighted": weighted_mmd,
+            "mmd_lambda": tf.constant(lambda_weight, dtype=tf.float32),
+            "mmd_sample_size_real": tf.shape(real_sample)[0],
+            "mmd_sample_size_fake": tf.shape(fake_sample)[0]
+        }
+        
+        return weighted_mmd, mmd_components
     
     def _record_epoch_metrics(self, epoch: int, g_loss: float, d_loss: float, epoch_time: float):
         """Record metrics for current epoch."""
