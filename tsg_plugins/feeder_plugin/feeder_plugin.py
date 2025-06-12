@@ -50,10 +50,16 @@ class FeederPlugin:
             self.params.update(config)
         self.config = config
         
+        # Prepare condition manager configuration
+        # Map feeder-specific config keys to ConditionManager keys
+        condition_config = config.copy()
+        condition_config['condition_columns'] = config.get('feeder_fundamental_features_for_conditioning', [])
+        condition_config['use_temporal_conditions'] = True  # Always use temporal conditions for feeder
+        
         # Initialize sub-modules
         self.encoder_handler = EncoderHandler(config)
         self.data_preprocessor = DataPreprocessor(config)
-        self.condition_manager = ConditionManager(config)
+        self.condition_manager = ConditionManager(condition_config)
         
         # Plugin state
         self.is_initialized = False

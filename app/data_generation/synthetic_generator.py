@@ -50,6 +50,10 @@ class SyntheticDataGenerator:
         self.config = config
         self.feeder_plugin = feeder_plugin
         self.generator_plugin = generator_plugin
+        
+        # Initialize feature names from config
+        # The generator model outputs all features including DATE_TIME, so we need all feature names
+        self.feature_names = config.get("generator_full_feature_names_ordered", [])
     
     def generate(self, n_samples: int, initial_window: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """
@@ -385,26 +389,79 @@ class SyntheticDataGenerator:
 
         try:
             print(f"Generating conditional inputs for {n_samples} target datetimes...")
-            # Ensure feeder_plugin.generate can handle a pd.Series of datetimes
-            # and its output is suitable for generator_model.predict()
-            feeder_outputs = self.feeder_plugin.generate(
-                n_ticks_to_generate=n_samples,
-                target_datetimes=target_datetimes # Pass the pd.Series directly
-            )
-            # feeder_outputs is expected to be the conditional input for the generator model.
-            # This might be a NumPy array or a dictionary/list of arrays depending on the model.
-
-            print(f"Predicting features using the generator model for {n_samples} samples...")
-            # Assuming generator_model is a Keras model and has .predict()
-            generated_values = generator_model.predict(feeder_outputs)
-
-            print("Assembling generated features into DataFrame...")
-            # Use the existing _convert_to_dataframe method for consistency
-            # It expects target_datetimes to be a pd.Series (or 'pd_Series' alias)
-            synthetic_data_df = self._convert_to_dataframe(generated_values, target_datetimes)
+            all_synthetic_features = []
             
-            print(f"✓ Synthetic features generated for {n_samples} datetimes. Shape: {synthetic_data_df.shape}")
-            return synthetic_data_df
+            # Process in batches to avoid memory issues with large n_samples
+            batch_size = self.config.get("feature_generation_batch_size", 1024) # Configurable batch size
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                target_datetimes_batch = target_datetimes.iloc[start:end]
+                
+                # 1. Generate conditional inputs using feeder plugin
+                # The FeederPlugin's generate method is expected to handle the creation of appropriate conditional features
+                # based on the datetimes, using its configured date features, etc.
+                current_batch_size = len(target_datetimes_batch)
+                conditional_input = self.feeder_plugin.generate(
+                    n_ticks_to_generate=current_batch_size,
+                    target_datetimes=target_datetimes_batch
+                )
+
+                if conditional_input is None:
+                    raise ValueError("FeederPlugin returned None for conditional inputs.")
+
+                # Ensure conditional_input is float32 numpy array
+                if not isinstance(conditional_input, np.ndarray):
+                    conditional_input = np.array(conditional_input).astype(np.float32)
+                elif conditional_input.dtype != np.float32:
+                    conditional_input = conditional_input.astype(np.float32)
+                
+                # 2. Generate noise input
+                noise_dim = self.config.get("noise_dim", 100)  # Default from config.py
+                noise_input = np.random.normal(0, 1, (current_batch_size, noise_dim)).astype(np.float32)
+
+                # 3. Generate context input
+                context_dim = self.config.get("context_vector_dim", 64)  # Default from config.py
+                context_input = np.random.normal(0, 1, (current_batch_size, context_dim)).astype(np.float32)
+                
+                # Prepare inputs for the generator model in the correct order: [noise, conditions, context]
+                model_inputs = [noise_input, conditional_input, context_input]
+                
+                # Predict synthetic features using the generator model
+                synthetic_features_batch_raw = generator_model.predict(model_inputs)
+
+                # The generator model outputs sequences: (batch_size, seq_len, features_out)
+                # We need one feature vector per input datetime, so we take the first step of each sequence.
+                if synthetic_features_batch_raw.ndim == 3 and synthetic_features_batch_raw.shape[1] > 0:
+                    # Expected shape e.g. (batch_size, 144, 51) -> take (batch_size, 51)
+                    synthetic_features_for_batch = synthetic_features_batch_raw[:, 0, :]
+                elif synthetic_features_batch_raw.ndim == 2:
+                    # If model already outputs (batch_size, features_out), which is not expected for this generator
+                    synthetic_features_for_batch = synthetic_features_batch_raw
+                else:
+                    err_msg = (f"Unexpected output shape from generator model: {synthetic_features_batch_raw.shape}. "
+                               f"Expected 3D (batch, seq_len, features) or 2D (batch, features).")
+                    raise ValueError(err_msg)
+
+                # Convert the NumPy array of synthetic features to a pandas DataFrame
+                # self.feature_names should correspond to the columns output by the generator (e.g., 51 features)
+                synthetic_features_batch = pd.DataFrame(
+                    synthetic_features_for_batch,
+                    columns=self.feature_names[:synthetic_features_for_batch.shape[1]], # Adjust if mismatch
+                    index=target_datetimes_batch.index
+                )
+                
+                # Replace the generated DATE_TIME column with actual target datetimes
+                if "DATE_TIME" in synthetic_features_batch.columns:
+                    synthetic_features_batch["DATE_TIME"] = target_datetimes_batch.values
+                
+                all_synthetic_features.append(synthetic_features_batch)
+            
+            # Concatenate all batches of synthetic features
+            synthetic_features_df = pd.concat(all_synthetic_features)
+            synthetic_features_df = synthetic_features_df.loc[target_datetimes.index] # Reindex to match target_datetimes order
+
+            print(f"✓ Synthetic features generated for {n_samples} datetimes. Shape: {synthetic_features_df.shape}")
+            return synthetic_features_df
 
         except Exception as e:
             import traceback

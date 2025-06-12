@@ -384,18 +384,20 @@ class GeneratePipeline:
             print("Combined data is empty, nothing to save.")
             return
 
-        output_filename = self.config.get("generated_data_file", "generated_synthetic_data.csv")
-        base_output_dir = self.config.get("output_dir")
+        output_file_path = self.config.get("generated_data_file", "generated_synthetic_data.csv")
         
-        if not base_output_dir:
-            print("Error: 'output_dir' not specified in config. Cannot save generated data.")
+        # Extract directory and filename from the full path
+        output_dir = os.path.dirname(output_file_path)
+        filename = os.path.basename(output_file_path)
+        
+        if not output_dir:
+            print("Error: Could not determine output directory from 'generated_data_file' path.")
             return
 
         self.output_manager.save_dataframe(
             combined_data_df, 
-            output_filename,
-            base_dir=base_output_dir, 
-            stage_subdir=None 
+            filename,
+            output_dir
         )
         # OutputManager should print the full path upon successful save.
-        print(f"Output saving initiated by OutputManager. Target directory: {base_output_dir}, Filename: {output_filename}")
+        print(f"Output saving initiated by OutputManager. Target directory: {output_dir}, Filename: {filename}")

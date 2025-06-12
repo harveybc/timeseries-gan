@@ -14,7 +14,7 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
-    "operation_mode": "generate", # Added: Default operation mode, possible values: "train", "generate", "optimize"
+    "operation_mode": "train", # Added: Default operation mode, possible values: "train", "generate", "optimize"
     "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
 
     # Data for evaluation and base for generation
@@ -47,8 +47,10 @@ DEFAULT_VALUES = {
     "feeder_feature_columns_for_encoder": [], 
     "feeder_real_data_file_has_header": True,
     "feeder_datetime_col_in_real_data": "DATE_TIME",
-    "feeder_date_features_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week"], # MODIFIED
-    "feeder_fundamental_features_for_conditioning": ["S&P500_Close", "vix_close"],
+    "feeder_date_features_for_conditioning": ["month", "day_of_year", "day_of_month", "hour_of_day", "day_of_week"], # MODIFIED: 5 date parts for 10 cyclical features
+    "feeder_fundamental_features_for_conditioning": [], # MODIFIED: Empty, as generator expects 10 cyclical date features
+    "feeder_max_month": 12, # ADDED
+    "feeder_max_day_of_year": 366, # ADDED (explicitly, though ConditionManager might default)
     "feeder_max_day_of_month": 31,
     "feeder_max_hour_of_day": 23,
     "feeder_max_day_of_week": 6,
@@ -60,7 +62,7 @@ DEFAULT_VALUES = {
 
     # --- GAN Training Parameters ---
     "noise_dim": 100,  # Added: Noise dimension for generator input
-    "conditional_features_dim": 10,  # Added: Conditional features dimension
+    "conditional_features_dim": 10,  # MODIFIED: Must be 10 for Composite_VAE_GAN_Generator
     "context_vector_dim": 64,  # Added: Context vector dimension (same as feeder_context_vector_dim)
 
     # --- Parameters for GeneratorPlugin ---
