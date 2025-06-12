@@ -184,7 +184,7 @@ DEFAULT_VALUES = {
     
 
     # Added: L2 Regularization for Generator
-    "l2_regularization": 1e-4,
+    "l2_regularization": 1e-5,
 
     # Added: Discriminator Architecture Parameters
     "discriminator_conv_filters": [32, 16, 8],       # Decreasing filter sizes for proper dimensionality reduction
