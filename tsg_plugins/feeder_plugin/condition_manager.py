@@ -90,31 +90,17 @@ class ConditionManager:
             return None
         
         try:
-            conditions = []
+            # COMPATIBILITY FIX: Return zero conditions to match autoencoder training
+            # The autoencoder was trained with zero conditional vectors, so we must use zeros
+            # to maintain compatibility with the trained VAE decoder.
             
-            # Extract explicit condition columns
-            if self.condition_columns:
-                explicit_conditions = self._extract_explicit_conditions(data)
-                if explicit_conditions is not None:
-                    conditions.append(explicit_conditions)
+            batch_size = len(data)
+            zero_conditions = np.zeros((batch_size, self.condition_dim), dtype=np.float32)
             
-            # Extract temporal conditions
-            if self.use_temporal_conditions and timestamp_col:
-                temporal_conditions = self._extract_temporal_conditions(data, timestamp_col)
-                if temporal_conditions is not None:
-                    conditions.append(temporal_conditions)
+            logger.debug(f"Generated zero conditions for autoencoder compatibility: shape {zero_conditions.shape}")
+            logger.debug("Using zero conditions to match autoencoder training format")
             
-            # Combine conditions
-            if conditions:
-                combined_conditions = np.concatenate(conditions, axis=1)
-                self.has_conditions = True
-                logger.debug(f"Extracted conditions shape: {combined_conditions.shape}")
-                return combined_conditions
-            else:
-                # No conditions available, return zero vector
-                zero_conditions = np.zeros((len(data), self.condition_dim))
-                logger.debug("No conditions found, returning zero conditions")
-                return zero_conditions
+            return zero_conditions
                 
         except Exception as e:
             logger.error(f"Failed to extract conditions: {str(e)}")
