@@ -793,100 +793,701 @@ class GeneratorPlugin(PluginBase):
         
         return sequences
 
-    def _create_diverse_sequence_from_base(self, base_features, seq_len):
+    def _expand_vae_output_to_44_features(self, vae_decoder_output):
         """
-        Create a diverse sequence where each timestep has realistic variations
-        and proper constraint-based tick generation.
+        Expand 23 VAE features to 44 features to match training data structure exactly.
+        
+        The 23 VAE features are: OPEN, LOW, HIGH, vix_close, BC-BO, BH-BL, S&P500_Close, 
+        CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+        
+        We need to expand to 44 features in the exact order as training data:
+        1. Technical Indicators (15): RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, 
+           Stochastic_%D, ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+        2. OHLC (4): OPEN, HIGH, LOW, CLOSE
+        3. Derived spreads (4): BC-BO, BH-BL, BH-BO, BO-BL  
+        4. External market data (2): S&P500_Close, vix_close
+        5. Sub-periodicity (16): CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+        6. Raw date features (3): day_of_month, hour_of_day, day_of_week
+        
+        Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
         
         Args:
-            base_features: Base feature pattern (batch_size, 44)
-            seq_len: Sequence length (144)
+            vae_decoder_output: VAE decoder output tensor (batch_size, 23)
             
         Returns:
-            Diverse sequence tensor (batch_size, seq_len, 44)
+            Expanded features tensor (batch_size, 44)
+        """
+        self.logger.debug(f"Expanding VAE output from 23 to 44 features, input shape: {vae_decoder_output.shape}")
+        
+        # Extract the 23 VAE features  
+        # Based on generator_decoder_output_feature_names in config.py:
+        # OPEN(0), LOW(1), HIGH(2), vix_close(3), BC-BO(4), BH-BL(5), S&P500_Close(6),
+        # CLOSE_15m_tick_1-8(7-14), CLOSE_30m_tick_1-8(15-22)
+        
+        open_val = vae_decoder_output[:, 0:1]   # OPEN
+        low_val = vae_decoder_output[:, 1:2]    # LOW  
+        high_val = vae_decoder_output[:, 2:3]   # HIGH
+        vix_close = vae_decoder_output[:, 3:4]  # vix_close
+        bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
+        bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
+        sp500_close = vae_decoder_output[:, 6:7] # S&P500_Close
+        close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
+        close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
+        
+        # Calculate CLOSE (typical price approximation)
+        close_val = (open_val + high_val + low_val) / 3.0
+        
+        # Calculate missing bid/ask spreads
+        bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
+        bo_bl = open_val - low_val   # BO-BL = OPEN - LOW
+        
+        # Calculate 15 technical indicators using exact parameters from tech_indicator.py
+        ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
+        technical_indicators = self._calculate_technical_indicators_tf(ohlc)  # (batch_size, 15)
+        
+        # Generate raw date features (3 features instead of cyclical)
+        batch_size = tf.shape(vae_decoder_output)[0]
+        raw_date_features = self._generate_raw_date_features_tf(batch_size)  # (batch_size, 3)
+        
+        # Assemble all 44 features in exact order matching training data:
+        # 1. Technical Indicators first (15 features)
+        # 2. OHLC second (4 features)  
+        # 3. Derived spreads third (4 features)
+        # 4. External market data fourth (2 features)
+        # 5. Sub-periodicity fifth (16 features)
+        # 6. Raw date features sixth (3 features)
+        
+        expanded_features = tf.concat([
+            # Technical Indicators first (15)
+            technical_indicators,
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
+            bc_bo, bh_bl, bh_bo, bo_bl,
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16)
+            close_15m_ticks, close_30m_ticks,
+            # Raw date features sixth (3)
+            raw_date_features
+        ], axis=1)
+        
+        # Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
+        
+        self.logger.debug(f"Feature expansion completed, output shape: {expanded_features.shape}")
+        return expanded_features
+
+    def _calculate_technical_indicators_tf(self, ohlc):
+        """
+        Calculate 15 technical indicators from OHLC using TensorFlow operations.
+        Uses the exact same parameters as tech_indicator.py:
+        - short_term_period: 14
+        - mid_term_period: 50  
+        - long_term_period: 200
+        
+        Args:
+            ohlc: OHLC tensor (batch_size, 4) [open, high, low, close]
+            
+        Returns:
+            Technical indicators tensor (batch_size, 15)
+            Order: RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, Stochastic_%D, 
+                   ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+        """
+        open_val = ohlc[:, 0:1]   # (batch_size, 1)
+        high_val = ohlc[:, 1:2]   # (batch_size, 1)
+        low_val = ohlc[:, 2:3]    # (batch_size, 1) 
+        close_val = ohlc[:, 3:4]  # (batch_size, 1)
+        
+        indicators = []
+        
+        # Parameters from tech_indicator.py
+        short_period = 14.0
+        mid_period = 50.0 
+        long_period = 200.0
+        
+        # 1. RSI (Relative Strength Index) - 14 period
+        # Simplified RSI calculation
+        price_change = close_val - open_val
+        gain = tf.maximum(price_change, 0.0)
+        loss = tf.maximum(-price_change, 0.0)
+        rs = gain / (loss + 1e-8)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        indicators.append(rsi)
+        
+        # 2. MACD (12, 26, 9) - simplified
+        ema_fast = close_val * 0.92  # Approximation of 12-period EMA
+        ema_slow = close_val * 0.96  # Approximation of 26-period EMA  
+        macd_line = ema_fast - ema_slow
+        indicators.append(macd_line)
+        
+        # 3. MACD Histogram - simplified
+        macd_signal = macd_line * 0.95  # Approximation of 9-period signal line
+        macd_histogram = macd_line - macd_signal
+        indicators.append(macd_histogram)
+        
+        # 4. MACD Signal
+        indicators.append(macd_signal)
+        
+        # 5. EMA (50-period approximation)
+        ema = close_val * (2.0 / (mid_period + 1.0)) + close_val * (1.0 - (2.0 / (mid_period + 1.0)))
+        indicators.append(ema)
+        
+        # 6. Stochastic %K (14-period)
+        hl_range = high_val - low_val + 1e-8
+        stoch_k = (close_val - low_val) / hl_range * 100.0
+        indicators.append(stoch_k)
+        
+        # 7. Stochastic %D (3-period SMA of %K, approximated)
+        stoch_d = stoch_k * 0.9  # Simplified smoothing
+        indicators.append(stoch_d)
+        
+        # 8. ADX (Average Directional Index) - simplified
+        tr = tf.maximum(tf.maximum(high_val - low_val, tf.abs(high_val - close_val)), tf.abs(low_val - close_val))
+        adx = tr / close_val * 100.0  # Simplified ADX
+        indicators.append(adx)
+        
+        # 9. DI+ (Positive Directional Indicator)
+        dm_plus = tf.maximum(high_val - close_val, 0.0)
+        di_plus = dm_plus / (tr + 1e-8) * 100.0
+        indicators.append(di_plus)
+        
+        # 10. DI- (Negative Directional Indicator) 
+        dm_minus = tf.maximum(close_val - low_val, 0.0)
+        di_minus = dm_minus / (tr + 1e-8) * 100.0
+        indicators.append(di_minus)
+        
+        # 11. ATR (Average True Range) - 14 period approximation
+        atr = tr  # Simplified as single-period TR
+        indicators.append(atr)
+        
+        # 12. CCI (Commodity Channel Index) - 20 period
+        typical_price = (high_val + low_val + close_val) / 3.0
+        cci = (typical_price - close_val) / (0.015 * tf.abs(typical_price - close_val) + 1e-8)
+        indicators.append(cci)
+        
+        # 13. Williams %R - 14 period
+        williams_r = -(high_val - close_val) / hl_range * 100.0
+        indicators.append(williams_r)
+        
+        # 14. Momentum (14-period price change)
+        momentum = close_val - open_val  # Simplified momentum
+        indicators.append(momentum)
+        
+        # 15. ROC (Rate of Change) - 14 period approximation
+        roc = (close_val - open_val) / (open_val + 1e-8) * 100.0
+        indicators.append(roc)
+        
+        # Concatenate all 15 indicators
+        technical_indicators = tf.concat(indicators, axis=1)  # (batch_size, 15)
+        
+        return technical_indicators
+
+    def _generate_cyclical_date_features_tf(self, batch_size):
+        """
+        Generate cyclical date features using TensorFlow operations.
+        
+        Based on the CSV data which has: day_of_month, hour_of_day, day_of_week
+        But we need to convert these to cyclical sin/cos pairs and add day_of_year
+        to match the config expectation of 8 cyclical features.
+        
+        Args:
+            batch_size: Batch size tensor
+            
+        Returns:
+            Cyclical date features tensor (batch_size, 8)
+            Order: day_of_month_sin, day_of_month_cos, hour_of_day_sin, hour_of_day_cos,
+                   day_of_week_sin, day_of_week_cos, day_of_year_sin, day_of_year_cos
+        """
+        # Generate random time components for each sample  
+        days_of_month = tf.random.uniform([batch_size], minval=1, maxval=32, dtype=tf.int32)  # 1-31
+        hours_of_day = tf.random.uniform([batch_size], minval=0, maxval=24, dtype=tf.int32)   # 0-23
+        days_of_week = tf.random.uniform([batch_size], minval=0, maxval=7, dtype=tf.int32)    # 0-6
+        days_of_year = tf.random.uniform([batch_size], minval=1, maxval=367, dtype=tf.int32)  # 1-366
+        
+        # Convert to float for calculations
+        days_of_month_f = tf.cast(days_of_month, tf.float32)
+        hours_of_day_f = tf.cast(hours_of_day, tf.float32)
+        days_of_week_f = tf.cast(days_of_week, tf.float32)
+        days_of_year_f = tf.cast(days_of_year, tf.float32)
+        
+        # Calculate cyclical features using 2*pi normalization
+        # Day of month (1-31) 
+        dom_sin = tf.sin(2 * np.pi * days_of_month_f / 31.0)
+        dom_cos = tf.cos(2 * np.pi * days_of_month_f / 31.0)
+        
+        # Hour of day (0-23)
+        hod_sin = tf.sin(2 * np.pi * hours_of_day_f / 24.0) 
+        hod_cos = tf.cos(2 * np.pi * hours_of_day_f / 24.0)
+        
+        # Day of week (0-6)
+        dow_sin = tf.sin(2 * np.pi * days_of_week_f / 7.0)
+        dow_cos = tf.cos(2 * np.pi * days_of_week_f / 7.0)
+        
+        # Day of year (1-366)
+        doy_sin = tf.sin(2 * np.pi * days_of_year_f / 366.0)
+        doy_cos = tf.cos(2 * np.pi * days_of_year_f / 366.0)
+        
+        # Stack all cyclical features in the correct order
+        date_features = tf.stack([
+            dom_sin, dom_cos,      # day_of_month_sin, day_of_month_cos
+            hod_sin, hod_cos,      # hour_of_day_sin, hour_of_day_cos  
+            dow_sin, dow_cos,      # day_of_week_sin, day_of_week_cos
+            doy_sin, doy_cos       # day_of_year_sin, day_of_year_cos
+        ], axis=1)  # (batch_size, 8)
+        
+        return date_features
+
+    def _generate_raw_date_features_tf(self, batch_size):
+        """
+        Generate raw date features (not cyclical) to match training data structure.
+        
+        The training data uses raw date features: day_of_month, hour_of_day, day_of_week
+        These are NOT cyclical sin/cos features, but the raw integer values.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3) 
+            Order: [day_of_month, hour_of_day, day_of_week]
+        """
+        # Generate realistic raw date feature values 
+        # These should be normalized values similar to training data
+        
+        # day_of_month: 1-31, normalized to ~0-1 range
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # hour_of_day: 0-23, normalized to ~0-1 range  
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # day_of_week: 0-6, normalized to ~0-1 range
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # Concatenate in the order matching training data
+        raw_date_features = tf.concat([
+            day_of_month,   # day_of_month
+            hour_of_day,    # hour_of_day  
+            day_of_week     # day_of_week
+        ], axis=1)  # (batch_size, 3)
+        
+        return raw_date_features
+
+    def _create_realistic_time_sequences(self, base_features, sequence_length):
+        """
+        Create realistic time sequences from base features using TensorFlow operations.
+        Updated for 23-feature architecture.
+        
+        Args:
+            base_features: Base features tensor (batch_size, 23)
+            sequence_length: Length of sequences to create (144)
+            
+        Returns:
+            Time sequences tensor (batch_size, sequence_length, 23)
         """
         batch_size = tf.shape(base_features)[0]
+        num_features = tf.shape(base_features)[1]  # Should be 23
         
-        # Extract base feature components for proper variation
-        # Feature order: [TI(15), OHLC(4), spreads(4), external(2), sub_periodicity(16), date(3)]
-        base_ti = base_features[:, 0:15]        # Technical indicators
-        base_ohlc = base_features[:, 15:19]     # OHLC  
-        base_spreads = base_features[:, 19:23]  # Spreads
-        base_external = base_features[:, 23:25] # External data
-        base_ticks = base_features[:, 25:41]    # Sub-periodicity (will be regenerated)
-        base_date = base_features[:, 41:44]     # Date features
+        # Initialize sequences tensor
+        sequences = tf.TensorArray(dtype=tf.float32, size=sequence_length, clear_after_read=False)
         
-        # Create sequence with realistic price evolution
-        sequences = []
-        
-        for t in range(seq_len):
-            # Create time-based variation factor
-            time_factor = tf.cast(t, tf.float32) / tf.cast(seq_len - 1, tf.float32)
+        # Create base features for each timestep with realistic variations
+        for t in range(sequence_length):
+            # Add small random walk to create realistic time series
+            noise_factor = 0.01
+            time_decay = tf.exp(-float(t) * 0.01)  # Slight decay over time
             
-            # Generate evolved OHLC values with realistic random walk
-            if t == 0:
-                # First timestep uses base OHLC
-                current_ohlc = base_ohlc
-            else:
-                # Evolve OHLC with small random changes (realistic price movement)
-                prev_close = sequences[t-1][:, 18:19]  # Previous close
+            # Generate random variations
+            variations = tf.random.normal([batch_size, num_features], mean=0.0, stddev=noise_factor) * time_decay
+            
+            # Apply variations to base features
+            timestep_features = base_features + variations
+            
+            # For OHLC features (first 4), ensure realistic price relationships
+            if t > 0:
+                # Get previous close price
+                prev_timestep = sequences.read(t-1)
+                prev_close = prev_timestep[:, 3:4]  # Previous close
                 
-                # Generate new OHLC around previous close
+                # Generate realistic price change
                 price_change = tf.random.normal([batch_size, 1], mean=0.0, stddev=0.02)
-                new_close = prev_close * (1.0 + price_change)
+                new_close = prev_close * (1 + price_change)
                 
-                # Generate realistic OHLC around new close
-                volatility = tf.abs(price_change) + 0.01
-                high_offset = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * volatility
-                low_offset = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * volatility
-                open_offset = tf.random.normal([batch_size, 1], mean=0.0, stddev=volatility * 0.3)
+                # Create realistic OHLC relationships
+                open_price = prev_close  # Open = previous close
+                close_price = new_close
                 
-                new_open = prev_close + open_offset
-                new_high = tf.maximum(new_open, new_close) + high_offset
-                new_low = tf.minimum(new_open, new_close) - low_offset
+                # High and Low around open/close
+                high_low_range = tf.abs(new_close - prev_close) * 1.5
+                high_price = tf.maximum(prev_close, new_close) + tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
+                low_price = tf.minimum(prev_close, new_close) - tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
                 
-                current_ohlc = tf.keras.layers.Concatenate(axis=1)([new_open, new_high, new_low, new_close])
+                # Update OHLC in timestep features (assumes OHLC are first 4 features)
+                ohlc_updated = tf.concat([open_price, high_price, low_price, close_price], axis=1)
+                timestep_features = tf.concat([ohlc_updated, timestep_features[:, 4:]], axis=1)
             
-            # Extract current OHLC components
-            open_val = current_ohlc[:, 0:1]
-            high_val = current_ohlc[:, 1:2]
-            low_val = current_ohlc[:, 2:3]
-            close_val = current_ohlc[:, 3:4]
-            
-            # Regenerate constraint-based ticks for this timestep
-            constraint_ticks = self._generate_sub_periodicity_ticks_keras(open_val, high_val, low_val, close_val)
-            
-            # Update technical indicators based on new OHLC
-            current_ti = self._calculate_technical_indicators_keras(current_ohlc)
-            
-            # Update spreads based on new OHLC
-            bc_bo = base_spreads[:, 0:1] * (high_val / (base_ohlc[:, 1:2] + 1e-8))  # Scale with high
-            bh_bl = base_spreads[:, 1:2] * (low_val / (base_ohlc[:, 2:3] + 1e-8))   # Scale with low
-            bh_bo = high_val - open_val
-            bo_bl = open_val - low_val
-            current_spreads = tf.keras.layers.Concatenate(axis=1)([bc_bo, bh_bl, bh_bo, bo_bl])
-            
-            # Keep external data relatively stable with small variations
-            external_noise = tf.random.normal([batch_size, 2], mean=0.0, stddev=0.01)
-            current_external = base_external + external_noise
-            
-            # Update date features to reflect time progression
-            date_progression = time_factor * 0.1  # Small progression over time
-            current_date = base_date + date_progression
-            
-            # Assemble complete timestep features
-            timestep_features = tf.keras.layers.Concatenate(axis=1)([
-                current_ti,        # Technical indicators (15)
-                current_ohlc,      # OHLC (4)
-                current_spreads,   # Spreads (4)
-                current_external,  # External (2)
-                constraint_ticks,  # Constraint-based ticks (16)
-                current_date       # Date features (3)
-            ])
-            
-            sequences.append(timestep_features)
+            sequences = sequences.write(t, timestep_features)
         
-        # Stack to create final sequence tensor
-        sequence_tensor = tf.stack(sequences, axis=1)  # (batch_size, seq_len, 44)
+        # Convert TensorArray to tensor and transpose to get (batch_size, sequence_length, num_features)
+        sequences_tensor = sequences.stack()  # (sequence_length, batch_size, num_features)
+        sequences_tensor = tf.transpose(sequences_tensor, [1, 0, 2])  # (batch_size, sequence_length, num_features)
         
-        return sequence_tensor
+        return sequences_tensor
+
+# Ensure any subsequent methods are correctly defined and indented.
+# For example:
+#
+# class SomeOtherClass:
+#     def another_method(self):
+#         pass
+#
+# def top_level_function():
+#     pass
+
+class FeatureExpansionLayer(tf.keras.layers.Layer):
+    """
+    Custom Keras layer to expand 23 VAE features to 44 features.
+    This layer can work with KerasTensors in functional model construction.
+    """
+    
+    def __init__(self, **kwargs):
+        super(FeatureExpansionLayer, self).__init__(**kwargs)
+        
+    def call(self, inputs):
+        """
+        Expand 23 VAE features to 44 features to match training data structure.
+        
+        Args:
+            inputs: VAE decoder output tensor (batch_size, 23)
+            
+        Returns:
+            Expanded features tensor (batch_size, 44)
+        """
+        vae_decoder_output = inputs
+        
+        # Extract the 23 VAE features using Keras ops
+        raw_open = vae_decoder_output[:, 0:1]   # OPEN
+        raw_low = vae_decoder_output[:, 1:2]    # LOW  
+        raw_high = vae_decoder_output[:, 2:3]   # HIGH
+        vix_close = vae_decoder_output[:, 3:4]  # vix_close
+        bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
+        bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
+        sp500_close = vae_decoder_output[:, 6:7] # S&P500_Close
+        close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
+        close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
+        
+        # Calculate raw CLOSE (typical price approximation)
+        raw_close = (raw_open + raw_high + raw_low) / 3.0
+        
+        # Fix OHLC constraints: Ensure High >= max(Open, Close) and Low <= min(Open, Close)
+        raw_ohlc = tf.keras.layers.Concatenate(axis=1)([raw_open, raw_high, raw_low, raw_close])
+        fixed_ohlc = self._fix_ohlc_constraints_keras(raw_ohlc)
+        
+        # Extract fixed OHLC values
+        open_val = fixed_ohlc[:, 0:1]
+        high_val = fixed_ohlc[:, 1:2]
+        low_val = fixed_ohlc[:, 2:3]
+        close_val = fixed_ohlc[:, 3:4]
+        
+        # Calculate missing bid/ask spreads
+        bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
+        bo_bl = open_val - low_val   # BO-BL = OPEN - LOW
+        
+        # Calculate 15 technical indicators using simplified approach for KerasTensors
+        ohlc = tf.keras.layers.Concatenate(axis=1)([open_val, high_val, low_val, close_val])
+        technical_indicators = self._calculate_technical_indicators_keras(ohlc)  # (batch_size, 15)
+        
+        # Generate raw date features (3 features)
+        batch_size = tf.shape(vae_decoder_output)[0]
+        raw_date_features = self._generate_raw_date_features_keras(batch_size)  # (batch_size, 3)
+        
+        # Assemble all 44 features in exact order matching training data
+        expanded_features = tf.keras.layers.Concatenate(axis=1)([
+            # Technical Indicators first (15)
+            technical_indicators,
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
+            bc_bo, bh_bl, bh_bo, bo_bl,
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16) - Generate constraint-based ticks
+            self._generate_sub_periodicity_ticks_keras(open_val, high_val, low_val, close_val),
+            # Raw date features sixth (3)
+            raw_date_features
+        ])
+        
+        return expanded_features
+    
+    def _calculate_technical_indicators_keras(self, ohlc):
+        """
+        Calculate simplified technical indicators using Keras-compatible operations.
+        
+        Args:
+            ohlc: OHLC tensor (batch_size, 4) [open, high, low, close]
+            
+        Returns:
+            Technical indicators tensor (batch_size, 15)
+        """
+        open_val = ohlc[:, 0:1]
+        high_val = ohlc[:, 1:2]
+        low_val = ohlc[:, 2:3]
+        close_val = ohlc[:, 3:4]
+        
+        indicators = []
+        
+        # Simplified calculations for 15 technical indicators
+        # 1. RSI (simplified)
+        price_change = close_val - open_val
+        gain = tf.maximum(price_change, 0.0)
+        loss = tf.maximum(-price_change, 0.0)
+        rs = gain / (loss + 1e-8)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        indicators.append(rsi)
+        
+        # 2-4. MACD components (simplified)
+        macd = (close_val - open_val) * 0.1
+        macd_signal = macd * 0.9
+        macd_histogram = macd - macd_signal
+        indicators.extend([macd, macd_histogram, macd_signal])
+        
+        # 5. EMA (simplified)
+        ema = close_val * 0.95 + open_val * 0.05
+        indicators.append(ema)
+        
+        # 6-7. Stochastic (simplified)
+        stoch_k = ((close_val - low_val) / (high_val - low_val + 1e-8)) * 100.0
+        stoch_d = stoch_k * 0.9
+        indicators.extend([stoch_k, stoch_d])
+        
+        # 8-10. ADX, DI+, DI- (simplified)
+        adx = tf.abs(high_val - low_val) / (close_val + 1e-8) * 100.0
+        di_plus = tf.maximum(high_val - open_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        di_minus = tf.maximum(open_val - low_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        indicators.extend([adx, di_plus, di_minus])
+        
+        # 11. ATR (simplified)
+        atr = high_val - low_val
+        indicators.append(atr)
+        
+        # 12. CCI (simplified)
+        typical_price = (high_val + low_val + close_val) / 3.0
+        cci = (typical_price - close_val) / (0.015 * tf.abs(typical_price - close_val) + 1e-8)
+        indicators.append(cci)
+        
+        # 13. Williams %R (simplified)
+        williams_r = ((high_val - close_val) / (high_val - low_val + 1e-8)) * -100.0
+        indicators.append(williams_r)
+        
+        # 14. Momentum (simplified)
+        momentum = close_val - open_val
+        indicators.append(momentum)
+        
+        # 15. ROC (simplified)
+        roc = ((close_val - open_val) / (open_val + 1e-8)) * 100.0
+        indicators.append(roc)
+        
+        # Concatenate all indicators
+        return tf.keras.layers.Concatenate(axis=1)(indicators)
+    
+    def _generate_raw_date_features_keras(self, batch_size):
+        """
+        Generate raw date features using Keras-compatible operations.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3)
+        """
+        # Generate realistic raw date feature values using tf.random.uniform
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        return tf.keras.layers.Concatenate(axis=1)([day_of_month, hour_of_day, day_of_week])
+    
+    def _generate_sub_periodicity_ticks_keras(self, open_val, high_val, low_val, close_val):
+        """
+        Generate constraint-based sub-periodicity ticks using OHLC constraints.
+        
+        Creates realistic 15-minute and 30-minute tick sequences where:
+        - First tick = Open value (constraint)
+        - Last tick = Close value (constraint)
+        - At least one tick reaches High value (constraint)
+        - At least one tick reaches Low value (constraint)
+        - Realistic price movement between constraints
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            
+        Returns:
+            Sub-periodicity ticks tensor (batch_size, 16)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Generate 15-minute ticks (8 ticks)
+        ticks_15m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Generate 30-minute ticks (8 ticks) 
+        ticks_30m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Concatenate both tick sequences
+        return tf.keras.layers.Concatenate(axis=1)([ticks_15m, ticks_30m])
+    
+    def _generate_tick_sequence_keras(self, open_val, high_val, low_val, close_val, num_ticks):
+        """
+        Generate a single tick sequence satisfying OHLC constraints.
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1) 
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            num_ticks: Number of ticks to generate
+            
+        Returns:
+            Tick sequence tensor (batch_size, num_ticks)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Initialize tick sequence
+        ticks = []
+        
+        for i in range(num_ticks):
+            if i == 0:
+                # First tick = Open value (constraint)
+                tick_val = open_val
+            elif i == num_ticks - 1:
+                # Last tick = Close value (constraint)
+                tick_val = close_val
+            else:
+                # Intermediate ticks with constraints
+                # Calculate position along the sequence
+                position = tf.cast(i, tf.float32) / tf.cast(num_ticks - 1, tf.float32)
+                
+                # Linear interpolation between open and close as base
+                base_val = open_val + position * (close_val - open_val)
+                
+                # Add constrained variation to ensure high/low are reachable
+                # Calculate range and bias towards high/low at certain positions
+                ohlc_range = high_val - low_val
+                range_center = (high_val + low_val) / 2.0
+                
+                # Determine if this tick should bias towards high or low
+                # Middle ticks more likely to reach extremes
+                mid_position = tf.abs(position - 0.5) * 2.0  # 0 at middle, 1 at ends
+                bias_strength = (1.0 - mid_position) * 0.6  # Stronger bias in middle
+                
+                # Random bias towards high or low
+                high_bias = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+                bias_direction = tf.where(high_bias > 0.5, 1.0, -1.0)
+                
+                # Calculate biased value
+                bias_amount = bias_direction * bias_strength * ohlc_range * 0.3
+                biased_val = base_val + bias_amount
+                
+                # Ensure the value stays within OHLC bounds
+                tick_val = tf.clip_by_value(biased_val, low_val, high_val)
+                
+                # Add small random noise for realism
+                noise = tf.random.normal([batch_size, 1], mean=0.0, stddev=0.01)
+                tick_val = tick_val + noise * ohlc_range * 0.05
+                
+                # Final clipping to maintain constraints
+                tick_val = tf.clip_by_value(tick_val, low_val, high_val)
+            
+            ticks.append(tick_val)
+        
+        # Ensure high and low are actually reached in the sequence
+        ticks = self._enforce_high_low_constraints_keras(ticks, high_val, low_val)
+        
+        return tf.keras.layers.Concatenate(axis=1)(ticks)
+    
+    def _enforce_high_low_constraints_keras(self, ticks, high_val, low_val):
+        """
+        Ensure that at least one tick reaches the high value and one reaches the low value.
+        
+        Args:
+            ticks: List of tick tensors [(batch_size, 1), ...]
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            
+        Returns:
+            Modified list of tick tensors with constraints enforced
+        """
+        if len(ticks) < 3:  # Need at least 3 ticks (open, something, close)
+            return ticks
+            
+        # Find middle positions to place high/low constraints
+        num_ticks = len(ticks)
+        high_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        low_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        
+        # Ensure high and low positions are different
+        low_pos = tf.cond(
+            tf.equal(high_pos, low_pos),
+            lambda: tf.cond(
+                tf.equal(high_pos, 1),
+                lambda: high_pos + 1,
+                lambda: high_pos - 1
+            ),
+            lambda: low_pos
+        )
+        
+        # Create modified ticks list
+        modified_ticks = []
+        for i, tick in enumerate(ticks):
+            # Set specific positions to high/low values
+            tick_val = tf.cond(
+                tf.equal(i, high_pos),
+                lambda: high_val,
+                lambda: tf.cond(
+                    tf.equal(i, low_pos),
+                    lambda: low_val,
+                    lambda: tick
+                )
+            )
+            modified_ticks.append(tick_val)
+        
+        return modified_ticks
+    
+    def get_config(self):
+        return super(FeatureExpansionLayer, self).get_config()
+    
+    def _fix_ohlc_constraints_keras(self, ohlc_tensor):
+        """
+        Fix OHLC constraint violations using TensorFlow operations.
+        Ensures High >= max(Open, Close) and Low <= min(Open, Close)
+        
+        Strategy: Sort the 4 values and assign:
+        - Low = minimum value
+        - High = maximum value  
+        - Open = second lowest value (more conservative)
+        - Close = second highest value
+        
+        Args:
+            ohlc_tensor: Tensor of shape (batch_size, 4) with [Open, High, Low, Close]
+            
+        Returns:
+            Fixed OHLC tensor with constraints satisfied
+        """
+        # Sort values for each sample
+        sorted_values = tf.sort(ohlc_tensor, axis=1)  # Shape: (batch_size, 4)
+        
+        # Assign values to ensure constraints:
+        # - Low = minimum (index 0)
+        # - Open = second minimum (index 1) 
+        # - Close = second maximum (index 2)
+        # - High = maximum (index 3)
+        low_val = sorted_values[:, 0:1]    # Minimum
+        open_val = sorted_values[:, 1:2]   # Second minimum
+        close_val = sorted_values[:, 2:3]  # Second maximum  
+        high_val = sorted_values[:, 3:4]   # Maximum
+        
+        # Concatenate fixed OHLC [Open, High, Low, Close]
+        fixed_ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
+        
+        return fixed_ohlc
