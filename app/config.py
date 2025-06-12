@@ -186,6 +186,14 @@ DEFAULT_VALUES = {
     # Added: L2 Regularization for Generator
     "l2_regularization": 1e-4,
 
+    # Added: Discriminator Architecture Parameters
+    "discriminator_conv_filters": [32, 16, 8],       # Decreasing filter sizes for proper dimensionality reduction
+    "discriminator_conv_kernel_size": 5,             # Larger kernel for better feature extraction
+    "discriminator_conv_strides": [2, 2, 2],         # Stride=2 for downsampling at each layer
+    "discriminator_lstm_units": 32,                  # Reduced LSTM units 
+    "discriminator_dense_units": [16, 8],            # Decreasing dense layer sizes
+    "discriminator_dropout_rate": 0.3,
+
     # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
     "enable_mmd_loss": True,          # Enable/disable MMD loss
     "mmd_lambda_g": 0.01,            # Weight for MMD loss in generator

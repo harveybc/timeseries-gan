@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import (Dense, LSTM, RepeatVector, TimeDistributed, Input, 
-                                     Bidirectional, Conv1D, BatchNormalization, Dropout,
+                                     Bidirectional, Conv1D, BatchNormalization,
                                      Concatenate, Reshape, Flatten, LeakyReLU, ReLU, Add) # Added Add
 from tensorflow.keras.models import Model
 from tensorflow.keras.regularizers import l2 # Added l2
