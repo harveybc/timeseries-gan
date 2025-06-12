@@ -338,7 +338,7 @@ class GeneratorPlugin(PluginBase):
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
-        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_vae_spec")(x)
+        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_vae_spec")(x)
         self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
 
         # 3. Connect to the VAE Decoder
@@ -349,19 +349,6 @@ class GeneratorPlugin(PluginBase):
 
         vae_decoder_model.trainable = True
         self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
-
-        if self.params.get("use_generator_l2_reg", False):
-            self.logger.info(f"Applying L2 regularization to trainable layers of VAE decoder '{vae_decoder_model.name}'.")
-            for layer in vae_decoder_model.layers:
-                if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
-                    if layer.trainable:
-                        self.logger.debug(f"Applying L2 to VAE decoder layer (kernel): {layer.name}")
-                        #layer.kernel_regularizer = self._get_l2_reg()
-                elif isinstance(layer, tf.keras.layers.LSTM): # Includes Bidirectional wrapped LSTMs if VAE has them
-                    if layer.trainable:
-                        self.logger.debug(f"Applying L2 to VAE decoder LSTM layer (kernel/recurrent): {layer.name}")
-                        #layer.kernel_regularizer = self._get_l2_reg()
-                        #layer.recurrent_regularizer = self._get_l2_reg()
         
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
