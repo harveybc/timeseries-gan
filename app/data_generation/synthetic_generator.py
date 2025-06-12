@@ -14,6 +14,7 @@ Author: TimeSeries-GAN Team
 
 import numpy as np
 import pandas as pd
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple, List, TYPE_CHECKING # Added List
 
@@ -366,129 +367,106 @@ class SyntheticDataGenerator:
 
             return df
         
-    def generate_features_for_datetimes(self, target_datetimes: pd.Series, generator_model: Any) -> pd.DataFrame:
+    def generate_features_for_datetimes(self, target_datetimes: List[datetime]) -> pd.DataFrame:
         """
-        Generate synthetic features for specified target datetimes using the loaded generator model.
-        This implements the 23->44 feature expansion post-processing pipeline.
+        Generate synthetic features for target datetimes using the feeder and generator plugins.
         
         Args:
-            target_datetimes: Series of target datetime values for generation
-            generator_model: The loaded Keras generator model 
+            target_datetimes: List of datetime objects for which to generate features
             
         Returns:
-            pd.DataFrame: Generated synthetic data with 44 features + DATE_TIME column
+            DataFrame with generated features for target datetimes
         """
         print(f"SyntheticDataGenerator: Generating features for {len(target_datetimes)} target datetimes...")
         
         try:
-            n_samples = len(target_datetimes)
-            
             # Step 1: Generate conditional inputs using feeder plugin
             print("  Step 1: Generating conditional inputs...")
-            feeder_outputs = self.feeder_plugin.generate(
-                n_ticks_to_generate=n_samples,
-                target_datetimes=target_datetimes
+            conditional_features = self.feeder_plugin.generate(
+                n_ticks_to_generate=len(target_datetimes),
+                target_datetimes=pd.Series(target_datetimes)
             )
             
-            if feeder_outputs is None:
-                raise RuntimeError("Feeder plugin failed to generate conditional inputs")
-            
-            # Step 2: Use generator model to produce 23 base features
+            # Step 2: Generate base features using generator plugin
             print("  Step 2: Generating 23 base features using generator model...")
             
-            # Extract inputs from feeder outputs
-            if isinstance(feeder_outputs, list) and len(feeder_outputs) > 0:
-                # Handle list of dictionaries format
-                noise_vectors = []
-                context_vectors = []
-                condition_vectors = []
-                
-                for output in feeder_outputs:
-                    if isinstance(output, dict):
-                        noise_vectors.append(output.get("noise", np.random.normal(0, 1, (100,))))
-                        context_vectors.append(output.get("context", np.random.normal(0, 1, (64,))))
-                        condition_vectors.append(output.get("conditions", np.random.normal(0, 1, (10,))))
-                
-                noise_input = np.array(noise_vectors)
-                context_input = np.array(context_vectors) 
-                conditions_input = np.array(condition_vectors)
-                
-            elif isinstance(feeder_outputs, dict):
-                # Handle single dictionary format
-                noise_input = feeder_outputs.get("noise", np.random.normal(0, 1, (n_samples, 100)))
-                context_input = feeder_outputs.get("context", np.random.normal(0, 1, (n_samples, 64)))
-                conditions_input = feeder_outputs.get("conditions", np.random.normal(0, 1, (n_samples, 10)))
-            else:
-                # Fallback: generate random inputs
-                print("  Warning: Using fallback random inputs")
-                noise_input = np.random.normal(0, 1, (n_samples, 100))
-                context_input = np.random.normal(0, 1, (n_samples, 64))
-                conditions_input = np.random.normal(0, 1, (n_samples, 10))
+            # Get the generator model directly
+            generator_model = self.generator_plugin.get_model()
+            if generator_model is None:
+                raise ValueError("Generator model is not available")
             
-            # Generate 23 base features using the model
-            model_inputs = [noise_input,  conditions_input, context_input]
+            # Create properly shaped inputs for the composite generator
+            batch_size = len(target_datetimes)
+            
+            # Generate the 3 required inputs in correct order
+            noise = np.random.normal(0, 1, (batch_size, 100))  # 100-dim noise
+            context = np.random.normal(0, 1, (batch_size, 64))  # 64-dim context  
+            conditions = conditional_features  # This should be (batch_size, 10)
+            
+            # Ensure conditions has correct shape
+            if conditions.shape[1] != 10:
+                if conditions.shape[1] > 10:
+                    conditions = conditions[:, :10]
+                else:
+                    # Pad with zeros if too few features
+                    padding = np.zeros((batch_size, 10 - conditions.shape[1]))
+                    conditions = np.concatenate([conditions, padding], axis=1)
+            
+            # Create model inputs as list in correct order
+            model_inputs = [noise, conditions, context]
+            
+            # Generate base features using the composite generator
             base_features_23 = generator_model.predict(model_inputs, verbose=0)
             
             print(f"  Generated base features shape: {base_features_23.shape}")
             
-            # Handle different output formats
-            if len(base_features_23.shape) == 3:
-                # If output is (batch_size, seq_len, features), we want (batch_size, features) 
-                if base_features_23.shape[1] == 1:
-                    # (batch_size, 1, features) -> (batch_size, features)
-                    base_features_23 = base_features_23.squeeze(axis=1)
-                else:
-                    # Take the last timestep: (batch_size, seq_len, features) -> (batch_size, features)
-                    base_features_23 = base_features_23[:, -1, :]
-            
-            # Verify we have 23 features
-            if base_features_23.shape[1] != 23:
-                print(f"  Warning: Expected 23 base features, got {base_features_23.shape[1]}. Adjusting...")
-                if base_features_23.shape[1] < 23:
-                    # Pad with zeros
-                    padding = np.zeros((base_features_23.shape[0], 23 - base_features_23.shape[1]))
-                    base_features_23 = np.hstack((base_features_23, padding))
-                else:
-                    # Truncate to 23
-                    base_features_23 = base_features_23[:, :23]
-            
-            # Step 3: Expand 23 base features to 44 features using post-processing
+            # Step 3: Expanding to 44 features with post-processing
             print("  Step 3: Expanding to 44 features with post-processing...")
-            expanded_features_44 = self._expand_23_to_44_features(base_features_23, target_datetimes)
             
-            # Step 4: Create DataFrame with proper feature names and DATE_TIME
+            # Reshape if needed - extract from 3D to 2D if necessary
+            if base_features_23.ndim == 3:
+                # Shape is likely (batch_size, sequence_length, features)
+                # For datetime generation, we want the last timestep
+                base_features_23 = base_features_23[:, -1, :]  # Take last timestep
+            
+            # Use internal method to expand from 23 to 44 features
+            expanded_features = self._expand_23_to_44_features(base_features_23, pd.Series(target_datetimes))
+            
+            # Step 4: Create final DataFrame
             print("  Step 4: Creating final DataFrame...")
+            
+            # Get feature names from config
+            datetime_col_name = self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")
             feature_names = self.config.get("generator_full_feature_names_ordered", [])
             
-            # Ensure we have 44 feature names
-            if len(feature_names) < 44:
-                # Pad with generic names
-                while len(feature_names) < 44:
-                    feature_names.append(f"feature_{len(feature_names)}")
-            elif len(feature_names) > 44:
-                # Truncate to 44
-                feature_names = feature_names[:44]
+            # Remove datetime column from feature names if present
+            if datetime_col_name in feature_names:
+                feature_names = [name for name in feature_names if name != datetime_col_name]
             
-            # Create DataFrame
-            synthetic_df = pd.DataFrame(expanded_features_44, columns=feature_names)
+            # Create DataFrame with expanded features
+            if len(feature_names) >= expanded_features.shape[1]:
+                result_df = pd.DataFrame(expanded_features, columns=feature_names[:expanded_features.shape[1]])
+            else:
+                # Fallback to generic column names if not enough feature names
+                result_df = pd.DataFrame(expanded_features, columns=[f"feature_{i}" for i in range(expanded_features.shape[1])])
             
-            # Add DATE_TIME column at the beginning
-            datetime_col_name = self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")
-            synthetic_df[datetime_col_name] = target_datetimes.values
+            # Add datetime column
+            result_df[datetime_col_name] = pd.Series(target_datetimes).dt.strftime('%Y-%m-%d %H:%M:%S')
             
-            # Reorder columns to have DATE_TIME first
-            cols = [datetime_col_name] + [col for col in synthetic_df.columns if col != datetime_col_name]
-            synthetic_df = synthetic_df[cols]
+            # Reorder columns to put datetime first
+            cols = [datetime_col_name] + [col for col in result_df.columns if col != datetime_col_name]
+            result_df = result_df[cols]
             
-            print(f"  ✓ Generated synthetic data shape: {synthetic_df.shape}")
-            return synthetic_df
+            print(f"  ✓ Generated synthetic data shape: {result_df.shape}")
+            return result_df
             
         except Exception as e:
-            print(f"  ❌ Error in generate_features_for_datetimes: {e}")
+            print(f"  ❌ Error in generate_features_for_datetimes: {str(e)}")
             import traceback
             traceback.print_exc()
             
-            # Return empty DataFrame as fallback
+            # Return empty DataFrame instead of fallback random data
+            print("Synthetic feature generation failed. Returning empty DataFrame.")
             return pd.DataFrame()
     
     def _expand_23_to_44_features(self, base_features_23: np.ndarray, target_datetimes: pd.Series) -> np.ndarray:

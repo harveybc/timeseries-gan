@@ -229,10 +229,8 @@ class GeneratePipeline:
         if not hasattr(self.synthetic_generator, 'generate_features_for_datetimes'):
             raise NotImplementedError("SyntheticDataGenerator must have a 'generate_features_for_datetimes' method.")
 
-        model_to_use: KerasModel = self.generator_model # Use aliased type
         generated_features_df = self.synthetic_generator.generate_features_for_datetimes(
-            target_datetimes=target_datetimes_synthetic_series, 
-            generator_model=model_to_use 
+            target_datetimes=target_datetimes_synthetic_series
         )
 
         if generated_features_df.empty:
