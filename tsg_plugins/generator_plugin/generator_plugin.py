@@ -62,7 +62,7 @@ class GeneratorPlugin(PluginBase):
         "feeder_noise_dim": 32, # Default noise dim, aligned with config.py
         "context_vector_dim": 64, # For decoder_input_h_context
         "conditional_features_dim": 10, # For decoder_input_conditions
-        "num_features": 23, # Updated: Target output features (23 base features instead of 51)
+        "num_features": 44, # Updated: Target output features (44 expanded features to match training data)
         "base_feature_names_ordered": [] # Added for _post_process_to_target_features if needed
     }
 
@@ -329,23 +329,29 @@ class GeneratorPlugin(PluginBase):
             vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
             self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
             
-            # Post-process VAE decoder output to match discriminator input requirements
-            # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
-            self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
+            # Post-process VAE decoder output to match training data requirements  
+            # VAE decoder outputs 23 base features, need to expand to 44 features to match training data
+            self.logger.info("Post-processing VAE decoder output to match training data requirements")
             
-            # === 23-FEATURE ARCHITECTURE ===
-            # With the 23-feature architecture, VAE decoder directly outputs 23 base features
-            # No expansion to 51 features is needed - pass directly to discriminator
-            self.logger.info("Using 23-feature architecture - VAE decoder output used directly")
-            base_features = vae_decoder_output  # Shape: (batch_size, 23)
-            self.logger.debug(f"Base features shape: {base_features.shape}")
+            # === 44-FEATURE ARCHITECTURE (UPDATED) ===
+            # Expand 23 VAE features to 44 features to match training data structure
+            self.logger.info("Using 44-feature architecture - expanding VAE output to match training data")
             
-            # Create realistic time sequences (144 timesteps) with the 23 base features
-            sequence_output = self._create_realistic_time_sequences(base_features, 144)
-            self.logger.debug(f"Realistic time sequence output shape: {sequence_output.shape}")
+            # Use Keras layer for feature expansion (works with KerasTensors)
+            expansion_layer = FeatureExpansionLayer(name="feature_expansion")
+            expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
+            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
             
-            # Ensure final shape is correct (batch_size, 144, 23)
-            sequence_output = tf.keras.layers.Reshape((144, 23))(sequence_output)
+            # Create sequences by expanding the single timestep to 144 timesteps
+            # expanded_features shape: (batch_size, 44)
+            # We need: (batch_size, 144, 44)
+            
+            # Use RepeatVector to create sequences, then add small noise for variation
+            # Expand to sequence length
+            sequence_base = tf.keras.layers.RepeatVector(144)(expanded_features)  # (batch_size, 144, 44)
+            
+            # Add small random variations to make realistic time sequences
+            sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
             
             self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
             
@@ -501,6 +507,13 @@ class GeneratorPlugin(PluginBase):
         try:
             # Convert DataFrame to numpy if needed
             if isinstance(real_data_batch, pd.DataFrame):
+                # Filter out non-numeric columns (like datetime columns)
+                numeric_columns = real_data_batch.select_dtypes(include=[np.number]).columns
+                if len(numeric_columns) < real_data_batch.shape[1]:
+                    self.logger.info(f"Filtering out {real_data_batch.shape[1] - len(numeric_columns)} non-numeric columns")
+                    real_data_batch = real_data_batch[numeric_columns]
+                    self.logger.info(f"After filtering: {real_data_batch.shape}")
+                
                 data_array = real_data_batch.values
             else:
                 data_array = real_data_batch
@@ -517,9 +530,12 @@ class GeneratorPlugin(PluginBase):
             
             # If we have fewer than 23 features, pad with zeros
             if base_features_count < 23:
-                padding = np.zeros((n_samples, 23 - base_features_count))
+                padding = np.zeros((n_samples, 23 - base_features_count), dtype=np.float32)
                 base_features = np.concatenate([base_features, padding], axis=1)
                 self.logger.debug(f"Padded features from {base_features_count} to 23")
+            
+            # Ensure the final result is numpy float32 (compatible with TensorFlow)
+            base_features = base_features.astype(np.float32)
             
             self.logger.info(f"Successfully prepared features: {data_array.shape} -> {base_features.shape}")
             return base_features
@@ -746,30 +762,33 @@ class GeneratorPlugin(PluginBase):
         
         return sequences
 
-    def _expand_vae_output_to_51_features(self, vae_decoder_output):
+    def _expand_vae_output_to_44_features(self, vae_decoder_output):
         """
-        Expand 23 VAE features to 51 features by adding the missing features to match the exact CSV structure.
+        Expand 23 VAE features to 44 features to match training data structure exactly.
         
         The 23 VAE features are: OPEN, LOW, HIGH, vix_close, BC-BO, BH-BL, S&P500_Close, 
         CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
         
-        We need to add:
-        - CLOSE (calculated from OPEN, HIGH, LOW)
-        - 15 Technical Indicators (calculated using exact parameters from tech_indicator.py)
-        - BH-BO, BO-BL (calculated from OHLC)
-        - 8 cyclical date features (4 sin/cos pairs)
+        We need to expand to 44 features in the exact order as training data:
+        1. Technical Indicators (15): RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, 
+           Stochastic_%D, ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+        2. OHLC (4): OPEN, HIGH, LOW, CLOSE
+        3. Derived spreads (4): BC-BO, BH-BL, BH-BO, BO-BL  
+        4. External market data (2): S&P500_Close, vix_close
+        5. Sub-periodicity (16): CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+        6. Raw date features (3): day_of_month, hour_of_day, day_of_week
         
-        Total: 23 + 1 + 15 + 2 + 8 = 49... wait, let me recount...
+        Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
         
         Args:
             vae_decoder_output: VAE decoder output tensor (batch_size, 23)
             
         Returns:
-            Expanded features tensor (batch_size, 51)
+            Expanded features tensor (batch_size, 44)
         """
-        self.logger.debug(f"Expanding VAE output from 23 to 51 features, input shape: {vae_decoder_output.shape}")
+        self.logger.debug(f"Expanding VAE output from 23 to 44 features, input shape: {vae_decoder_output.shape}")
         
-        # Extract the 23 VAE features
+        # Extract the 23 VAE features  
         # Based on generator_decoder_output_feature_names in config.py:
         # OPEN(0), LOW(1), HIGH(2), vix_close(3), BC-BO(4), BH-BL(5), S&P500_Close(6),
         # CLOSE_15m_tick_1-8(7-14), CLOSE_30m_tick_1-8(15-22)
@@ -795,50 +814,34 @@ class GeneratorPlugin(PluginBase):
         ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
         technical_indicators = self._calculate_technical_indicators_tf(ohlc)  # (batch_size, 15)
         
-        # Generate cyclical date features (8 features)
+        # Generate raw date features (3 features instead of cyclical)
         batch_size = tf.shape(vae_decoder_output)[0]
-        date_features = self._generate_cyclical_date_features_tf(batch_size)  # (batch_size, 8)
+        raw_date_features = self._generate_raw_date_features_tf(batch_size)  # (batch_size, 3)
         
-        # Assemble all 51 features in the exact order matching the CSV:
-        # DATE_TIME will be added separately during sequence generation
-        # RSI,MACD,MACD_Histogram,MACD_Signal,EMA,Stochastic_%K,Stochastic_%D,ADX,DI+,DI-,ATR,CCI,WilliamsR,Momentum,ROC (15)
-        # OPEN,HIGH,LOW,CLOSE (4)  
-        # BC-BO,BH-BL,BH-BO,BO-BL (4)
-        # S&P500_Close,vix_close (2)
-        # CLOSE_15m_tick_1-8 (8)
-        # CLOSE_30m_tick_1-8 (8) 
-        # day_of_month,hour_of_day,day_of_week (3) -> but we need sin/cos pairs (8)
+        # Assemble all 44 features in exact order matching training data:
+        # 1. Technical Indicators first (15 features)
+        # 2. OHLC second (4 features)  
+        # 3. Derived spreads third (4 features)
+        # 4. External market data fourth (2 features)
+        # 5. Sub-periodicity fifth (16 features)
+        # 6. Raw date features sixth (3 features)
         
-        # Wait, that's still only 44 + 4 more cyclical = 48. Let me check the actual config again...
-        
-        # Let me assemble according to discriminator_full_feature_names_ordered from config:
         expanded_features = tf.concat([
-            # OHLC (4)
-            open_val, high_val, low_val, close_val,
-            # Technical Indicators (15) 
+            # Technical Indicators first (15)
             technical_indicators,
-            # Cyclical date features (8) - this replaces the 3 raw date features  
-            date_features,
-            # External data (2)
-            sp500_close, vix_close,
-            # Bid/Ask spreads (4)
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
             bc_bo, bh_bl, bh_bo, bo_bl,
-            # Sub-periodicity (16)
-            close_15m_ticks, close_30m_ticks
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16)
+            close_15m_ticks, close_30m_ticks,
+            # Raw date features sixth (3)
+            raw_date_features
         ], axis=1)
         
-        # Total: 4 + 15 + 8 + 2 + 4 + 16 = 49 features... still missing 2
-        
-        # Let me check what the config has as the extra 3 features...
-        # From config: "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx"
-        # These are made up, but I need to generate placeholder values to match the expected 51
-        
-        batch_size = tf.shape(vae_decoder_output)[0]
-        # Add 2 more placeholder features to reach 51 total  
-        placeholder_features = tf.random.normal([batch_size, 2], mean=0.0, stddev=0.1)
-        
-        # Final assembly for 51 features
-        expanded_features = tf.concat([expanded_features, placeholder_features], axis=1)
+        # Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
         
         self.logger.debug(f"Feature expansion completed, output shape: {expanded_features.shape}")
         return expanded_features
@@ -1003,6 +1006,41 @@ class GeneratorPlugin(PluginBase):
         
         return date_features
 
+    def _generate_raw_date_features_tf(self, batch_size):
+        """
+        Generate raw date features (not cyclical) to match training data structure.
+        
+        The training data uses raw date features: day_of_month, hour_of_day, day_of_week
+        These are NOT cyclical sin/cos features, but the raw integer values.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3) 
+            Order: [day_of_month, hour_of_day, day_of_week]
+        """
+        # Generate realistic raw date feature values 
+        # These should be normalized values similar to training data
+        
+        # day_of_month: 1-31, normalized to ~0-1 range
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # hour_of_day: 0-23, normalized to ~0-1 range  
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # day_of_week: 0-6, normalized to ~0-1 range
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # Concatenate in the order matching training data
+        raw_date_features = tf.concat([
+            day_of_month,   # day_of_month
+            hour_of_day,    # hour_of_day  
+            day_of_week     # day_of_week
+        ], axis=1)  # (batch_size, 3)
+        
+        return raw_date_features
+
     def _create_realistic_time_sequences(self, base_features, sequence_length):
         """
         Create realistic time sequences from base features using TensorFlow operations.
@@ -1073,3 +1111,159 @@ class GeneratorPlugin(PluginBase):
 #
 # def top_level_function():
 #     pass
+
+class FeatureExpansionLayer(tf.keras.layers.Layer):
+    """
+    Custom Keras layer to expand 23 VAE features to 44 features.
+    This layer can work with KerasTensors in functional model construction.
+    """
+    
+    def __init__(self, **kwargs):
+        super(FeatureExpansionLayer, self).__init__(**kwargs)
+        
+    def call(self, inputs):
+        """
+        Expand 23 VAE features to 44 features to match training data structure.
+        
+        Args:
+            inputs: VAE decoder output tensor (batch_size, 23)
+            
+        Returns:
+            Expanded features tensor (batch_size, 44)
+        """
+        vae_decoder_output = inputs
+        
+        # Extract the 23 VAE features using Keras ops
+        open_val = vae_decoder_output[:, 0:1]   # OPEN
+        low_val = vae_decoder_output[:, 1:2]    # LOW  
+        high_val = vae_decoder_output[:, 2:3]   # HIGH
+        vix_close = vae_decoder_output[:, 3:4]  # vix_close
+        bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
+        bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
+        sp500_close = vae_decoder_output[:, 6:7] # S&P500_Close
+        close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
+        close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
+        
+        # Calculate CLOSE (typical price approximation)
+        close_val = (open_val + high_val + low_val) / 3.0
+        
+        # Calculate missing bid/ask spreads
+        bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
+        bo_bl = open_val - low_val   # BO-BL = OPEN - LOW
+        
+        # Calculate 15 technical indicators using simplified approach for KerasTensors
+        ohlc = tf.keras.layers.Concatenate(axis=1)([open_val, high_val, low_val, close_val])
+        technical_indicators = self._calculate_technical_indicators_keras(ohlc)  # (batch_size, 15)
+        
+        # Generate raw date features (3 features)
+        batch_size = tf.shape(vae_decoder_output)[0]
+        raw_date_features = self._generate_raw_date_features_keras(batch_size)  # (batch_size, 3)
+        
+        # Assemble all 44 features in exact order matching training data
+        expanded_features = tf.keras.layers.Concatenate(axis=1)([
+            # Technical Indicators first (15)
+            technical_indicators,
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
+            bc_bo, bh_bl, bh_bo, bo_bl,
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16)
+            close_15m_ticks, close_30m_ticks,
+            # Raw date features sixth (3)
+            raw_date_features
+        ])
+        
+        return expanded_features
+    
+    def _calculate_technical_indicators_keras(self, ohlc):
+        """
+        Calculate simplified technical indicators using Keras-compatible operations.
+        
+        Args:
+            ohlc: OHLC tensor (batch_size, 4) [open, high, low, close]
+            
+        Returns:
+            Technical indicators tensor (batch_size, 15)
+        """
+        open_val = ohlc[:, 0:1]
+        high_val = ohlc[:, 1:2]
+        low_val = ohlc[:, 2:3]
+        close_val = ohlc[:, 3:4]
+        
+        indicators = []
+        
+        # Simplified calculations for 15 technical indicators
+        # 1. RSI (simplified)
+        price_change = close_val - open_val
+        gain = tf.maximum(price_change, 0.0)
+        loss = tf.maximum(-price_change, 0.0)
+        rs = gain / (loss + 1e-8)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        indicators.append(rsi)
+        
+        # 2-4. MACD components (simplified)
+        macd = (close_val - open_val) * 0.1
+        macd_signal = macd * 0.9
+        macd_histogram = macd - macd_signal
+        indicators.extend([macd, macd_histogram, macd_signal])
+        
+        # 5. EMA (simplified)
+        ema = close_val * 0.95 + open_val * 0.05
+        indicators.append(ema)
+        
+        # 6-7. Stochastic (simplified)
+        stoch_k = ((close_val - low_val) / (high_val - low_val + 1e-8)) * 100.0
+        stoch_d = stoch_k * 0.9
+        indicators.extend([stoch_k, stoch_d])
+        
+        # 8-10. ADX, DI+, DI- (simplified)
+        adx = tf.abs(high_val - low_val) / (close_val + 1e-8) * 100.0
+        di_plus = tf.maximum(high_val - open_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        di_minus = tf.maximum(open_val - low_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        indicators.extend([adx, di_plus, di_minus])
+        
+        # 11. ATR (simplified)
+        atr = high_val - low_val
+        indicators.append(atr)
+        
+        # 12. CCI (simplified)
+        typical_price = (high_val + low_val + close_val) / 3.0
+        cci = (typical_price - close_val) / (0.015 * tf.abs(typical_price - close_val) + 1e-8)
+        indicators.append(cci)
+        
+        # 13. Williams %R (simplified)
+        williams_r = ((high_val - close_val) / (high_val - low_val + 1e-8)) * -100.0
+        indicators.append(williams_r)
+        
+        # 14. Momentum (simplified)
+        momentum = close_val - open_val
+        indicators.append(momentum)
+        
+        # 15. ROC (simplified)
+        roc = ((close_val - open_val) / (open_val + 1e-8)) * 100.0
+        indicators.append(roc)
+        
+        # Concatenate all indicators
+        return tf.keras.layers.Concatenate(axis=1)(indicators)
+    
+    def _generate_raw_date_features_keras(self, batch_size):
+        """
+        Generate raw date features using Keras-compatible operations.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3)
+        """
+        # Generate realistic raw date feature values using tf.random.uniform
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        return tf.keras.layers.Concatenate(axis=1)([day_of_month, hour_of_day, day_of_week])
+    
+    def get_config(self):
+        return super(FeatureExpansionLayer, self).get_config()

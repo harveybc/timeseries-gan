@@ -120,11 +120,34 @@ DEFAULT_VALUES = {
         "day_of_year_sin", "day_of_year_cos"
     ],
     
-    # Configuration for 23-feature architecture
+    # Configuration for 23-feature architecture  
     "base_features_count": 23,
-    "post_processing_features_enabled": False,  # Set to True when full feature sets are needed
+    "post_processing_features_enabled": True,  # Changed to True to generate full feature sets for compatibility
     "base_features_output_dim": 23,
     "discriminator_input_dim": 23,
+    
+    # Full feature names ordered to match training data structure (45 features total)
+    # Order: DATE_TIME, Technical Indicators (15), OHLC (4), Market Data & Derived Features (26)
+    "generator_full_feature_names_ordered": [
+        # Technical Indicators first (15 features) - matches training data order
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", 
+        "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+        # OHLC second (4 features) - matches training data order  
+        "OPEN", "HIGH", "LOW", "CLOSE",
+        # Derived bid/ask spreads (4 features) - matches training data order
+        "BC-BO", "BH-BL", "BH-BO", "BO-BL", 
+        # External market data (2 features) - matches training data order
+        "S&P500_Close", "vix_close",
+        # Sub-periodicity data (16 features) - matches training data order
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4", 
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # Raw date features (3 features) - matches training data order (NOT cyclical sin/cos)
+        "day_of_month", "hour_of_day", "day_of_week"
+        # Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (+ DATE_TIME = 45 columns)
+    ],
     
     # Discriminator configuration for 23-feature architecture
     "discriminator_base_feature_names_ordered": [

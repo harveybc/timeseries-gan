@@ -18,8 +18,8 @@ from app.config import DEFAULT_VALUES
 from tsg_plugins.generator_plugin.generator_plugin import GeneratorPlugin
 
 def test_vae_output_expansion():
-    """Test the _expand_vae_output_to_51_features method."""
-    print("Testing VAE output expansion from 23 to 51 features...")
+    """Test the _expand_vae_output_to_44_features method."""
+    print("Testing VAE output expansion from 23 to 44 features...")
     
     # Initialize plugin
     config = DEFAULT_VALUES.copy()
@@ -48,11 +48,11 @@ def test_vae_output_expansion():
     
     # Test the expansion method
     try:
-        expanded_output = plugin._expand_vae_output_to_51_features(vae_output)
+        expanded_output = plugin._expand_vae_output_to_44_features(vae_output)
         print(f"\nExpanded output shape: {expanded_output.shape}")
-        print(f"Expected shape: (2, 51)")
+        print(f"Expected shape: (2, 44)")
         
-        if expanded_output.shape == (2, 51):
+        if expanded_output.shape == (2, 44):
             print("✅ Shape is correct!")
             
             # Check that values are reasonable
@@ -78,7 +78,7 @@ def test_vae_output_expansion():
             print("✅ All values are finite!")
             return True
         else:
-            print(f"❌ Wrong shape! Expected (2, 51), got {expanded_output.shape}")
+            print(f"❌ Wrong shape! Expected (2, 44), got {expanded_output.shape}")
             return False
             
     except Exception as e:

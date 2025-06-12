@@ -446,6 +446,12 @@ class TrainingCoordinator:
             
             elif isinstance(processed_data, np.ndarray):
                 self.logger.info(f"Output from plugin is already a NumPy array. Shape: {processed_data.shape}")
+                
+                # Ensure TensorFlow-compatible data type
+                if processed_data.dtype != np.float32:
+                    self.logger.info(f"Converting data from {processed_data.dtype} to float32 for TensorFlow compatibility")
+                    processed_data = processed_data.astype(np.float32)
+                
                 if processed_data.ndim == 0 or (processed_data.ndim > 0 and processed_data.shape[0] == 0): 
                     self.logger.info("Processed NumPy array is empty or scalar. Assigning empty NumPy array.")
                     data_array_2d = np.array([])
@@ -471,7 +477,7 @@ class TrainingCoordinator:
 
         # Step 3: Validate the number of features of the 2D NumPy array
         self.logger.info("Validating features of the 2D NumPy array...")
-        expected_features = self.params.get("expected_feature_count_for_discriminator", 51) 
+        expected_features = self.params.get("expected_feature_count_for_discriminator", 23) 
 
         if data_array_2d.ndim != 2:
             self.logger.error(f"Processed data is not 2D after all conversions. Shape: {data_array_2d.shape}")
@@ -495,7 +501,8 @@ class TrainingCoordinator:
         num_sequences = num_samples - seq_len + 1
         
         self.logger.info(f"Allocating memory for {num_sequences} sequences of shape ({seq_len}, {num_features_in_array}).")
-        sequences_array = np.empty((num_sequences, seq_len, num_features_in_array), dtype=data_array_2d.dtype)
+        # Ensure we use numpy float32 for TensorFlow compatibility
+        sequences_array = np.empty((num_sequences, seq_len, num_features_in_array), dtype=np.float32)
         
         self.logger.info(f"Creating {num_sequences} sequences. This may take some time...")
         # Add tqdm progress bar here for the sequence creation loop
