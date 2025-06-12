@@ -196,8 +196,8 @@ DEFAULT_VALUES = {
 
     # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
     "enable_mmd_loss": True,          # Enable/disable MMD loss
-    "mmd_lambda_g": 0.01,            # Weight for MMD loss in generator
-    "mmd_lambda_d": 0.001,           # Weight for MMD loss in discriminator (optional)
+    "mmd_lambda_g": 0.0001,            # Weight for MMD loss in generator
+    "mmd_lambda_d": 0.00001,           # Weight for MMD loss in discriminator (optional)
     "mmd_gamma": None,               # RBF kernel bandwidth (None = auto)
     "mmd_sample_size": 128,          # Number of samples for MMD computation (performance)
 
@@ -206,7 +206,7 @@ DEFAULT_VALUES = {
     "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler
     "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
     "lr_reduction_factor": 0.5,   # Factor by which LR is reduced
-    "lr_patience": 40,            # Epochs with no improvement before LR is reduced
+    "lr_patience": 30,            # Epochs with no improvement before LR is reduced
     "lr_min_delta": 1e-7,       # Minimum change to qualify as an improvement
     "min_lr_g": 1e-7,             # Minimum LR for generator
     "min_lr_d": 1e-7,             # Minimum LR for discriminator
