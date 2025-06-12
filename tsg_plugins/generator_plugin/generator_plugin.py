@@ -170,7 +170,7 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"GeneratorPlugin params after super().set_params and potential feature module init: {self.params}")
         
         model_relevant_params_changed = any(k in kwargs for k in [
-            'generator_l2_reg', 'use_generator_l2_reg', 
+   
             'generator_model_path', 'sequential_model_file', 
             'internal_z_sequence_length', 'internal_z_latent_dim',
             'noise_dim', 'conditional_features_dim'
@@ -254,153 +254,120 @@ class GeneratorPlugin(PluginBase):
         if self.model is None:
             self.logger.critical("Generator model is None after load/build attempt.")
             raise RuntimeError("Failed to initialize generator model.")
+            def _build_bilstm_z_generator(self, input_noise_dim: int, output_latent_seq_len: int, output_latent_dim: int) -> tf.keras.Model:
+                self.logger.debug(f"Building BiLSTM Z-Generator. Input noise dim: {input_noise_dim}, Output latent seq len: {output_latent_seq_len}, Output latent dim: {output_latent_dim}")
+                
+                noise_input = tf.keras.layers.Input(shape=(input_noise_dim,), name="z_generator_noise_input")
+                
+                dense_units = output_latent_seq_len * output_latent_dim
+                x = tf.keras.layers.Dense(dense_units, activation='relu')(noise_input)
+                x = tf.keras.layers.Reshape((output_latent_seq_len, output_latent_dim))(x)
+                
+                lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
+                x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm_internal")(x)
+                
+                z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_target_dim")(x)
+                
+                model = tf.keras.Model(inputs=noise_input, outputs=z_sequence_output, name="Internal_BiLSTM_Z_Generator")
+                
+                self.logger.info("Internal BiLSTM Z-Generator built.")
+                if self.params.get("print_model_summary", False):
+                    model.summary(print_fn=self.logger.info)
+                return model
 
-    def _apply_l2_regularization(self, layer):
-        self.logger.debug(f"Applying L2 regularization to layer: {layer.name}")
-        if self.params.get("use_generator_l2_reg", False):
-            l2_factor = self.params.get("generator_l2_reg_factor", 0.01)
-            if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
-                if hasattr(layer, 'kernel_regularizer'):
-                    layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of layer: {layer.name}")
-            elif isinstance(layer, tf.keras.layers.LSTM):
-                if hasattr(layer, 'kernel_regularizer'):
-                    layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of LSTM layer: {layer.name}")
-                if hasattr(layer, 'recurrent_regularizer'):
-                    layer.recurrent_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of LSTM layer: {layer.name}")
-            elif isinstance(layer, tf.keras.layers.Bidirectional):
-                if hasattr(layer.forward_layer, 'kernel_regularizer'):
-                    layer.forward_layer.kernel_regularizer = l2(l2_factor)
-                    layer.backward_layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of Bidirectional LSTM (forward/backward): {layer.name}")
-                if hasattr(layer.forward_layer, 'recurrent_regularizer'):
-                    layer.forward_layer.recurrent_regularizer = l2_factor
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of Bidirectional LSTM (forward): {layer.name}")
-                if hasattr(layer.backward_layer, 'recurrent_regularizer'):
-                    layer.backward_layer.recurrent_regularizer = l2_factor
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of Bidirectional LSTM (backward): {layer.name}")
+            def _build_vae_generator(self, vae_decoder_model: tf.keras.Model) -> tf.keras.Model:
+                """
+                Builds the composite GAN generator using the pre-trained VAE decoder.
+                This involves creating the internal BiLSTM Z-generator and connecting it
+                to the VAE decoder, along with handling conditional inputs.
+                """
+                self.logger.info("Building VAE-based composite generator.")
+                self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}")
 
-    def _build_bilstm_z_generator(self, input_noise_dim: int, output_latent_seq_len: int, output_latent_dim: int) -> tf.keras.Model:
-        self.logger.debug(f"Building BiLSTM Z-Generator. Input noise dim: {input_noise_dim}, Output latent seq len: {output_latent_seq_len}, Output latent dim: {output_latent_dim}")
-        
-        noise_input = tf.keras.layers.Input(shape=(input_noise_dim,), name="z_generator_noise_input")
-        
-        dense_units = output_latent_seq_len * output_latent_dim
-        x = tf.keras.layers.Dense(dense_units, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
-        x = tf.keras.layers.Reshape((output_latent_seq_len, output_latent_dim))(x)
-        
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
-        x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm_internal")(x)
-        
-        z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_target_dim")(x)
-        
-        model = tf.keras.Model(inputs=noise_input, outputs=z_sequence_output, name="Internal_BiLSTM_Z_Generator")
-        
-        self.logger.info("Internal BiLSTM Z-Generator built.")
-        if self.params.get("print_model_summary", False):
-            model.summary(print_fn=self.logger.info)
-        return model
+                noise_dim = self.params.get("noise_dim", 100) # Example: dimension of the input noise vector for Z-generator
+                internal_z_seq_len = 18 # self.params.get("internal_z_sequence_length", 18)
+                internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
 
-    def _build_vae_generator(self, vae_decoder_model: tf.keras.Model) -> tf.keras.Model:
-        """
-        Builds the composite GAN generator using the pre-trained VAE decoder.
-        This involves creating the internal BiLSTM Z-generator and connecting it
-        to the VAE decoder, along with handling conditional inputs.
-        """
-        self.logger.info("Building VAE-based composite generator.")
-        self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}")
+                conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
+                context_dim = self.params.get("context_vector_dim", 64) # For decoder_input_h_context
 
-        noise_dim = self.params.get("noise_dim", 100) # Example: dimension of the input noise vector for Z-generator
-        internal_z_seq_len = 18 # self.params.get("internal_z_sequence_length", 18)
-        internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
+                # 1. Define Input Layers for the Composite Generator
+                self.logger.debug("Defining input layers for composite generator.")
+                noise_input = tf.keras.layers.Input(shape=(noise_dim,), name="noise_input")
+                conditional_input = tf.keras.layers.Input(shape=(conditional_dim,), name="conditional_input_to_vae")
+                context_input = tf.keras.layers.Input(shape=(context_dim,), name="context_input_to_vae")
+                
+                self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
 
-        conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
-        context_dim = self.params.get("context_vector_dim", 64) # For decoder_input_h_context
+                # 2. Build or Get the Internal BiLSTM Z-Generator
+                self.logger.debug("Building internal BiLSTM Z-generator.")
+                
+                x = tf.keras.layers.Dense(576, activation='relu')(noise_input)
+                self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
+                x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
+                self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
+                lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
+                x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
+                self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
+                
+                z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_vae_spec")(x)
+                self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
 
-        # 1. Define Input Layers for the Composite Generator
-        self.logger.debug("Defining input layers for composite generator.")
-        noise_input = tf.keras.layers.Input(shape=(noise_dim,), name="noise_input")
-        conditional_input = tf.keras.layers.Input(shape=(conditional_dim,), name="conditional_input_to_vae")
-        context_input = tf.keras.layers.Input(shape=(context_dim,), name="context_input_to_vae")
-        
-        self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
+                # 3. Connect to the VAE Decoder
+                self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
+                self.logger.debug(f"  - z_sequence_for_vae shape: {z_sequence_for_vae.shape}")
+                self.logger.debug(f"  - context_input shape: {context_input.shape}")
+                self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
 
-        # 2. Build or Get the Internal BiLSTM Z-Generator
-        self.logger.debug("Building internal BiLSTM Z-generator.")
-        
-        x = tf.keras.layers.Dense(576, activation='relu')(noise_input)
-        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
-        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
-        self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
-        x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
-        self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
-        
-        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', name="z_conv1d_to_vae_spec")(x)
-        self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
+                vae_decoder_model.trainable = True
+                self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
+                
+                try:
+                    vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
+                    self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
+                    vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
+                    self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
+                    
+                    # Post-process VAE decoder output to match discriminator input requirements
+                    # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
+                    self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
+                    
+                    # Expand 23 features to 51 features using a Dense layer
+                    expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
+                    self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
+                    
+                    # Repeat the feature vector across 144 timesteps
+                    # RepeatVector expects 2D input (batch_size, features) and outputs (batch_size, timesteps, features)
+                    sequence_output = tf.keras.layers.RepeatVector(144)(expanded_features)
+                    self.logger.debug(f"RepeatVector output shape: {sequence_output.shape}")
+                    
+                    # Ensure final shape is correct (batch_size, 144, 51)
+                    sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
+                    
+                    self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
+                    self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
+                    self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
+                    self.logger.error(f"Provided context_input: {context_input}")
+                    self.logger.error(f"Provided conditional_input: {conditional_input}")
+                    raise
 
-        # 3. Connect to the VAE Decoder
-        self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
-        self.logger.debug(f"  - z_sequence_for_vae shape: {z_sequence_for_vae.shape}")
-        self.logger.debug(f"  - context_input shape: {context_input.shape}")
-        self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
+                composite_generator_model = tf.keras.Model(
+                    inputs=[noise_input, conditional_input, context_input],
+                    outputs=sequence_output,
+                    name="Composite_VAE_GAN_Generator"
+                )
+                self.logger.info("Composite VAE-GAN Generator model built successfully.")
+                
+                if self.params.get("print_model_summary", False):
+                    self.logger.info("Composite VAE-GAN Generator Summary:")
+                    composite_generator_model.summary(print_fn=self.logger.info)
 
-        vae_decoder_model.trainable = True
-        self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
-        
-        try:
-            vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
-            self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
-            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
-            self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
-            
-            # Post-process VAE decoder output to match discriminator input requirements
-            # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
-            self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
-            
-            # Expand 23 features to 51 features using a Dense layer
-            expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
-            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
-            
-            # Repeat the feature vector across 144 timesteps
-            # RepeatVector expects 2D input (batch_size, features) and outputs (batch_size, timesteps, features)
-            sequence_output = tf.keras.layers.RepeatVector(144)(expanded_features)
-            self.logger.debug(f"RepeatVector output shape: {sequence_output.shape}")
-            
-            # Ensure final shape is correct (batch_size, 144, 51)
-            sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
-            
-            self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
-            
-        except Exception as e:
-            self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
-            self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
-            self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
-            self.logger.error(f"Provided context_input: {context_input}")
-            self.logger.error(f"Provided conditional_input: {conditional_input}")
-            raise
+                return composite_generator_model
 
-        composite_generator_model = tf.keras.Model(
-            inputs=[noise_input, conditional_input, context_input],
-            outputs=sequence_output,
-            name="Composite_VAE_GAN_Generator"
-        )
-        self.logger.info("Composite VAE-GAN Generator model built successfully.")
-        
-        if self.params.get("print_model_summary", False):
-            self.logger.info("Composite VAE-GAN Generator Summary:")
-            composite_generator_model.summary(print_fn=self.logger.info)
 
-        return composite_generator_model
-
-    def _get_l2_reg(self):
-        """Get L2 regularizer if enabled, otherwise return None."""
-        if self.params.get("use_generator_l2_reg", False):
-            l2_factor = self.params.get("generator_l2_reg", 0.01)
-            return l2(l2_factor)
-        return None
 
     def build(self, input_shape: Tuple[int, ...], condition_shape: Tuple[int, ...] = None) -> tf.keras.Model:
         """

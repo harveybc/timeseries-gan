@@ -183,7 +183,7 @@ DEFAULT_VALUES = {
     "autocast": True,
 
     # Added: L2 Regularization for Generator
-    "generator_l2_reg": 1e-5,
+    "l2_regularization": 1e-5,
 
     # Added: ReduceLROnPlateau parameters
     "enable_reduce_lr_on_plateau": True,
