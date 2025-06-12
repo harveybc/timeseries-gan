@@ -34,13 +34,13 @@ def verify_implementation():
         
         # Verify all logging categories are present
         logging_categories = [
-            "PRIMARY METRICS",
-            "ACCURACY METRICS", 
-            "GRADIENT METRICS",
-            "PREDICTION STATISTICS",
-            "VARIABILITY STATS",
-            "TRAINING CONFIGURATION",
-            "SCHEDULING INFO"
+            "PRIMARY METRICS LINE",
+            "ACCURACY METRICS LINE", 
+            "GRADIENT METRICS LINE",
+            "PREDICTION STATISTICS LINE",
+            "PREDICTION VARIABILITY LINE",
+            "TRAINING CONFIGURATION LINE",
+            "PATIENCE AND SCHEDULING LINE"
         ]
         
         found_categories = []
