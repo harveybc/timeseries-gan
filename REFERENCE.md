@@ -114,3 +114,209 @@ The pre-trained autoencoder models (located in `examples/results/phase_4_3/`) im
     *   The VAE decoder's weights are set to `trainable=True` to allow fine-tuning during the adversarial GAN training process.
     *   It forms a core part of the composite GAN generator, which also includes an internal BiLSTM Z-generator (to produce `z_seq` from noise) and handles the various inputs.
 
+---
+
+## Operation Modes
+
+The SDG system supports multiple operation modes, configurable via the `operation_mode` parameter in `app/config.py`. Each mode utilizes a specific pipeline to perform its tasks.
+
+### Train Mode
+- **Purpose**: To train the GAN components (Generator and Discriminator).
+- **Process**: Involves loading real training data, building/compiling models (potentially using parts of pre-trained models like a VAE decoder for the generator), and running the adversarial training loop.
+- **Key Configuration**: `operation_mode: "train"`. Relies on data paths like `x_train_file`, training parameters like `gan_epochs`, `learning_rate`, etc.
+
+### Generate Mode
+
+**Purpose**: To generate a specified number of synthetic time series samples using pre-trained Generator and Discriminator models and prepend them to an existing dataset.
+
+**Activation**:
+This mode is activated when the following conditions in `app/config.py` are met:
+1.  `operation_mode: "generate"`
+2.  `load_generator_sequential_model_file` is not `None` and points to a valid pre-trained full Generator Keras model file (`.keras`).
+3.  `load_discriminator_sequential_model_file` is not `None` and points to a valid pre-trained full Discriminator Keras model file (`.keras`).
+
+**Process Overview**:
+1.  **Model Loading**: The system loads the full, pre-trained Generator and Discriminator models from the paths specified in `load_generator_sequential_model_file` and `load_discriminator_sequential_model_file` respectively.
+2.  **Base Data Loading**: The initial segment of the real dataset is loaded from `x_train_file`, specifically the first `max_steps_train` rows.
+3.  **Target `DATE_TIME` Calculation**:
+    *   The `DATE_TIME` of the first record in the loaded segment of `x_train_file` is identified.
+    *   The `dataset_periodicity` (e.g., "1h") is used to determine time intervals.
+4.  **Synthetic Data Generation (`n_samples`)**:
+    *   The system generates `n_samples` new synthetic data records.
+    *   **`DATE_TIME` Generation**:
+        *   The `DATE_TIME` for each synthetic sample is generated sequentially backwards from the target start time. The `DATE_TIME` of the *last* (most recent) synthetic sample generated will be exactly one `dataset_periodicity` unit before the `DATE_TIME` of the first record from `x_train_file`.
+        *   Crucially, generated `DATE_TIME` values **must only fall on weekdays** (Monday to Friday). Any calculated timestamp that falls on a Saturday or Sunday is skipped, and the process continues by adjusting to the previous weekday to ensure a continuous series of weekday data before prepending.
+    *   **Feature Generation**: For each valid weekday `DATE_TIME`:
+        *   Appropriate conditional inputs (e.g., cyclical date/time features derived from the generated `DATE_TIME`, noise vectors) are prepared. This leverages logic similar to that in the `FeederPlugin`.
+        *   The loaded Generator model is used to predict the primary features of the synthetic sample.
+        *   The full set of 51 features is assembled for each sample, combining generated features with derived ones (like date features and any TIs not directly produced by the generator).
+5.  **Data Prepending**: The newly generated `n_samples` of synthetic data (now with chronologically earlier, weekday-only `DATE_TIME` values) are prepended to the initially loaded segment from `x_train_file`.
+6.  **Output**: The combined dataset (synthetic data + original `x_train_file` segment) is saved to the path specified by `generated_data_file` in the `output_dir`.
+
+**Note**: While the Discriminator model is loaded, its primary role in "generate" mode is typically for potential validation or more advanced generation techniques. The core generation loop relies on the Generator.
+
+### Optimize Mode
+- **Purpose**: For hyperparameter tuning of the GAN training process or model architectures.
+- **Process**: (Details depend on the specific `OptimizerPlugin` implementation) Typically involves defining a search space, iteratively training with different hyperparameter sets, evaluating, and selecting the best set.
+- **Key Configuration**: `operation_mode: "optimize"`.
+
+---
+
+## Configuration Parameters
+
+The system's behavior is highly configurable through parameters defined in the `app/config.py` file. This section outlines the key configuration parameters available for tuning the system's operation.
+
+### General Parameters
+- `operation_mode`: Sets the current operation mode of the SDG system. Possible values:
+    - `"train"`: Engage the training pipeline for the GAN.
+    - `"generate"`: Activate the data generation pipeline using pre-trained models.
+    - `"optimize"`: Enable the optimization mode for hyperparameter tuning.
+- `random_seed`: An integer value to ensure reproducibility across different runs. It seeds the random number generators used in TensorFlow and Python.
+
+### Train Mode Parameters
+- `x_train_file`: File path for the input training data.
+- `gan_epochs`: Number of epochs to train the GAN.
+- `learning_rate`: Learning rate for the optimizer.
+- `batch_size`: Number of samples per gradient update.
+- `model_save_path`: Directory where the trained model will be saved.
+
+### Generate Mode Parameters
+- `load_generator_sequential_model_file`: File path to the pre-trained full Generator model.
+- `load_discriminator_sequential_model_file`: File path to the pre-trained full Discriminator model.
+- `n_samples`: Number of synthetic samples to generate.
+- `x_train_file`: File path for the input training data, used to determine the prepending point for generated data.
+- `max_steps_train`: Maximum number of rows to read from `x_train_file` for determining the initial data segment.
+- `dataset_periodicity`: Defines the time interval of the data (e.g., hourly, daily) to correctly space the generated `DATE_TIME` values.
+
+### Optimize Mode Parameters
+- `operation_mode`: Must be set to `"optimize"` to activate the optimization pipeline.
+- Additional parameters specific to the chosen optimization plugin (e.g., `OptimizerPlugin`) may be available, depending on the implementation.
+
+### Plugin-Specific Parameters
+- Each plugin (e.g., `GeneratorPlugin`, `DiscriminatorPlugin`, `OptimizerPlugin`) may have its own set of configuration parameters. Refer to the respective plugin documentation for detailed parameter descriptions.
+
+---
+
+## File Structure and Integration
+
+The SDG system is organized into a modular file structure, promoting separation of concerns and ease of maintenance. This section provides an overview of the key components and their interactions.
+
+### Core Components
+- `app/`: Contains the main application code, including:
+    - `config.py`: Configuration file for setting parameters and paths.
+    - `main.py`: Entry point for running the SDG system.
+    - `trainer.py`: Contains the `TrainingCoordinator` class responsible for managing the training process.
+    - `generator_plugin.py`: Implements the `GeneratorPlugin` class for synthetic data generation.
+    - `discriminator_plugin.py`: Implements the `DiscriminatorPlugin` class for model discrimination.
+    - `optimizer_plugin.py`: Implements the `OptimizerPlugin` class for hyperparameter optimization.
+- `data/`: Directory for storing input data files (e.g., training data, external data sources).
+- `models/`: Directory for saving and loading model checkpoints.
+- `results/`: Directory for storing output files, including generated data and model evaluation results.
+- `examples/`: Contains example scripts and notebooks for demonstrating system usage.
+
+### Integration and Execution
+- The system is designed to be executed as a Python package. The main entry point is the `app/main.py` file.
+- Configuration parameters are set in the `app/config.py` file. This includes defining the operation mode (`operation_mode`) and specifying file paths for data and models.
+- Depending on the operation mode, different components are activated:
+    - **Train Mode**: The `TrainingCoordinator` is initialized, and the `train` method is called to start the GAN training process.
+    - **Generate Mode**: The `GeneratorPlugin` is used to load pre-trained models and generate synthetic data, which is then saved to an output file.
+    - **Optimize Mode**: The `OptimizerPlugin` is activated to perform hyperparameter tuning based on the defined search space and objective function.
+
+---
+
+## Detailed Code Documentation
+
+The following sections provide detailed documentation of the key classes and functions in the SDG system codebase. This includes descriptions of their responsibilities, usage, and interactions with other components.
+
+### app/config.py
+
+#### Configuration Parameters
+
+- `operation_mode`: (str) The current operation mode of the SDG system. Possible values:
+    - `"train"`: Engage the training pipeline for the GAN.
+    - `"generate"`: Activate the data generation pipeline using pre-trained models.
+    - `"optimize"`: Enable the optimization mode for hyperparameter tuning.
+- `random_seed`: (int) An integer value to ensure reproducibility across different runs. It seeds the random number generators used in TensorFlow and Python.
+
+#### Train Mode Parameters
+
+- `x_train_file`: (str) File path for the input training data.
+- `gan_epochs`: (int) Number of epochs to train the GAN.
+- `learning_rate`: (float) Learning rate for the optimizer.
+- `batch_size`: (int) Number of samples per gradient update.
+- `model_save_path`: (str) Directory where the trained model will be saved.
+
+#### Generate Mode Parameters
+
+- `load_generator_sequential_model_file`: (str) File path to the pre-trained full Generator model.
+- `load_discriminator_sequential_model_file`: (str) File path to the pre-trained full Discriminator model.
+- `n_samples`: (int) Number of synthetic samples to generate.
+- `x_train_file`: (str) File path for the input training data, used to determine the prepending point for generated data.
+- `max_steps_train`: (int) Maximum number of rows to read from `x_train_file` for determining the initial data segment.
+- `dataset_periodicity`: (str) Defines the time interval of the data (e.g., hourly, daily) to correctly space the generated `DATE_TIME` values.
+
+#### Optimize Mode Parameters
+
+- `operation_mode`: Must be set to `"optimize"` to activate the optimization pipeline.
+- Additional parameters specific to the chosen optimization plugin (e.g., `OptimizerPlugin`) may be available, depending on the implementation.
+
+#### Plugin-Specific Parameters
+
+- Each plugin (e.g., `GeneratorPlugin`, `DiscriminatorPlugin`, `OptimizerPlugin`) may have its own set of configuration parameters. Refer to the respective plugin documentation for detailed parameter descriptions.
+
+### app/main.py
+
+#### Main Entry Point
+
+- The `app/main.py` file is the main entry point for running the SDG system. It initializes the application, loads the configuration, and starts the appropriate pipeline based on the `operation_mode`.
+
+#### Key Functions
+
+- `run_training()`: Initializes the `TrainingCoordinator` and starts the training process in the specified mode (e.g., train, resume).
+- `run_generation()`: Executes the generation pipeline, loading pre-trained models and generating synthetic data.
+- `run_optimization()`: Activates the optimization pipeline for hyperparameter tuning.
+
+### app/trainer.py
+
+#### TrainingCoordinator Class
+
+- The `TrainingCoordinator` class is responsible for managing the training process of the GAN. It coordinates between the generator and discriminator, handles data loading and preprocessing, and manages the training loop.
+
+#### Key Methods
+
+- `train()`: The main training loop for the GAN. It iteratively trains the generator and discriminator, applies regularization, and updates the models.
+- `load_data()`: Loads the training data from the specified file and prepares it for training.
+- `save_model()`: Saves the trained model checkpoints (generator, discriminator, and composite GAN model) to the specified directory.
+
+### app/generator_plugin.py
+
+#### GeneratorPlugin Class
+
+- The `GeneratorPlugin` class implements the functionality for synthetic data generation. It loads the pre-trained generator model, prepares the input data, and generates synthetic samples.
+
+#### Key Methods
+
+- `load_model()`: Loads the pre-trained generator model from the specified file.
+- `generate()`: Generates synthetic data samples using the loaded generator model and the provided input features.
+
+### app/discriminator_plugin.py
+
+#### DiscriminatorPlugin Class
+
+- The `DiscriminatorPlugin` class implements the functionality for the discriminator model. It loads the pre-trained discriminator model and provides methods for evaluating real and synthetic data.
+
+#### Key Methods
+
+- `load_model()`: Loads the pre-trained discriminator model from the specified file.
+- `evaluate()`: Evaluates the provided data (real or synthetic) using the loaded discriminator model.
+
+### app/optimizer_plugin.py
+
+#### OptimizerPlugin Class
+
+- The `OptimizerPlugin` class implements the functionality for hyperparameter optimization. It defines the search space, objective function, and optimization algorithm.
+
+#### Key Methods
+
+- `optimize()`: Performs the hyperparameter optimization, iteratively training and evaluating the model with different hyperparameter settings.
+

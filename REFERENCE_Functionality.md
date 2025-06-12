@@ -130,5 +130,64 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 *   **Key Inputs**: Real training/validation data, pre-trained VAE decoder, hyperparameter search space definition.
 *   **Key Outputs**: Optimal hyperparameter configuration, logs of the optimization process.
 
+## Key Functionalities
+
+### Generate Mode: Synthetic Data Generation and Prepending
+
+**Overview**:
+The "Generate Mode" is designed to produce synthetic time series data using pre-trained GAN models and prepend this data to an existing dataset. This is useful for augmenting datasets, creating historical data where none exists, or for specific simulation purposes. The core idea is to generate data that is chronologically earlier than the provided real data, seamlessly extending the dataset backwards in time, while ensuring that the generated timestamps fall only on weekdays.
+
+**Activation and Prerequisites**:
+*   `operation_mode` in `app/config.py` must be set to `"generate"`.
+*   Valid file paths for pre-trained full Generator and Discriminator Keras models must be provided via `load_generator_sequential_model_file` and `load_discriminator_sequential_model_file` respectively.
+*   `x_train_file` must point to the base real dataset.
+*   `n_samples` specifies the number of synthetic samples to generate.
+*   `dataset_periodicity` (e.g., "1h", "15min") is crucial for calculating time steps.
+
+**Process Flow**:
+
+1.  **Configuration Loading (`app/config_loader.py`)**:
+    *   The main configuration is loaded, including `operation_mode`, model paths, `x_train_file`, `n_samples`, `max_steps_train`, `dataset_periodicity`, and `generated_data_file`.
+
+2.  **Model Loading (e.g., in `app/main.py` or a dedicated generation module)**:
+    *   The full Generator and Discriminator models are loaded from the `.keras` files specified in the configuration. This uses standard Keras model loading functions.
+    *   `main.py` would orchestrate this based on `operation_mode == "generate"`.
+
+3.  **Base Data Loading and Preparation (`app/data_processor.py` or similar)**:
+    *   The `FeederPlugin` (or its underlying data loading capabilities) reads the initial segment of data from `x_train_file`. Only the first `max_steps_train` rows are loaded if the file is longer.
+    *   The `DATE_TIME` column of this loaded data is parsed.
+The first `DATE_TIME` entry from this segment becomes the reference point for generating earlier data.
+
+4.  **Synthetic Data Generation Loop (Orchestrated by `app/main.py`, potentially using `GeneratorPlugin` and `FeederPlugin` utilities)**:
+    *   **Target `DATE_TIME` Calculation**: The `DATE_TIME` of the first record from the loaded `x_train_file` segment is taken. Let this be `T_real_start`.
+    *   A loop runs `n_samples` times to generate each synthetic sample:
+        *   **Prospective `DATE_TIME` Calculation**: For the *k*-th synthetic sample (in reverse chronological order, so the first one generated is the one closest to `T_real_start`), its `DATE_TIME` (`T_synth_k`) is calculated by stepping back from `T_real_start` using `dataset_periodicity`. The very last synthetic sample generated (i.e., the `n_samples`-th one, which will be the earliest in the final dataset) will have its `DATE_TIME` calculated, and then subsequent synthetic samples will step forward towards `T_real_start`.
+        Alternatively, and more straightforwardly for prepending: calculate the `DATE_TIME` for the *last* synthetic sample to be generated (which will be the one immediately preceding `T_real_start`). This is `T_real_start - 1 * dataset_periodicity`. Then, for each of the `n_samples` to generate (iterating from `i = 0` to `n_samples - 1`), the target `DATE_TIME` for the *i*-th sample (when ordered from earliest to latest) would be `(T_real_start - (n_samples - i) * dataset_periodicity)`.
+        *   **Weekend Skipping**: The calculated `T_synth_k` is checked. If it falls on a Saturday or Sunday, it is skipped. The `DATE_TIME` is then adjusted to the preceding Friday. This means that the number of *actual* time steps (periods) skipped to find a valid weekday might be more than one `dataset_periodicity` unit. The generation process ensures `n_samples` *valid weekday* samples are created.
+        *   **Conditional Input Preparation (Leveraging `FeederPlugin` logic)**: For the determined weekday `T_synth_k`:
+            *   Cyclical features (hour of day, day of week, etc.) are derived from `T_synth_k`.
+            *   A noise vector (latent vector) is generated, typically by sampling from a normal distribution (e.g., using `numpy.random.normal`). The dimensions of this vector must match the input shape expected by the loaded Generator model.
+            *   These conditional inputs (cyclical features, noise) are combined into the format expected by the Generator.
+        *   **Feature Generation (Using `GeneratorPlugin`'s model)**: The prepared input is fed to the loaded Generator model (`generator.predict(...)`). This outputs the core (e.g., 49) generated features for `T_synth_k`.
+        *   **Full Feature Assembly**: The 51 features are assembled:
+            *   The generated features.
+            *   The `DATE_TIME` (`T_synth_k`).
+            *   Any other derivable features (e.g., if some TIs are static or directly calculable from `DATE_TIME` and not part of the generator's direct output).
+        *   The generated sample (all 51 features) is stored.
+
+5.  **Data Concatenation and Saving (`app/data_processor.py` or `app/main.py`)**:
+    *   The list of `n_samples` generated synthetic records (which are already in correct chronological order, from earliest to latest, all on weekdays) is converted into a DataFrame.
+    *   This DataFrame of synthetic data is concatenated with the DataFrame of the initially loaded segment from `x_train_file`. The synthetic data comes first.
+    *   The combined DataFrame is saved to the `output_dir/generated_data_file` (e.g., as a CSV file).
+
+**Interaction with Plugins**:
+*   **`FeederPlugin`**: Its utilities for date parsing, cyclical feature generation, and potentially data loading will be heavily leveraged. The logic for generating `DATE_TIME` sequences, especially with weekend skipping and adherence to `dataset_periodicity`, might require extending or adapting `FeederPlugin`'s date handling capabilities or implementing new functions within `app/data_processor.py` that use `FeederPlugin`'s helpers.
+*   **`GeneratorPlugin`**: While the plugin itself might not be directly instantiated in `generate` mode in the same way as in `train` mode (as it's tied to building models for training), the loaded Keras Generator *model* is central. The logic for preparing noise vectors and structuring inputs for the generator model will mirror what `GeneratorPlugin` does internally during training and prediction.
+*   **`DiscriminatorPlugin`**: The loaded Discriminator model is available but not actively used in the basic generation loop described. It could be used for optional validation of generated samples if desired.
+
+**Key Outputs**:
+*   A single data file (e.g., CSV) located at `output_dir/generated_data_file`, containing the `n_samples` of synthetic data followed by the initial `max_steps_train` rows from `x_train_file`.
+*   Log messages indicating the start and completion of the generation process, number of samples generated, and the path to the output file.
+
 ---
 *This document outlines the core functionality. For specific configuration details, file structures, and API definitions, please refer to `REFERENCE_Config_FileTree.md` and `REFERENCE_API.md`.*

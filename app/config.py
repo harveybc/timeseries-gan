@@ -14,7 +14,7 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
-    "operation_mode": "train", # Added: Default operation mode
+    "operation_mode": "train", # Added: Default operation mode, possible values: "train", "generate", "optimize"
     "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
 
     # Data for evaluation and base for generation
@@ -75,11 +75,12 @@ DEFAULT_VALUES = {
     "save_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_generator_model.keras",
     "save_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
     
-    # Old parameter, potentially remove or ensure it's not misused.
-    # For now, ensure GeneratorPlugin uses generator_vae_decoder_model_path_param
-    "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", # Retained for now, but ensure clarity
-    "discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
+    # Default load paths for  trained models for generation
+    "load_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", # Retained for now, but ensure clarity
+    "load_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
 
+    # Output filename for the generation mode
+    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o",
 
     "generator_decoder_input_window_size": 144, 
     "generator_full_feature_names_ordered": [

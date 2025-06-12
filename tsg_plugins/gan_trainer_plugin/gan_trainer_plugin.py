@@ -48,20 +48,32 @@ class GANTrainerPlugin(PluginBase):
     # Mandatory plugin_params class variable with defaults
     plugin_params: Dict[str, Any] = {
         # Core training parameters
-        "gan_epochs": 10000, "gan_batch_size": 32, "generator_lr": 1e-4, "generator_beta1": 0.5,
-        "discriminator_lr": 1e-4, "discriminator_beta1": 0.5, "gan_save_interval": 500,
+        "gan_epochs": 10000, "gan_batch_size": 32,
+        # Default learning rates, to be overridden by main_config's 'learning_rate',
+        # 'generator_lr', or 'discriminator_lr'
+        "generator_lr": 1e-4, "discriminator_lr": 1e-4,
+        "generator_beta1": 0.5, "discriminator_beta1": 0.5, "gan_save_interval": 500,
         
         # Discriminator architecture
         "discriminator_conv_filters": [64, 128], "discriminator_conv_kernel_size": 3,
         "discriminator_lstm_units": 64, "discriminator_dropout_rate": 0.3,
         
-        # Learning rate scheduling
-        "enable_reduce_lr_on_plateau": True, "lr_reduction_factor": 0.5, "lr_patience": 10, # Reduced for faster effect in testing, adjust as needed
-        "lr_min_delta": 0.001, "min_lr_g": 1e-7, "min_lr_d": 1e-7, "lr_monitor_metric_g": "g_loss", # Monitor g_loss for generator
-        "lr_monitor_metric_d": "d_loss", # Monitor d_loss for discriminator
+        # Learning rate scheduling - these keys MUST exist in the final config.
+        "enable_reduce_lr_on_plateau": True, 
+        "lr_reduction_factor": 0.1, # Default from config.py
+        "lr_patience": 10,          # Default from config.py
+        "lr_min_delta": 0.0001,     # Default from config.py
+        "min_lr_g": 1e-7,           # Default from config.py
+        "min_lr_d": 1e-7,           # Default from config.py
+        "lr_monitor_metric_g": "g_loss", # Default from config.py
+        "lr_monitor_metric_d": "d_loss", # Default from config.py
         
-        # Early stopping
-        "enable_early_stopping": True, "es_patience": 200, "es_min_delta": 0.001, "es_monitor_metric": "g_loss",
+        # Early stopping - these keys MUST exist in the final config.
+        "enable_early_stopping": True, 
+        "es_patience": 50, # More aggressive default for plugin_params, config.py has 10
+        "es_min_delta": 0.001, 
+        "es_monitor_metric": "g_loss",
+        "es_restore_best_weights": False, # Added default
         
         # Output directories
         "results_base_dir": "examples/results/phase_4_3", "save_model_dir": "models",
@@ -116,9 +128,11 @@ class GANTrainerPlugin(PluginBase):
             feeder_plugin: Instance of FeederPlugin.
         """
         self.logger = logging.getLogger(__name__)
-        self.main_config = config.copy()
-        self.params = {} # Initialize before set_params
-        self._initialize_parameters() # Call to populate self.params from main_config and defaults
+        self.main_config = config.copy() # Store main_config first
+        self.params = {} # Initialize before _initialize_parameters
+
+        # _initialize_parameters will populate self.params from main_config and plugin_params defaults
+        self._initialize_parameters() 
 
         # Store plugin instances
         if generator_plugin is None:
@@ -146,101 +160,104 @@ class GANTrainerPlugin(PluginBase):
         )
         self.logger.info("GANTrainerPlugin initialized.")
 
-        self.generator_l2_reg = self.params.get("generator_l2_reg")
+        # L2 reg is sourced via _initialize_parameters into self.params
+        # self.generator_l2_reg = self.params.get("generator_l2_reg") # Already handled by _initialize_parameters
 
         # Initialize ReduceLROnPlateau callbacks
-        if self.params.get("enable_reduce_lr_on_plateau"):
+        # Parameters are now expected to be in self.params after _initialize_parameters
+        if self.params["enable_reduce_lr_on_plateau"]: # Use direct access, will raise KeyError if missing
             self.lr_scheduler_g = ReduceLROnPlateau(
-                monitor=self.params.get("lr_monitor_metric_g", "g_loss"),
-                factor=self.params.get("lr_reduction_factor"),
-                patience=self.params.get("lr_patience"),
+                monitor=self.params["lr_monitor_metric_g"],
+                factor=self.params["lr_reduction_factor"],
+                patience=self.params["lr_patience"],
                 verbose=1,
-                min_delta=self.params.get("lr_min_delta"),
-                min_lr=self.params.get("min_lr_g")
+                min_delta=self.params["lr_min_delta"],
+                min_lr=self.params["min_lr_g"]
             )
             self.lr_scheduler_d = ReduceLROnPlateau(
-                monitor=self.params.get("lr_monitor_metric_d", "d_loss"),
-                factor=self.params.get("lr_reduction_factor"),
-                patience=self.params.get("lr_patience"),
+                monitor=self.params["lr_monitor_metric_d"],
+                factor=self.params["lr_reduction_factor"],
+                patience=self.params["lr_patience"],
                 verbose=1,
-                min_delta=self.params.get("lr_min_delta"),
-                min_lr=self.params.get("min_lr_d")
+                min_delta=self.params["lr_min_delta"],
+                min_lr=self.params["min_lr_d"]
             )
-            # Associate models with schedulers - this needs to happen after models are compiled
-            # We will call them manually in the training loop.
         else:
             self.lr_scheduler_g = None
             self.lr_scheduler_d = None
         
-        self.feeder_plugin = feeder_plugin # Store feeder plugin
+        # self.feeder_plugin = feeder_plugin # Already stored
 
         # Initialize EarlyStopping callback
         self.early_stopping_callback = None
-        if self.params.get("enable_early_stopping"):
-            self.logger.info(f"Early stopping enabled. Metric: {self.params.get('es_monitor_metric')}, Patience: {self.params.get('es_patience')}")
+        if self.params["enable_early_stopping"]: # Use direct access
+            self.logger.info(f"Early stopping enabled. Metric: {self.params['es_monitor_metric']}, Patience: {self.params['es_patience']}")
             self.early_stopping_callback = EarlyStopping(
-                monitor=self.params.get("es_monitor_metric", "g_loss"),
-                min_delta=self.params.get("es_min_delta", 0.001),
-                patience=self.params.get("es_patience", 50), # Defaulted to 50 from 200 for quicker testing if needed
+                monitor=self.params["es_monitor_metric"],
+                min_delta=self.params["es_min_delta"],
+                patience=self.params["es_patience"],
                 verbose=1,
-                mode='min', # Assuming lower loss is better
-                restore_best_weights=self.params.get("es_restore_best_weights", False) # Default to False
+                mode='min', 
+                restore_best_weights=self.params["es_restore_best_weights"]
             )
         else:
             self.logger.info("Early stopping is disabled by configuration.")
 
     def _initialize_parameters(self):
         self.logger.debug(f"GANTrainerPlugin: _initialize_parameters called.")
-        self.logger.debug(f"Initial plugin_params['gan_epochs']: {self.plugin_params.get('gan_epochs')}")
         
+        # Start with plugin_params defaults
         self.params = self.plugin_params.copy()
-        self.logger.debug(f"self.params after copy from plugin_params - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
+        self.logger.debug(f"self.params initialized with plugin_params defaults. Keys: {list(self.params.keys())}")
 
         if hasattr(self, 'main_config') and self.main_config is not None:
-            self.logger.debug(f"main_config available. main_config.get('gan_epochs'): {self.main_config.get('gan_epochs')}")
-            self.logger.debug(f"main_config.get('trainer_gan_epochs'): {self.main_config.get('trainer_gan_epochs')}")
-
-            # Phase 1: Apply direct/general parameters from main_config
-            # These are keys in main_config that are also in self.params (plugin_params keys)
-            # OR general keys (not prefixed for other specific plugins).
+            self.logger.debug(f"main_config available. Merging main_config into self.params.")
+            
+            # Override self.params with values from main_config
+            # This ensures main_config (from config.py, CLI) takes precedence
             for key, value in self.main_config.items():
-                is_plugin_default_key = key in self.params # Check if 'key' is a direct parameter name defined in plugin_params
-                is_general_app_key = not key.startswith(("generator_", "discriminator_", "feeder_", "trainer_")) # Check if it's a general key
+                self.params[key] = value # Direct override or addition
+                if key in self.plugin_params:
+                    self.logger.debug(f"Overrode/updated self.params['{key}'] with value from main_config: {value}")
+                else:
+                    self.logger.debug(f"Added new key self.params['{key}'] from main_config: {value}")
 
-                if key == 'gan_epochs': # Specific log for gan_epochs
-                    self.logger.debug(f"Processing 'gan_epochs' in main_config Phase 1. Value: {value}. is_plugin_default_key: {is_plugin_default_key}")
+            # Handle specific learning rate logic:
+            # If 'learning_rate' is in main_config, it sets the base for G and D LRs.
+            # Individual 'generator_lr' or 'discriminator_lr' in main_config can override this.
+            
+            general_lr = self.main_config.get("learning_rate")
 
-                if is_plugin_default_key:
-                    # If the key from main_config matches a key in plugin_params, update it.
-                    # e.g., if main_config has "gan_epochs", it updates self.params["gan_epochs"]
-                    self.params[key] = value
-                    if key == 'gan_epochs':
-                        self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 1.")
-                elif is_general_app_key:
-                    # If it's a general key not defined in plugin_params and not for other plugins, add it.
-                    # This allows passing through other general configurations.
-                    self.params[key] = value
+            if general_lr is not None:
+                self.logger.info(f"Found 'learning_rate': {general_lr} in main_config. Setting as base for G/D LRs.")
+                # Set 'generator_lr' from 'learning_rate' if 'generator_lr' isn't explicitly in main_config
+                if "generator_lr" not in self.main_config:
+                    self.params["generator_lr"] = general_lr
+                    self.logger.info(f"Set self.params['generator_lr'] to general 'learning_rate': {general_lr}")
+                # Set 'discriminator_lr' from 'learning_rate' if 'discriminator_lr' isn't explicitly in main_config
+                if "discriminator_lr" not in self.main_config:
+                    self.params["discriminator_lr"] = general_lr
+                    self.logger.info(f"Set self.params['discriminator_lr'] to general 'learning_rate': {general_lr}")
             
-            self.logger.debug(f"self.params after Phase 1 - self.params['gan_epochs']: {self.params.get('gan_epochs')}")
-            
-            # Phase 2: Apply trainer-specific prefixed parameters from main_config.
-            # These are intended to override values set in Phase 1 if they map to the same parameter name.
+            # Ensure trainer-prefixed parameters from main_config also override:
+            # e.g. if main_config has "trainer_generator_lr", it should set self.params["generator_lr"]
             trainer_prefix = "trainer_"
             for key, value in self.main_config.items():
                 if key.startswith(trainer_prefix):
                     param_key = key[len(trainer_prefix):]
-                    # Only apply if param_key corresponds to an original parameter name in plugin_params.
-                    # This ensures that `trainer_` prefixed keys specifically target existing plugin params.
-                    if param_key == 'gan_epochs': # Specific log
-                        self.logger.debug(f"Processing prefixed key '{key}' (param_key 'gan_epochs') in main_config Phase 2. Value: {value}.")
-                    if param_key in self.plugin_params: 
+                    # Check if this unprefixed key is a known parameter (either from plugin_params or already set from non-prefixed main_config)
+                    if param_key in self.params: 
                         self.params[param_key] = value
-                        if param_key == 'gan_epochs':
-                             self.logger.debug(f"Set self.params['gan_epochs'] = {value} in Phase 2 from prefixed key '{key}'.")
+                        self.logger.debug(f"Overrode self.params['{param_key}'] with value from prefixed key '{key}' in main_config: {value}")
+                    # If param_key was not in plugin_params, it might be a new param introduced by main_config.
+                    # This case is already handled by the general loop above if the key `param_key` itself was in main_config.
+                    # This specific block is for `trainer_` prefixed versions of existing params.
         else:
-            self.logger.debug("main_config not available in _initialize_parameters.")
+            self.logger.debug("main_config not available. self.params relies solely on plugin_params defaults.")
         
-        self.logger.info(f"GANTrainerPlugin params fully initialized. Final self.params.get('gan_epochs'): {self.params.get('gan_epochs')}")
+        self.logger.info(f"GANTrainerPlugin params fully initialized. Final self.params keys: {list(self.params.keys())}")
+        self.logger.info(f"Final resolved generator_lr: {self.params.get('generator_lr')}, discriminator_lr: {self.params.get('discriminator_lr')}")
+        self.logger.info(f"Final resolved lr_patience: {self.params.get('lr_patience')}")
 
     def set_params(self, **kwargs) -> None:
         """
@@ -360,8 +377,8 @@ class GANTrainerPlugin(PluginBase):
                                  f"num_trainable_vars: {len(disc_layer_in_gan.trainable_variables)}")
             
             generator_optimizer_config = {
-                'learning_rate': self.params.get('generator_lr', 1e-4), # Corrected key
-                'beta_1': self.params.get('generator_beta1', 0.5)     # Corrected key
+                'learning_rate': self.params["generator_lr"], # Direct access, expect key to exist
+                'beta_1': self.params["generator_beta1"]      # Direct access
             }
             self.logger.info(f"GANTrainer: Generator optimizer config for GAN: {generator_optimizer_config}")
             gan_optimizer = tf.keras.optimizers.Adam(**generator_optimizer_config)

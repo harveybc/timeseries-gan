@@ -55,10 +55,12 @@ This section details the configuration parameters used in the `timeseries-gan` p
 -   `"feeder_noise_dim"`: `32` (Noise dimension for the feeder plugin, potentially different from GAN's main `noise_dim` if feeder generates structured noise for VAE's Z-space)
 
 ### Generator Plugin Parameters (`GeneratorPlugin`)
--   `"generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras"` (Path to the pre-trained VAE decoder model, used as part of the composite generator)
--   `"discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to a pre-trained discriminator model, if available/used)
--   `"save_generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras"` (Path to save the trained generator model)
--   `"save_discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to save the trained discriminator model)
+-   `"generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras"` (Path to the pre-trained VAE decoder model, used as part of the composite generator during *training* if `generator_model_path` is None. For *generation mode*, `load_generator_sequential_model_file` is used for the full generator.)
+-   `"discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to a pre-trained discriminator model, if available/used for *training*. For *generation mode*, `load_discriminator_sequential_model_file` is used.)
+-   `"save_generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_generator_model.keras"` (Path to save the trained generator model after *training*.)
+-   `"save_discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to save the trained discriminator model after *training*.)
+-   `"load_generator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_generator_model.keras"` (Path to load a pre-trained full generator model for *generation mode*.)
+-   `"load_discriminator_sequential_model_file"`: `"examples/results/phase_4_3/phase_4_3_discriminator_model.keras"` (Path to load a pre-trained full discriminator model for *generation mode*.)
 -   `"generator_decoder_input_window_size"`: `144` (Input window size for the VAE decoder component)
 -   `"generator_full_feature_names_ordered"`: List of 51 feature names in the exact order expected for the final generated output. Includes OHLC, technical indicators, cyclical date/time features, fundamental data, and placeholders.
     *   Example: `["DATE_TIME", "OPEN", ..., "Market_Volatility_Idx"]`
@@ -101,6 +103,7 @@ This section details the configuration parameters used in the `timeseries-gan` p
 -   `"log_interval"`: `100` (Logging frequency, e.g., every 100 batches/steps)
 -   `"save_model_interval"`: `5000` (Model saving frequency during training)
 -   `"output_dir"`: `"examples/results/phase_4_3/"` (Directory for saving results like generated data, models)
+-   `"generated_data_file"`: `"generated_timeseries_data.csv"` (Default filename for saving data produced in *generation mode*, typically within `output_dir`.)
 -   `"log_dir"`: `"examples/logs/phase_4_3/"` (Directory for saving log files)
 -   `"tensorboard_log_dir"`: `"examples/logs/phase_4_3/tensorboard/"` (Directory for TensorBoard logs)
 -   `"wandb_project"`: `"timeseries-gan"` (Weights & Biases project name)

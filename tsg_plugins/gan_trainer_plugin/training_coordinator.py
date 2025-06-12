@@ -43,17 +43,30 @@ class TrainingCoordinator:
     
     def _setup_optimizers(self):
         """Setup optimizers for generator and discriminator."""
+        # Parameters are expected to be in self.params, sourced from main_config
+        # Use direct access (self.params[key]) to ensure error if missing critical param
+        try:
+            gen_lr = self.params["generator_lr"]
+            gen_beta1 = self.params["generator_beta1"]
+            disc_lr = self.params["discriminator_lr"]
+            disc_beta1 = self.params["discriminator_beta1"]
+        except KeyError as e:
+            self.logger.error(f"Missing critical optimizer parameter in self.params: {e}. "
+                              f"Ensure 'generator_lr', 'generator_beta1', 'discriminator_lr', 'discriminator_beta1' "
+                              f"are defined in config.py or plugin defaults and correctly passed.")
+            raise
+
         self.generator_optimizer = Adam(
-            learning_rate=self.params.get("generator_lr", 1e-4),
-            beta_1=self.params.get("generator_beta1", 0.5)
+            learning_rate=gen_lr,
+            beta_1=gen_beta1
         )
         
         self.discriminator_optimizer = Adam(
-            learning_rate=self.params.get("discriminator_lr", 1e-4),
-            beta_1=self.params.get("discriminator_beta1", 0.5)
+            learning_rate=disc_lr,
+            beta_1=disc_beta1
         )
         
-        self.logger.info("Optimizers setup complete")
+        self.logger.info(f"Optimizers setup complete. G_LR: {gen_lr}, D_LR: {disc_lr}")
     
     def train(self, generator: tf.keras.Model, discriminator: tf.keras.Model, 
               gan_model: tf.keras.Model, feeder_plugin: Any, 
@@ -214,9 +227,20 @@ class TrainingCoordinator:
 
             # Call ReduceLROnPlateau callbacks
             if lr_scheduler_g:
-                lr_scheduler_g.on_epoch_end(epoch, logs={'g_loss': g_loss, 'lr': K.get_value(self.generator_optimizer.learning_rate)})
+                # Ensure the optimizer in the model that ReduceLROnPlateau is monitoring is the one we just created.
+                # The model (gan_model) should have been compiled with an optimizer instance.
+                # We need to ensure K.get_value(model.optimizer.learning_rate) works.
+                # If ReduceLROnPlateau was given a model that was compiled with a *different* optimizer instance,
+                # or if the learning rate is managed externally to that optimizer instance, this might not reflect correctly.
+                # However, standard Keras behavior is that ReduceLROnPlateau modifies the LR of the optimizer
+                # attached to the model it was .set_model() with.
+                current_g_lr = K.get_value(self.generator_optimizer.learning_rate) # Get LR from TC's optimizer instance
+                lr_scheduler_g.on_epoch_end(epoch, logs={'g_loss': g_loss, 'lr': current_g_lr})
+                self.logger.debug(f"Called lr_scheduler_g.on_epoch_end. Monitored g_loss: {g_loss:.4f}, Reported G_LR: {current_g_lr:.1e}")
             if lr_scheduler_d:
-                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss_avg, 'lr': K.get_value(self.discriminator_optimizer.learning_rate)})
+                current_d_lr = K.get_value(self.discriminator_optimizer.learning_rate) # Get LR from TC's optimizer instance
+                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss_avg, 'lr': current_d_lr})
+                self.logger.debug(f"Called lr_scheduler_d.on_epoch_end. Monitored d_loss: {d_loss_avg:.4f}, Reported D_LR: {current_d_lr:.1e}")
             
             # Handle Early Stopping
             if early_stopping_callback:
@@ -240,17 +264,17 @@ class TrainingCoordinator:
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
             if (epoch + 1) % log_interval_epochs == 0:
                 log_msg = (
-                    f"Epoch {epoch+1}/{final_epochs} - " # Use final_epochs
+                    f"Epoch {epoch+1}/{final_epochs} - "
                     f"G_loss: {g_loss:.4f}, D_loss: {d_loss_avg:.4f} "
                     f"(Real: {d_loss_real_avg:.4f}, Fake: {d_loss_fake_avg:.4f}), "
                     f"G_LR: {K.get_value(self.generator_optimizer.learning_rate):.1e}, "
                     f"D_LR: {K.get_value(self.discriminator_optimizer.learning_rate):.1e}, "
                 )
                 if lr_scheduler_g and hasattr(lr_scheduler_g, 'wait'):
-                    log_msg += f"G_Patience: {getattr(lr_scheduler_g, 'wait', 'N/A')}, "
+                    log_msg += f"G_Patience: {getattr(lr_scheduler_g, 'wait', 'N/A')}/{getattr(lr_scheduler_g, 'patience', 'N/A')}, "
                     log_msg += f"G_Cooldown: {getattr(lr_scheduler_g, 'cooldown_counter', 'N/A')}, "
                 if lr_scheduler_d and hasattr(lr_scheduler_d, 'wait'):
-                    log_msg += f"D_Patience: {getattr(lr_scheduler_d, 'wait', 'N/A')}, "
+                    log_msg += f"D_Patience: {getattr(lr_scheduler_d, 'wait', 'N/A')}/{getattr(lr_scheduler_d, 'patience', 'N/A')}, "
                     log_msg += f"D_Cooldown: {getattr(lr_scheduler_d, 'cooldown_counter', 'N/A')}, "
                 log_msg += f"Time: {epoch_time:.2f}s"
                 self.logger.info(log_msg)

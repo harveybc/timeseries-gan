@@ -15,7 +15,11 @@ Author: TimeSeries-GAN Team
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List, TYPE_CHECKING # Added List
+
+if TYPE_CHECKING:
+    import tensorflow # For type hinting tf.keras.Model
+    from pandas import Series as pd_Series # For type hinting pd.Series explicitly
 
 
 class SyntheticDataGenerator:
@@ -146,7 +150,7 @@ class SyntheticDataGenerator:
             print(f"ERROR: Failed to prepare initial window: {e}")
             return {'features': None, 'datetimes': None, 'prev_close': None}
     
-    def _generate_target_datetimes(self, n_samples: int) -> pd.Series:
+    def _generate_target_datetimes(self, n_samples: int) -> 'pd_Series': # Use pd_Series alias
         """
         Generate target datetime sequence for synthetic data.
         If x_train_file is available, the sequence will lead up to the first datetime in x_train_file.
@@ -156,7 +160,7 @@ class SyntheticDataGenerator:
             n_samples: Number of datetime samples to generate
             
         Returns:
-            pd.Series: Generated datetime sequence
+            pd.Series: Generated datetime sequence, aliased as pd_Series for type hinting
         """
         try:
             dataset_periodicity = self.config.get("dataset_periodicity", "1h")
@@ -218,12 +222,12 @@ class SyntheticDataGenerator:
             # The logic above should handle this by generating backwards.
 
             print(f"Generated {len(generated_datetimes)} datetimes. First: {generated_datetimes[0]}, Last: {generated_datetimes[-1]}")
-            return pd.Series(pd.to_datetime(generated_datetimes))
+            return pd.Series(pd.to_datetime(generated_datetimes)) # Runtime uses pd.Series
             
         except Exception as e:
             print(f"Warning: Failed to generate target datetimes: {e}. Falling back to simple sequence.")
             # Fallback to simple sequence leading up to now (original fallback)
-            return pd.Series([datetime.now() - timedelta(hours=(n_samples - 1 - i)) for i in range(n_samples)])
+            return pd.Series([datetime.now() - timedelta(hours=(n_samples - 1 - i)) for i in range(n_samples)]) # Runtime uses pd.Series
     
     def _generate_datetime_sequence(self, start_datetime_str: str, num_samples: int, 
                                    periodicity_str: str) -> list:
@@ -273,13 +277,13 @@ class SyntheticDataGenerator:
         
         return datetimes
 
-    def _convert_to_dataframe(self, generated_values, target_datetimes: pd.Series) -> pd.DataFrame:
+    def _convert_to_dataframe(self, generated_values: Any, target_datetimes: 'pd_Series') -> pd.DataFrame: # Use pd_Series alias
         """
         Convert generated values to DataFrame with proper column names and datetime format.
         
         Args:
             generated_values: Generated values from generator plugin
-            target_datetimes: Target datetime sequence
+            target_datetimes: Target datetime sequence (Pandas Series, aliased as pd_Series for type hinting)
             
         Returns:
             pd.DataFrame: Formatted synthetic data
@@ -288,7 +292,7 @@ class SyntheticDataGenerator:
             # Get feature names from generator configuration
             # Ensure 'DATE_TIME' is NOT in these feature_names if it's handled separately
             feature_names = self.config.get("generator_full_feature_names_ordered", [])
-            # Remove 'DATE_TIME' if it exists in the feature list, as it's added separately
+            # Remove 'DATE_TIME' if it exists in feature_names, as it's added separately
             if "DATE_TIME" in feature_names:
                 feature_names = [name for name in feature_names if name != "DATE_TIME"]
 
@@ -331,6 +335,7 @@ class SyntheticDataGenerator:
                                             columns=[f"feature_{i}" for i in range(n_features)])
             
             # Add datetime column and format it
+            # Ensure target_datetimes.values is compatible if it's a pd_Series alias
             synthetic_data[datetime_col_name] = pd.to_datetime(target_datetimes.values).strftime('%Y-%m-%d %H:%M:%S')
             
             # Reorder columns to have datetime_col_name first, then others as per generator_full_feature_names_ordered
@@ -343,6 +348,7 @@ class SyntheticDataGenerator:
             print(f"Warning: DataFrame conversion failed, using basic format: {e}")
             # Fallback to simple DataFrame
             df = pd.DataFrame()
+            # Ensure target_datetimes.values is compatible
             df[self.config.get("feeder_datetime_col_in_real_data", "DATE_TIME")] = pd.to_datetime(target_datetimes.values).strftime('%Y-%m-%d %H:%M:%S')
             # Add generated data, ensuring it's 2D
             if hasattr(generated_values, 'ndim'):
@@ -355,3 +361,52 @@ class SyntheticDataGenerator:
                  df['generated_data'] = generated_values
 
             return df
+        
+    def generate_features_for_datetimes(self, target_datetimes: 'pd_Series', generator_model: 'tensorflow.keras.Model') -> pd.DataFrame:
+        """
+        Generates synthetic features for a given Series of target datetimes using a pre-loaded generator model.
+
+        Args:
+            target_datetimes: A Pandas Series of pd.Timestamp objects (or convertible to Timestamp) 
+                              for which to generate data. Type hinted as 'pd_Series'.
+            generator_model: The pre-loaded Keras generator model. Type hinted as 'tensorflow.keras.Model'.
+
+        Returns:
+            pd.DataFrame: Generated synthetic data with DATE_TIME and feature columns,
+                          ordered according to 'generator_full_feature_names_ordered'.
+        
+        Raises:
+            RuntimeError: If synthetic feature generation fails.
+        """
+        n_samples = len(target_datetimes)
+        if n_samples == 0:
+            print("No target datetimes provided, returning empty DataFrame.")
+            return pd.DataFrame()
+
+        try:
+            print(f"Generating conditional inputs for {n_samples} target datetimes...")
+            # Ensure feeder_plugin.generate can handle a pd.Series of datetimes
+            # and its output is suitable for generator_model.predict()
+            feeder_outputs = self.feeder_plugin.generate(
+                n_ticks_to_generate=n_samples,
+                target_datetimes=target_datetimes # Pass the pd.Series directly
+            )
+            # feeder_outputs is expected to be the conditional input for the generator model.
+            # This might be a NumPy array or a dictionary/list of arrays depending on the model.
+
+            print(f"Predicting features using the generator model for {n_samples} samples...")
+            # Assuming generator_model is a Keras model and has .predict()
+            generated_values = generator_model.predict(feeder_outputs)
+
+            print("Assembling generated features into DataFrame...")
+            # Use the existing _convert_to_dataframe method for consistency
+            # It expects target_datetimes to be a pd.Series (or 'pd_Series' alias)
+            synthetic_data_df = self._convert_to_dataframe(generated_values, target_datetimes)
+            
+            print(f"✓ Synthetic features generated for {n_samples} datetimes. Shape: {synthetic_data_df.shape}")
+            return synthetic_data_df
+
+        except Exception as e:
+            import traceback
+            print(f"ERROR: Failed to generate features for datetimes: {e}\\n{traceback.format_exc()}")
+            raise RuntimeError(f"Synthetic feature generation for specific datetimes failed: {e}")
