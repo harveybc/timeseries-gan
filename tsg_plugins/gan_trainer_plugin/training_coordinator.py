@@ -209,14 +209,14 @@ class TrainingCoordinator:
             
             self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Starting discriminator training step...")
             # Train discriminator
-            d_loss_avg, d_loss_real_avg, d_loss_fake_avg = self._train_discriminator_step(
+            d_loss_avg, d_loss_real_avg, d_loss_fake_avg, d_metrics = self._train_discriminator_step(
                 real_data, generator, discriminator, final_batch_size, train_discriminator_n_times # Use final_batch_size
             )
             self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Discriminator training step completed. D_loss_avg: {d_loss_avg:.4f}, D_loss_real: {d_loss_real_avg:.4f}, D_loss_fake: {d_loss_fake_avg:.4f}")
             
             self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Starting generator training step...")
             # Train generator
-            g_loss = self._train_generator_step(
+            g_loss, g_metrics = self._train_generator_step(
                 gan_model, final_batch_size, train_generator_n_times # Use final_batch_size
             )
             self.logger.debug(f"Epoch {epoch+1}/{final_epochs}: Generator training step completed. G_loss: {g_loss:.4f}")
