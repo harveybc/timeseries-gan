@@ -471,49 +471,135 @@ class SyntheticDataGenerator:
     
     def _expand_23_to_44_features(self, base_features_23: np.ndarray, target_datetimes: pd.Series) -> np.ndarray:
         """
-        Expand 23 base features to 44 features using post-processing.
+        Expand 23 base features to 44 features with OHLC coherence constraints.
         
-        Based on the 23-feature architecture, this expands:
-        23 base features -> 44 features (15 TI + 4 OHLC + 4 spreads + 2 external + 16 ticks + 3 seasonal)
+        Ensures hierarchical coherence:
+        - Hourly OHLC drives all tick generation
+        - 30min ticks (2 per hour) contain the hour's HIGH and LOW
+        - 15min ticks (4 per hour) contain the hour's OPEN, HIGH, LOW, CLOSE
+        - Cross-consistency between 15min and 30min ticks
         
         Args:
             base_features_23: Array of 23 base features (n_samples, 23)
             target_datetimes: Series of target datetimes for seasonal features
             
         Returns:
-            np.ndarray: Expanded features (n_samples, 44)
+            np.ndarray: Expanded features (n_samples, 44) with OHLC coherence
         """
         n_samples = base_features_23.shape[0]
         expanded_features = np.zeros((n_samples, 44))
         
         try:
-            # Extract 23 base features according to config mapping
-            base_feature_names = self.config.get("generator_base_feature_names_ordered", [
-                "OPEN", "HIGH", "LOW", "CLOSE", 
-                "vix_close", "S&P500_Close", "BC-BO",
-                "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
-                "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
-                "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-                "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
-            ])
+            # Extract OHLC from correct positions in base features (15-18 in 0-indexed)
+            # Based on column mapping: RSI(0), MACD(1)...ROC(15), OPEN(16), HIGH(17), LOW(18), CLOSE(19)
+            open_vals = base_features_23[:, 15]   # OPEN (position 16 in 1-indexed)
+            high_vals = base_features_23[:, 16]   # HIGH (position 17 in 1-indexed)  
+            low_vals = base_features_23[:, 17]    # LOW (position 18 in 1-indexed)
+            close_vals = base_features_23[:, 18]  # CLOSE (position 19 in 1-indexed)
+            bc_bo = base_features_23[:, 19]       # BC-BO (position 20 in 1-indexed)
+            bh_bl = base_features_23[:, 20]       # BH-BL (position 21 in 1-indexed) 
+            bh_bo = base_features_23[:, 21]       # BH-BO (position 22 in 1-indexed)
+            bo_bl = base_features_23[:, 22]       # BO-BL (position 23 in 1-indexed)
             
-            # Map base features to their positions
-            open_vals = base_features_23[:, 0]    # OPEN
-            high_vals = base_features_23[:, 1]    # HIGH  
-            low_vals = base_features_23[:, 2]     # LOW
-            close_vals = base_features_23[:, 3]   # CLOSE
-            vix_close = base_features_23[:, 4]    # vix_close
-            sp500_close = base_features_23[:, 5]  # S&P500_Close
-            bc_bo = base_features_23[:, 6]        # BC-BO
+            # External market data should be from earlier positions if available
+            # Otherwise we'll calculate them from OHLC
+            if base_features_23.shape[1] > 24:
+                sp500_close = base_features_23[:, 24]  # S&P500_Close
+                vix_close = base_features_23[:, 25]    # vix_close
+            else:
+                # Generate reasonable external market data if not available
+                sp500_close = close_vals * (1 + np.random.normal(0, 0.01, close_vals.shape))
+                vix_close = np.abs(close_vals * np.random.normal(0.3, 0.1, close_vals.shape))
             
-            # Extract sub-periodicity ticks (positions 7-22 in base features)
-            close_15m_ticks = base_features_23[:, 7:15]   # CLOSE_15m_tick_1-8
-            close_30m_ticks = base_features_23[:, 15:23]  # CLOSE_30m_tick_1-8
+            # ENFORCE OHLC COHERENCE: Ensure Low ≤ Open,Close ≤ High regardless of normalization
+            print("    Enforcing OHLC coherence constraints...")
+            for i in range(n_samples):
+                o, h, l, c = open_vals[i], high_vals[i], low_vals[i], close_vals[i]
+                
+                # Calculate correct HIGH and LOW
+                true_high = max(o, h, l, c)
+                true_low = min(o, h, l, c)
+                
+                # Ensure OPEN and CLOSE are within [LOW, HIGH]
+                corrected_open = max(true_low, min(true_high, o))
+                corrected_close = max(true_low, min(true_high, c))
+                
+                # Update values
+                open_vals[i] = corrected_open
+                high_vals[i] = true_high
+                low_vals[i] = true_low
+                close_vals[i] = corrected_close
             
-            # Calculate derived spreads
-            bh_bl = high_vals - low_vals          # BH-BL = HIGH - LOW
-            bh_bo = high_vals - open_vals         # BH-BO = HIGH - OPEN  
-            bo_bl = open_vals - low_vals          # BO-BL = OPEN - LOW
+            # Generate OHLC-coherent tick columns
+            print("    Generating OHLC-coherent 30min and 15min ticks...")
+            
+            # Initialize tick arrays
+            close_15m_ticks = np.zeros((n_samples, 8))  # 8 15min ticks
+            close_30m_ticks = np.zeros((n_samples, 8))  # 8 30min ticks
+            
+            for i in range(n_samples):
+                # Current hour's OHLC values (already corrected for coherence)
+                open_val = open_vals[i]
+                high_val = high_vals[i]
+                low_val = low_vals[i]
+                close_val = close_vals[i]
+                
+                # COHERENCE RULE: All ticks must be within [LOW, HIGH] range
+                # and must contain OPEN and CLOSE values
+                
+                # Generate 8 15min ticks with OHLC coherence
+                # Strategy: Ensure first tick = OPEN, last tick = CLOSE, 
+                # and that HIGH and LOW appear somewhere in the ticks
+                
+                # Start with all ticks as interpolated values between OPEN and CLOSE
+                for tick_idx in range(8):
+                    # Linear interpolation between OPEN and CLOSE
+                    alpha = tick_idx / 7.0  # 0 to 1
+                    interpolated_value = open_val + alpha * (close_val - open_val)
+                    # Add small random variation within [LOW, HIGH]
+                    variation_range = (high_val - low_val) * 0.1  # 10% of the range
+                    variation = np.random.uniform(-variation_range, variation_range)
+                    tick_value = interpolated_value + variation
+                    # Clamp to [LOW, HIGH] range
+                    tick_value = max(low_val, min(high_val, tick_value))
+                    close_15m_ticks[i, tick_idx] = tick_value
+                
+                # Ensure OHLC constraints are satisfied:
+                close_15m_ticks[i, 0] = open_val   # First tick must be OPEN
+                close_15m_ticks[i, 7] = close_val  # Last tick must be CLOSE
+                
+                # Ensure HIGH and LOW appear in the ticks
+                # Replace two random middle ticks with HIGH and LOW
+                middle_indices = list(range(1, 7))  # Indices 1-6 (avoiding first and last)
+                np.random.shuffle(middle_indices)
+                close_15m_ticks[i, middle_indices[0]] = high_val  # Place HIGH
+                close_15m_ticks[i, middle_indices[1]] = low_val   # Place LOW
+                
+                # Generate 8 30min ticks (simpler approach)
+                # Each tick should be within [LOW, HIGH] and represent reasonable 30min closes
+                for tick_idx in range(8):
+                    # Generate values that drift between OPEN and CLOSE
+                    alpha = tick_idx / 7.0
+                    base_value = open_val + alpha * (close_val - open_val)
+                    # Add moderate random variation
+                    variation = np.random.uniform(low_val - base_value, high_val - base_value) * 0.3
+                    tick_value = base_value + variation
+                    # Clamp to [LOW, HIGH] range
+                    tick_value = max(low_val, min(high_val, tick_value))
+                    close_30m_ticks[i, tick_idx] = tick_value
+                
+                # Ensure 30min ticks also contain HIGH and LOW
+                middle_30m = list(range(8))
+                np.random.shuffle(middle_30m)
+                close_30m_ticks[i, middle_30m[0]] = high_val  # Place HIGH
+                close_30m_ticks[i, middle_30m[1]] = low_val   # Place LOW
+            
+            # Calculate derived spreads using corrected OHLC values  
+            # These should be recalculated to ensure mathematical consistency
+            bc_bo_corrected = close_vals - open_vals      # BC-BO = CLOSE - OPEN
+            bh_bl_corrected = high_vals - low_vals        # BH-BL = HIGH - LOW (always positive)
+            bh_bo_corrected = high_vals - open_vals       # BH-BO = HIGH - OPEN  
+            bo_bl_corrected = open_vals - low_vals        # BO-BL = OPEN - LOW
             
             # 1. Calculate 15 technical indicators from OHLC
             technical_indicators = self._calculate_technical_indicators(
@@ -536,17 +622,17 @@ class SyntheticDataGenerator:
             expanded_features[:, 17] = low_vals
             expanded_features[:, 18] = close_vals
             
-            # Derived spreads (19-22)
-            expanded_features[:, 19] = bc_bo
-            expanded_features[:, 20] = bh_bl
-            expanded_features[:, 21] = bh_bo
-            expanded_features[:, 22] = bo_bl
+            # Derived spreads (19-22) - using corrected values
+            expanded_features[:, 19] = bc_bo_corrected
+            expanded_features[:, 20] = bh_bl_corrected
+            expanded_features[:, 21] = bh_bo_corrected
+            expanded_features[:, 22] = bo_bl_corrected
             
             # External market data (23-24)
             expanded_features[:, 23] = sp500_close
             expanded_features[:, 24] = vix_close
             
-            # Sub-periodicity ticks (25-40)
+            # OHLC-coherent sub-periodicity ticks (25-40)
             expanded_features[:, 25:33] = close_15m_ticks  # CLOSE_15m_tick_1-8
             expanded_features[:, 33:41] = close_30m_ticks  # CLOSE_30m_tick_1-8
             

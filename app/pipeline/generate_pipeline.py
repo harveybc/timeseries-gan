@@ -206,9 +206,10 @@ class GeneratePipeline:
 
         try:
             real_data_segment_df[datetime_col_name] = pd.to_datetime(real_data_segment_df[datetime_col_name])
-            first_real_datetime = real_data_segment_df[datetime_col_name].iloc[0]
+            # Find the EARLIEST datetime in the real data (minimum datetime)
+            first_real_datetime = real_data_segment_df[datetime_col_name].min()
         except Exception as e:
-            raise ValueError(f"Could not parse datetimes in real data or get first datetime: {e}")
+            raise ValueError(f"Could not parse datetimes in real data or get earliest datetime: {e}")
 
         print(f"First datetime in real data: {first_real_datetime}")
 
