@@ -173,7 +173,7 @@ class DiscriminatorPlugin:
         conv_strides = self.params.get("conv_strides", [1,1,1]) 
         conv_activation = self.params.get("conv_activation", "leaky_relu")
         
-        lstm_units = self.params.get("lstm_units", 128)
+        lstm_units = self.params.get("lstm_units", 32)
         use_bidirectional_lstm = self.params.get("use_bidirectional_lstm", True)
         
         dense_units = self.params.get("dense_units", [64, 32])

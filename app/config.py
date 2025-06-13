@@ -207,18 +207,18 @@ DEFAULT_VALUES = {
     "l2_regularization": 1e-5,
 
     # Added: Discriminator Architecture Parameters - Updated for 44-feature architecture
-    "discriminator_conv_filters": [64,32,16,8],       # Decreasing filter sizes for proper dimensionality reduction
+    "discriminator_conv_filters": [64,32],       # Decreasing filter sizes for proper dimensionality reduction
     "discriminator_conv_kernel_size": 3,             # Larger kernel for better feature extraction
-    "discriminator_conv_strides": [2, 2,2,2],         # Stride=2 for downsampling at each layer
+    "discriminator_conv_strides": [2, 2,],         # Stride=2 for downsampling at each layer
     "discriminator_lstm_units": 32,                  # Reduced LSTM units 
     "discriminator_dense_units": [16, 8],            # Decreasing dense layer sizes
-    "discriminator_dropout_rate": 0.3,
+    "discriminator_dropout_rate": 0.0,
     "num_features": 23,                              # Training: Use 23 base features for GAN training
 
     # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
     "enable_mmd_loss": True,          # Enable/disable MMD loss
-    "mmd_lambda_g": 0.00001,            # Weight for MMD loss in generator
-    "mmd_lambda_d": 0.000001,           # Weight for MMD loss in discriminator (optional)
+    "mmd_lambda_g": 0.001,            # Weight for MMD loss in generator
+    "mmd_lambda_d": 0.0001,           # Weight for MMD loss in discriminator (optional)
     "mmd_gamma": None,               # RBF kernel bandwidth (None = auto)
     "mmd_sample_size": 128,          # Number of samples for MMD computation (performance)
 

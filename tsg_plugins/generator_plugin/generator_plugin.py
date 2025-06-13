@@ -377,17 +377,45 @@ class GeneratorPlugin(PluginBase):
         # This generates true sequential patterns with much fewer parameters
         sequential_noise_layer = SimpleRandomWalkNoiseLayer(
             seq_len=internal_z_seq_len, 
-            latent_dim=internal_z_dim
+            latent_dim=internal_z_dim,
+            name="sequential_noise_generator"
         )
         x = sequential_noise_layer(noise_input)
         self.logger.debug(f"Z-gen: Sequential noise output shape: {x.shape}")  # Should be (None, 18, 32)
-        self.logger.info(f"Z-gen: Using random walk approach with {sequential_noise_layer.count_params():,} parameters (vs {576 * (noise_dim + 1):,} for Dense+Reshape)")
+        
+        # Calculate parameter comparison for logging
+        random_walk_params = sequential_noise_layer.count_params() if hasattr(sequential_noise_layer, 'count_params') else (noise_dim * internal_z_dim)
+        dense_reshape_params = 576 * (noise_dim + 1)
+        self.logger.info(f"Z-gen: Using random walk approach with ~{random_walk_params:,} parameters (vs {dense_reshape_params:,} for Dense+Reshape)")
+        
+
+
+        # Apply additional processing to ensure proper latent representation
+        # Use Conv1D to refine the sequential noise to match VAE decoder expectations
+        self.logger.debug("Applying Conv1D to refine sequential noise for VAE decoder compatibility.")
+        
+        x = tf.keras.layers.Conv1D(
+            filters=32, 
+            kernel_size=3, 
+            activation='tanh', 
+            padding='same', 
+            name="z_conv1d_refinement1"
+        )(x)
+        
+
         lstm_layer = tf.keras.layers.LSTM(16, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
-        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='tanh', padding='same', name="z_conv1d_to_vae_spec")(x)
+        z_sequence_for_vae = tf.keras.layers.Conv1D(
+            filters=32, 
+            kernel_size=3, 
+            activation='tanh', 
+            padding='same', 
+            name="z_conv1d_refinement2"
+        )(x)
         self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
+
 
         # 3. Connect to the VAE Decoder
         self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
