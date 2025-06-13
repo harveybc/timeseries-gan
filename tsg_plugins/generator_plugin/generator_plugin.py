@@ -33,6 +33,76 @@ from .sequence_builder import SequenceBuilder
 
 logger = get_logger(__name__)
 
+class SimpleRandomWalkNoiseLayer(tf.keras.layers.Layer):
+    """
+    Simple layer that generates sequential noise using random walk.
+    This creates natural sequential correlation with minimal parameters.
+    
+    Much more efficient than Dense(576) + Reshape approach:
+    - Only uses one small Dense layer (noise_dim * latent_dim parameters)
+    - Creates true sequential patterns through random walk
+    - No heavy parameter overhead
+    """
+    
+    def __init__(self, seq_len: int = 18, latent_dim: int = 32, **kwargs):
+        super().__init__(**kwargs)
+        self.seq_len = seq_len
+        self.latent_dim = latent_dim
+        
+        # Only one dense layer to create initial state
+        self.initial_dense = tf.keras.layers.Dense(
+            latent_dim, 
+            activation='tanh', 
+            name="random_walk_initial"
+        )
+    
+    def call(self, inputs):
+        """
+        Generate sequential noise using random walk from initial state.
+        
+        Args:
+            inputs: Noise tensor of shape (batch_size, noise_dim)
+            
+        Returns:
+            Sequential noise tensor of shape (batch_size, seq_len, latent_dim)
+        """
+        batch_size = tf.shape(inputs)[0]
+        
+        # Generate initial state from noise
+        initial_state = self.initial_dense(inputs)  # (batch_size, latent_dim)
+        
+        # Generate random walk steps
+        random_steps = tf.random.normal(
+            (batch_size, self.seq_len - 1, self.latent_dim), 
+            stddev=0.1
+        )
+        
+        # Create random walk sequence
+        # Start with initial state, then add cumulative random steps
+        initial_expanded = tf.expand_dims(initial_state, axis=1)  # (batch_size, 1, latent_dim)
+        
+        # Cumulative sum of random steps to create walk
+        cumulative_steps = tf.cumsum(random_steps, axis=1)  # (batch_size, seq_len-1, latent_dim)
+        
+        # Add initial state to all steps
+        random_walk = initial_expanded + tf.concat([
+            tf.zeros_like(initial_expanded), 
+            cumulative_steps
+        ], axis=1)
+        
+        # Apply tanh to keep values in reasonable range
+        output_sequence = tf.tanh(random_walk)
+        
+        return output_sequence
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'seq_len': self.seq_len,
+            'latent_dim': self.latent_dim
+        })
+        return config
+
 class GeneratorPlugin(PluginBase):
     """
     Generator Plugin for the TimeSeries GAN.
@@ -272,7 +342,7 @@ class GeneratorPlugin(PluginBase):
         model = tf.keras.Model(inputs=noise_input, outputs=z_sequence_output, name="Internal_BiLSTM_Z_Generator")
         
         self.logger.info("Internal BiLSTM Z-Generator built.")
-        if self.params.get("print_model_summary", False):
+        if self.params.get("print_model_summary", True):
             model.summary(print_fn=self.logger.info)
         return model
 
@@ -301,13 +371,18 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
 
         # 2. Build or Get the Internal BiLSTM Z-Generator
-        self.logger.debug("Building internal BiLSTM Z-generator.")
+        self.logger.debug("Building internal BiLSTM Z-generator with improved sequential noise generation.")
         
-        x = tf.keras.layers.Dense(576, activation='tanh')(noise_input)
-        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
-        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
-        self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
+        # Use simple random walk approach instead of Dense+Reshape
+        # This generates true sequential patterns with much fewer parameters
+        sequential_noise_layer = SimpleRandomWalkNoiseLayer(
+            seq_len=internal_z_seq_len, 
+            latent_dim=internal_z_dim
+        )
+        x = sequential_noise_layer(noise_input)
+        self.logger.debug(f"Z-gen: Sequential noise output shape: {x.shape}")  # Should be (None, 18, 32)
+        self.logger.info(f"Z-gen: Using random walk approach with {sequential_noise_layer.count_params():,} parameters (vs {576 * (noise_dim + 1):,} for Dense+Reshape)")
+        lstm_layer = tf.keras.layers.LSTM(16, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
@@ -354,11 +429,22 @@ class GeneratorPlugin(PluginBase):
                 self.logger.info("Training mode: Using 23 base features directly from VAE decoder")
                 
                 # Create sequences directly from 23 base features
-                sequence_base = tf.keras.layers.RepeatVector(144)(vae_decoder_output)  # (batch_size, 144, 23)
+                sequence_base = tf.keras.layers.RepeatVector(36)(vae_decoder_output)  # (batch_size, 32, 23)
+
+                #use conv1dtranspopose with stride  = 2 
+                sequence_base = tf.keras.layers.Conv1DTranspose(
+                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_1"
+                )(sequence_base)
+
+                        #use conv1dtranspopose with stride  = 2 
+                sequence_base = tf.keras.layers.Conv1DTranspose(
+                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_2"
+                )(sequence_base)        
                 
                 # Add small random variations to make realistic time sequences
-                sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
-                
+                #sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
+                sequence_output = sequence_base 
+
                 self.logger.debug(f"Final sequence output shape (23 features): {sequence_output.shape}")
             
         except Exception as e:

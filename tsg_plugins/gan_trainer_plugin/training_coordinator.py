@@ -240,12 +240,16 @@ class TrainingCoordinator:
                 # However, standard Keras behavior is that ReduceLROnPlateau modifies the LR of the optimizer
                 # attached to the model it was .set_model() with.
                 current_g_lr = K.get_value(self.generator_optimizer.learning_rate) # Get LR from TC's optimizer instance
-                lr_scheduler_g.on_epoch_end(epoch, logs={'g_loss': g_loss, 'lr': current_g_lr})
-                self.logger.debug(f"Called lr_scheduler_g.on_epoch_end. Monitored g_loss: {g_loss:.4f}, Reported G_LR: {current_g_lr:.1e}")
+                # Pass the logs with the exact metric name that the scheduler is monitoring
+                g_monitor_metric = getattr(lr_scheduler_g, 'monitor', 'g_loss')
+                lr_scheduler_g.on_epoch_end(epoch, logs={g_monitor_metric: g_loss})
+                self.logger.debug(f"Called lr_scheduler_g.on_epoch_end. Monitored {g_monitor_metric}: {g_loss:.4f}, Current G_LR: {current_g_lr:.1e}")
             if lr_scheduler_d:
                 current_d_lr = K.get_value(self.discriminator_optimizer.learning_rate) # Get LR from TC's optimizer instance
-                lr_scheduler_d.on_epoch_end(epoch, logs={'d_loss': d_loss_avg, 'lr': current_d_lr})
-                self.logger.debug(f"Called lr_scheduler_d.on_epoch_end. Monitored d_loss: {d_loss_avg:.4f}, Reported D_LR: {current_d_lr:.1e}")
+                # Pass the logs with the exact metric name that the scheduler is monitoring
+                d_monitor_metric = getattr(lr_scheduler_d, 'monitor', 'd_loss')
+                lr_scheduler_d.on_epoch_end(epoch, logs={d_monitor_metric: d_loss_avg})
+                self.logger.debug(f"Called lr_scheduler_d.on_epoch_end. Monitored {d_monitor_metric}: {d_loss_avg:.4f}, Current D_LR: {current_d_lr:.1e}")
             
             # Handle Early Stopping
             if early_stopping_callback:
@@ -258,12 +262,23 @@ class TrainingCoordinator:
                 
                 logs_for_es = {monitor_metric_name: current_metric_value}
                 early_stopping_callback.on_epoch_end(epoch, logs=logs_for_es)
-                if early_stopping_callback.model and getattr(early_stopping_callback.model, 'stop_training', False):
-                    self.logger.info(f"Early stopping triggered at epoch {epoch+1} "
-                                     f"monitoring '{monitor_metric_name}' with value {current_metric_value:.4f}.")
-                    # Save models before breaking, as this is the last state due to early stopping
-                    self._save_checkpoint(epoch + 1, generator, discriminator, gan_model, models_dir, is_final_save=True)
-                    break # Exit training loop
+                # Check if early stopping should trigger - safer approach
+                if hasattr(early_stopping_callback, 'model') and early_stopping_callback.model is not None:
+                    if getattr(early_stopping_callback.model, 'stop_training', False):
+                        self.logger.info(f"Early stopping triggered at epoch {epoch+1} "
+                                         f"monitoring '{monitor_metric_name}' with value {current_metric_value:.4f}.")
+                        # Save models before breaking, as this is the last state due to early stopping
+                        self._save_checkpoint(epoch + 1, generator, discriminator, gan_model, models_dir, is_final_save=True)
+                        break # Exit training loop
+                else:
+                    # Fallback: check the callback's internal state if model is not available
+                    # EarlyStopping internally tracks when it should stop via self.stopped_epoch
+                    if hasattr(early_stopping_callback, 'stopped_epoch') and early_stopping_callback.stopped_epoch > 0:
+                        self.logger.info(f"Early stopping triggered at epoch {epoch+1} (via stopped_epoch check) "
+                                         f"monitoring '{monitor_metric_name}' with value {current_metric_value:.4f}.")
+                        # Save models before breaking
+                        self._save_checkpoint(epoch + 1, generator, discriminator, gan_model, models_dir, is_final_save=True)
+                        break # Exit training loop
             
             # Log progress every epoch with comprehensive PhD-level metrics
             log_interval_epochs = self.params.get("log_interval_epochs", 1)
@@ -386,7 +401,14 @@ class TrainingCoordinator:
         
         # Save final models after the training loop finishes,
         # unless early stopping already saved and exited.
-        if not (early_stopping_callback and early_stopping_callback.model and getattr(early_stopping_callback.model, 'stop_training', False)):
+        early_stopped = False
+        if early_stopping_callback:
+            if hasattr(early_stopping_callback, 'model') and early_stopping_callback.model is not None:
+                early_stopped = getattr(early_stopping_callback.model, 'stop_training', False)
+            elif hasattr(early_stopping_callback, 'stopped_epoch'):
+                early_stopped = early_stopping_callback.stopped_epoch > 0
+        
+        if not early_stopped:
             self.logger.info(f"Saving final models after {final_epochs} epochs...") # Use final_epochs
             self._save_checkpoint(final_epochs, generator, discriminator, gan_model, models_dir, is_final_save=True) # Use final_epochs
 

@@ -163,7 +163,7 @@ DEFAULT_VALUES = {
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
 
     # Training parameters
-    "learning_rate": 0.001,
+    "learning_rate": 0.005,
     "beta1": 0.5,
     "beta2": 0.999,
     "epsilon": 1e-8,
@@ -197,7 +197,7 @@ DEFAULT_VALUES = {
     "eval_metric": "mse",
     "early_stopping_patience": 120,
     "checkpointing": True,
-    "resume_from_checkpoint": False,
+    "resume_from_checkpoint": True,
     "fp16": False,
     "tf32": True,
     "autocast": True,
@@ -207,9 +207,9 @@ DEFAULT_VALUES = {
     "l2_regularization": 1e-5,
 
     # Added: Discriminator Architecture Parameters - Updated for 44-feature architecture
-    "discriminator_conv_filters": [32, 16, 8],       # Decreasing filter sizes for proper dimensionality reduction
-    "discriminator_conv_kernel_size": 5,             # Larger kernel for better feature extraction
-    "discriminator_conv_strides": [2, 2, 2],         # Stride=2 for downsampling at each layer
+    "discriminator_conv_filters": [64,32,16,8],       # Decreasing filter sizes for proper dimensionality reduction
+    "discriminator_conv_kernel_size": 3,             # Larger kernel for better feature extraction
+    "discriminator_conv_strides": [2, 2,2,2],         # Stride=2 for downsampling at each layer
     "discriminator_lstm_units": 32,                  # Reduced LSTM units 
     "discriminator_dense_units": [16, 8],            # Decreasing dense layer sizes
     "discriminator_dropout_rate": 0.3,
@@ -217,8 +217,8 @@ DEFAULT_VALUES = {
 
     # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
     "enable_mmd_loss": True,          # Enable/disable MMD loss
-    "mmd_lambda_g": 0.0001,            # Weight for MMD loss in generator
-    "mmd_lambda_d": 0.00001,           # Weight for MMD loss in discriminator (optional)
+    "mmd_lambda_g": 0.00001,            # Weight for MMD loss in generator
+    "mmd_lambda_d": 0.000001,           # Weight for MMD loss in discriminator (optional)
     "mmd_gamma": None,               # RBF kernel bandwidth (None = auto)
     "mmd_sample_size": 128,          # Number of samples for MMD computation (performance)
 
@@ -228,7 +228,7 @@ DEFAULT_VALUES = {
     "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
     "lr_reduction_factor": 0.5,   # Factor by which LR is reduced
     "lr_patience": 30,            # Epochs with no improvement before LR is reduced
-    "lr_min_delta": 1e-7,       # Minimum change to qualify as an improvement
+    "lr_min_delta": 1e-5,       # Minimum change to qualify as an improvement
     "min_lr_g": 1e-7,             # Minimum LR for generator
     "min_lr_d": 1e-7,             # Minimum LR for discriminator
 }

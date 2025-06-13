@@ -56,24 +56,18 @@ class GANTrainerPlugin(PluginBase):
         
         # Discriminator architecture
         "discriminator_conv_filters": [64, 128], "discriminator_conv_kernel_size": 3,
-        "discriminator_lstm_units": 64, "discriminator_dropout_rate": 0.3,
+        "discriminator_lstm_units": 64, "discriminator_dropout_rate": 0.0,
         
         # Learning rate scheduling - these keys MUST exist in the final config.
         "enable_reduce_lr_on_plateau": True, 
-        "lr_reduction_factor": 0.1, # Default from config.py
-        "lr_patience": 10,          # Default from config.py
-        "lr_min_delta": 0.0001,     # Default from config.py
-        "min_lr_g": 1e-7,           # Default from config.py
-        "min_lr_d": 1e-7,           # Default from config.py
-        "lr_monitor_metric_g": "g_loss", # Default from config.py
-        "lr_monitor_metric_d": "d_loss", # Default from config.py
+
         
         # Early stopping - these keys MUST exist in the final config.
         "enable_early_stopping": True, 
         "es_patience": 120, # FIXED: Use config.py value (early_stopping_patience)
-        "es_min_delta": 0.001, 
+        "es_min_delta": 1e-7, 
         "es_monitor_metric": "g_loss",
-        "es_restore_best_weights": False, # Added default
+        "es_restore_best_weights": True, # Added default
         
         # Output directories
         "results_base_dir": "examples/results/phase_4_3", "save_model_dir": "models",
@@ -105,7 +99,7 @@ class GANTrainerPlugin(PluginBase):
         "num_conditional_prev_tick_features": 5, "datetime_col_name_in_x_real_df": "DATE_TIME",
         
         # Additional parameters
-        "generator_l2_reg": 0.01,  # Added for generator L2 regularization
+        "generator_l2_reg": 1e-5,  # Added for generator L2 regularization
     }
     
     # Debug variables for monitoring
@@ -462,6 +456,16 @@ class GANTrainerPlugin(PluginBase):
                 self.logger.info("lr_scheduler_d is None, not linking.")
             if not self.discriminator_model:
                 self.logger.warning("self.discriminator_model is None, cannot link lr_scheduler_d.")
+
+        # Link EarlyStopping callback to a model (use gan_model as it's the primary training model)
+        if self.early_stopping_callback and self.gan_model:
+            self.early_stopping_callback.set_model(self.gan_model)
+            self.logger.info(f"Linked early_stopping_callback to gan_model: {self.gan_model.name}")
+        else:
+            if not self.early_stopping_callback:
+                self.logger.info("early_stopping_callback is None, not linking.")
+            if not self.gan_model:
+                self.logger.warning("self.gan_model is None, cannot link early_stopping_callback.")
 
         # Prepare directories
         models_dir = os.path.join(self.params.get("results_base_dir", "results"), self.params.get("save_model_dir", "models"))
