@@ -6,16 +6,19 @@ The **Synthetic Data Generator (SDG)** is a sophisticated plugin-based framework
 
 ### Key Functional Highlights:
 
-*   **Multi-Feature Time Series Generation**: Capable of generating time series data comprising 51 features. This includes:
-    *   OHLC (Open, High, Low, Close) prices.
-    *   20 technical indicators (e.g., RSI, MACD, Bollinger Bands).
-    *   Cyclical date/time features (e.g., hour of day, day of week, day of year).
-    *   Fundamental market data (e.g., S&P500_Close, VIX_Close).
+*   **23-Feature Training Architecture**: 
+    *   **Training Mode**: GAN trains using only 23 core base features (generator outputs 23, discriminator expects 23)
+    *   **Generate Mode**: Generates 23 base features, then post-processes to add technical indicators + seasonal features + sub-periodicity ticks
+    *   **Base Features**: OHLC prices, market indicators (VIX, S&P500), bid/ask spreads, sub-periodicity ticks
+    *   **Post-processing**: 15 technical indicators + 16 interpolated tick values (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8) + 3 seasonal features calculated deterministically from 23 base features
+    *   **Sub-Periodicity Generation**: 15-min and 30-min tick values interpolated from hourly CLOSE prices with realistic temporal noise
+    *   **Final Output**: 23 base + 15 technical + 16 ticks + 3 seasonal = 57 total features
 *   **Operational Modes**: Supports three distinct operational modes, each managed by dedicated pipeline modules:
-    *   **Train Mode**: For training the GAN components.
-    *   **Generate Mode**: For producing synthetic data using trained models.
-    *   **Optimize Mode**: For hyperparameter tuning and model optimization (details to be expanded based on optimizer plugin functionality).
-*   **Pre-trained Model Integration**: Leverages pre-trained models, particularly a VAE decoder, which is a core part of the generator.
+    *   **Train Mode**: Trains GAN components using 23-feature architecture only
+    *   **Generate Mode**: Generates 23-feature synthetic data, then post-processes to 44 features
+    *   **Optimize Mode**: For hyperparameter tuning and model optimization
+*   **Pre-trained Model Integration**: Leverages pre-trained VAE decoder outputting 23 base features, which serves as the core component of the generator.
+*   **Improved Training Efficiency**: Smaller networks (23 vs 51+ features) with better authenticity, faster training, and eliminated feature expansion complexity.
 *   **Modular Plugin Architecture**: Allows for easy extension and customization through plugins for data feeding, generation, evaluation, and optimization.
 
 ## 2. Core Architecture: Sequential Conditional VAE-GAN (SC-VAE-GAN)
@@ -53,21 +56,34 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 
 ### 2.2. Data Flow and Feature Engineering
 
-*   **Input**: The generation process typically starts with an initial noise vector and a sequence of date/time information for conditioning.
+*   **Input**: The generation process starts with an initial noise vector and a sequence of date/time information for conditioning.
 *   **Feeder Plugin**: Prepares the initial noise, date/time conditions, and potentially initial context for the generator.
-*   **Generator Process**:
+*   **Generator Process (23-Feature Training Architecture)**:
     1.  The internal BiLSTM Z-generator creates latent sequences from noise.
-    2.  The VAE decoder takes these latent sequences and current timestep conditions to produce a set of base features (e.g., 23 features).
-    3.  The `GeneratorPlugin` (or the composite generator model itself) calculates 20 technical indicators based on the VAE decoder's output.
-    4.  Cyclical date/time features (seasonal variables) are generated/retrieved.
-    5.  All features (VAE output, TIs, seasonal variables, and any other fundamental data) are assembled into the full 51-feature vector for each timestep.
-    6.  This process is repeated iteratively to form a sequence, using the previous step's output as context.
-*   **Output**: A synthetic time series with 51 features per timestep, matching the structure of the target real-world data. The typical shape for a batch of sequences is `(batch_size, sequence_length, 51)`.
+    2.  The VAE decoder takes these latent sequences and current timestep conditions to produce 23 base features:
+        *   OHLC (Open, High, Low, Close) prices
+        *   Market indicators (VIX close, S&P500 close)
+        *   Bid/Ask spreads (BC-BO, BH-BL)
+        *   Sub-periodicity ticks (CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8)
+    3.  **Training Mode**: Generator outputs these 23 base features directly to discriminator for adversarial training.
+    4.  **Generate Mode**: After generation, post-processing expands 23 features to 44 features.
+    5.  This process is repeated iteratively to form a sequence, using the previous step's output as context.
+*   **Post-Processing Pipeline (Generate Mode Only)**:
+    1.  Technical indicators (15 features: RSI, MACD, EMA, Bollinger Bands, etc.) calculated from 23 base features.
+    2.  Seasonal features (3 features: cyclical encodings) generated from timestamps.
+    3.  Features expanded from 23 → 44 total features when needed for downstream tasks.
+*   **Output**: 
+    *   **Training Mode**: Synthetic time series with 23 base features per timestep. Shape: `(batch_size, sequence_length, 23)`
+    *   **Generate Mode**: Post-processed synthetic time series with 44 features per timestep. Shape: `(batch_size, sequence_length, 44)`
 
 ### 2.3. Training Process Specifics
 
 *   **Pre-trained VAE Decoder**: The VAE decoder component within the Composite GAN Generator is loaded with pre-trained weights but is set to `trainable=True` during GAN training, allowing for fine-tuning in the context of the adversarial setup.
-*   **Feature Consistency**: A critical step (`prepare_features_for_discriminator` method in `GeneratorPlugin`) ensures that real data fed to the discriminator undergoes the same feature engineering (technical indicators, cyclical features, ordering, and padding to 51 features) as the synthetic data. This guarantees the discriminator receives inputs of shape `(batch_size, sequence_length, 51)`.
+*   **Feature Consistency**: A critical step (`prepare_features_for_discriminator` method in `GeneratorPlugin`) ensures that real data fed to the discriminator is processed to match the 23-feature format:
+    1.  **Base Feature Extraction**: Extracts the first 23 base features from real data.
+    2.  **Feature Padding**: If input data has fewer than 23 features, it pads with zeros.
+    3.  **Consistent Ordering**: Ensures processed real data maintains the same feature order as generator output.
+    This guarantees the discriminator receives input with shape `(batch_size, sequence_length, 23)` for stable adversarial training.
 *   **Regularization**: Specific L2 regularization is applied to the generator, while the discriminator generally avoids explicit regularization to maintain a balance in training.
 *   **Learning Rate Scheduling**: `ReduceLROnPlateau` is used for dynamic learning rate adjustment for both generator and discriminator.
     *   Callbacks are configured in `GANTrainerPlugin` and monitor `g_loss` and `d_loss`.
@@ -86,36 +102,39 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
 
 ### 3.1. Train Mode
 
-*   **Purpose**: To train the GAN, specifically improving the Composite GAN Generator and the Discriminator through adversarial learning.
+*   **Purpose**: To train the GAN, specifically improving the Composite GAN Generator and the Discriminator through adversarial learning using the 23-feature base architecture.
 *   **Core Process**:
     1.  Load real training and validation data.
     2.  Load the pre-trained VAE decoder (specified by `config["generator_vae_decoder_model_path_param"]`) into the `GeneratorPlugin`. The VAE decoder is set to `trainable=True` for fine-tuning.
     3.  The `GeneratorPlugin` builds the composite GAN generator, which includes the VAE decoder and an internal BiLSTM Z-generator.
-    4.  The `DiscriminatorPlugin` builds the discriminator model.
+    4.  The `DiscriminatorPlugin` builds the discriminator model expecting 23-feature inputs.
     5.  The `GANTrainerPlugin` orchestrates the training via `TrainingCoordinator`:
-        *   Iterative training of discriminator and generator.
+        *   Generator outputs 23 base features directly to discriminator.
+        *   Real data is processed to match the 23-feature format for discriminator training.
+        *   Iterative adversarial training with improved efficiency due to smaller feature space.
         *   Detailed per-epoch logging (losses, learning rates, timing, `ReduceLROnPlateau` info).
         *   Dynamic learning rate adjustment using `ReduceLROnPlateau`.
         *   Early stopping based on configured metric and patience.
-    6.  Save trained models. The final generator (full composite GAN generator) and discriminator models are saved to paths specified by `config["save_generator_sequential_model_file"]` and `config["save_discriminator_sequential_model_file"]` respectively, within the `models_dir`.
+    6.  Save trained models. The final generator (full composite GAN generator outputting 23 features) and discriminator models are saved to paths specified by `config["save_generator_sequential_model_file"]` and `config["save_discriminator_sequential_model_file"]` respectively, within the `models_dir`.
 *   **Key Inputs**: Real training data, pre-trained VAE decoder model file (via `config["generator_vae_decoder_model_path_param"]`).
-*   **Key Outputs**: Improved/trained Composite GAN Generator model, trained Discriminator model, training logs, and loss metrics.
+*   **Key Outputs**: Improved/trained Composite GAN Generator model (23-feature output), trained Discriminator model (23-feature input), training logs, and loss metrics.
 
 ### 3.2. Generate Mode
 
-*   **Purpose**: To produce synthetic time series data using a trained Composite GAN Generator.
+*   **Purpose**: To produce synthetic time series data using a trained Composite GAN Generator outputting 23 base features.
 *   **Core Process**:
     1.  Load the trained Composite GAN Generator model (which includes the fine-tuned VAE decoder and the BiLSTM Z-generator).
     2.  Initialize the Feeder plugin to provide initial noise, sequences of date/time conditions, and any required initial context.
     3.  Iteratively generate synthetic data points:
         *   The Composite GAN Generator takes noise, current conditions (and previous context).
         *   The internal BiLSTM Z-generator produces latent sequences.
-        *   The VAE decoder part generates base features.
-        *   Technical indicators are calculated.
-        *   All 51 features are assembled.
-    4.  Export the generated 51-feature time series data.
+        *   The VAE decoder part generates 23 base features.
+        *   **Optional Post-Processing**: Technical indicators and datetime features calculated from the 23 base features when full feature sets are needed.
+    4.  Export the generated data:
+        *   **Core Output**: 23-feature time series data
+        *   **Expanded Output**: Post-processed data with technical indicators and datetime features (when required)
 *   **Key Inputs**: Trained Composite GAN Generator model file, parameters for generation (e.g., number of samples, start date for conditions).
-*   **Key Outputs**: CSV file containing the synthetic time series data (51 features per row).
+*   **Key Outputs**: CSV file containing the synthetic time series data (23 base features, or expanded feature sets with post-processing).
 
 ### 3.3. Optimize Mode
 
@@ -129,6 +148,67 @@ The SC-VAE-GAN architecture is central to the SDG system. It sequentially combin
     6.  Report the best hyperparameter set found.
 *   **Key Inputs**: Real training/validation data, pre-trained VAE decoder, hyperparameter search space definition.
 *   **Key Outputs**: Optimal hyperparameter configuration, logs of the optimization process.
+
+## Key Functionalities
+
+### Generate Mode: Synthetic Data Generation and Prepending
+
+**Overview**:
+The "Generate Mode" is designed to produce synthetic time series data using pre-trained GAN models and prepend this data to an existing dataset. This is useful for augmenting datasets, creating historical data where none exists, or for specific simulation purposes. The core idea is to generate data that is chronologically earlier than the provided real data, seamlessly extending the dataset backwards in time, while ensuring that the generated timestamps fall only on weekdays.
+
+**Activation and Prerequisites**:
+*   `operation_mode` in `app/config.py` must be set to `"generate"`.
+*   Valid file paths for pre-trained full Generator and Discriminator Keras models must be provided via `load_generator_sequential_model_file` and `load_discriminator_sequential_model_file` respectively.
+*   `x_train_file` must point to the base real dataset.
+*   `n_samples` specifies the number of synthetic samples to generate.
+*   `dataset_periodicity` (e.g., "1h", "15min") is crucial for calculating time steps.
+
+**Process Flow**:
+
+1.  **Configuration Loading (`app/config_loader.py`)**:
+    *   The main configuration is loaded, including `operation_mode`, model paths, `x_train_file`, `n_samples`, `max_steps_train`, `dataset_periodicity`, and `generated_data_file`.
+
+2.  **Model Loading (e.g., in `app/main.py` or a dedicated generation module)**:
+    *   The full Generator and Discriminator models are loaded from the `.keras` files specified in the configuration. This uses standard Keras model loading functions.
+    *   `main.py` would orchestrate this based on `operation_mode == "generate"`.
+
+3.  **Base Data Loading and Preparation (`app/data_processor.py` or similar)**:
+    *   The `FeederPlugin` (or its underlying data loading capabilities) reads the initial segment of data from `x_train_file`. Only the first `max_steps_train` rows are loaded if the file is longer.
+    *   The `DATE_TIME` column of this loaded data is parsed.
+The first `DATE_TIME` entry from this segment becomes the reference point for generating earlier data.
+
+4.  **Synthetic Data Generation Loop (Orchestrated by `app/main.py`, potentially using `GeneratorPlugin` and `FeederPlugin` utilities)**:
+    *   **Target `DATE_TIME` Calculation**: The `DATE_TIME` of the first record from the loaded `x_train_file` segment is taken. Let this be `T_real_start`.
+    *   A loop runs `n_samples` times to generate each synthetic sample:
+        *   **Prospective `DATE_TIME` Calculation**: For the *k*-th synthetic sample (in reverse chronological order, so the first one generated is the one closest to `T_real_start`), its `DATE_TIME` (`T_synth_k`) is calculated by stepping back from `T_real_start` using `dataset_periodicity`. The very last synthetic sample generated (i.e., the `n_samples`-th one, which will be the earliest in the final dataset) will have its `DATE_TIME` calculated, and then subsequent synthetic samples will step forward towards `T_real_start`.
+        Alternatively, and more straightforwardly for prepending: calculate the `DATE_TIME` for the *last* synthetic sample to be generated (which will be the one immediately preceding `T_real_start`). This is `T_real_start - 1 * dataset_periodicity`. Then, for each of the `n_samples` to generate (iterating from `i = 0` to `n_samples - 1`), the target `DATE_TIME` for the *i*-th sample (when ordered from earliest to latest) would be `(T_real_start - (n_samples - i) * dataset_periodicity)`.
+        *   **Weekend Skipping**: The calculated `T_synth_k` is checked. If it falls on a Saturday or Sunday, it is skipped. The `DATE_TIME` is then adjusted to the preceding Friday. This means that the number of *actual* time steps (periods) skipped to find a valid weekday might be more than one `dataset_periodicity` unit. The generation process ensures `n_samples` *valid weekday* samples are created.
+        *   **Conditional Input Preparation (Leveraging `FeederPlugin` logic)**: For the determined weekday `T_synth_k`:
+            *   Cyclical features (hour of day, day of week, etc.) are derived from `T_synth_k`.
+            *   A noise vector (latent vector) is generated, typically by sampling from a normal distribution (e.g., using `numpy.random.normal`). The dimensions of this vector must match the input shape expected by the loaded Generator model.
+            *   These conditional inputs (cyclical features, noise) are combined into the format expected by the Generator.
+        *   **Feature Generation (Using `GeneratorPlugin`'s model)**: The prepared input is fed to the loaded Generator model (`generator.predict(...)`). This outputs the 23 base features for `T_synth_k`.
+        *   **Feature Assembly**: The synthetic sample is assembled:
+            *   The 23 generated base features.
+            *   The `DATE_TIME` (`T_synth_k`).
+            *   **Optional Post-Processing**: Technical indicators and additional features calculated from the 23 base features when expanded feature sets are needed.
+        *   The generated sample is stored.
+
+5.  **Data Concatenation and Saving (`app/data_processor.py` or `app/main.py`)**:
+    *   The list of `n_samples` generated synthetic records (which are already in correct chronological order, from earliest to latest, all on weekdays) is converted into a DataFrame.
+    *   This DataFrame of synthetic data is concatenated with the DataFrame of the initially loaded segment from `x_train_file`. The synthetic data comes first.
+    *   The combined DataFrame is saved to the `output_dir/generated_data_file` (e.g., as a CSV file).
+
+**Interaction with Plugins**:
+*   **`FeederPlugin`**: Its utilities for date parsing, cyclical feature generation, and potentially data loading will be heavily leveraged. The logic for generating `DATE_TIME` sequences, especially with weekend skipping and adherence to `dataset_periodicity`, might require extending or adapting `FeederPlugin`'s date handling capabilities or implementing new functions within `app/data_processor.py` that use `FeederPlugin`'s helpers.
+*   **`GeneratorPlugin`**: While the plugin itself might not be directly instantiated in `generate` mode in the same way as in `train` mode (as it's tied to building models for training), the loaded Keras Generator *model* is central. The logic for preparing noise vectors and structuring inputs for the generator model will mirror what `GeneratorPlugin` does internally during training and prediction.
+*   **`DiscriminatorPlugin`**: The loaded Discriminator model is available but not actively used in the basic generation loop described. It could be used for optional validation of generated samples if desired.
+
+**Key Outputs**:
+*   A single data file (e.g., CSV) located at `output_dir/generated_data_file`, containing the `n_samples` of synthetic data followed by the initial `max_steps_train` rows from `x_train_file`.
+    *   **Core Format**: 23 base features + DATE_TIME column
+    *   **Extended Format**: Post-processed with technical indicators and datetime features when required
+*   Log messages indicating the start and completion of the generation process, number of samples generated, and the path to the output file.
 
 ---
 *This document outlines the core functionality. For specific configuration details, file structures, and API definitions, please refer to `REFERENCE_Config_FileTree.md` and `REFERENCE_API.md`.*

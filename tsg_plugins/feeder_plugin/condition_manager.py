@@ -65,7 +65,8 @@ class ConditionManager:
             self._calculate_condition_dimensions()
             
             self.is_initialized = True
-            logger.info(f"ConditionManager initialized with condition shape: {self.condition_shape}")
+            # Use the dynamically calculated condition_dim in the log message
+            logger.info(f"ConditionManager initialized with condition shape: {self.condition_shape}, dimension: {self.condition_dim}")
             
             return True
             
@@ -89,31 +90,17 @@ class ConditionManager:
             return None
         
         try:
-            conditions = []
+            # COMPATIBILITY FIX: Return zero conditions to match autoencoder training
+            # The autoencoder was trained with zero conditional vectors, so we must use zeros
+            # to maintain compatibility with the trained VAE decoder.
             
-            # Extract explicit condition columns
-            if self.condition_columns:
-                explicit_conditions = self._extract_explicit_conditions(data)
-                if explicit_conditions is not None:
-                    conditions.append(explicit_conditions)
+            batch_size = len(data)
+            zero_conditions = np.zeros((batch_size, self.condition_dim), dtype=np.float32)
             
-            # Extract temporal conditions
-            if self.use_temporal_conditions and timestamp_col:
-                temporal_conditions = self._extract_temporal_conditions(data, timestamp_col)
-                if temporal_conditions is not None:
-                    conditions.append(temporal_conditions)
+            logger.debug(f"Generated zero conditions for autoencoder compatibility: shape {zero_conditions.shape}")
+            logger.debug("Using zero conditions to match autoencoder training format")
             
-            # Combine conditions
-            if conditions:
-                combined_conditions = np.concatenate(conditions, axis=1)
-                self.has_conditions = True
-                logger.debug(f"Extracted conditions shape: {combined_conditions.shape}")
-                return combined_conditions
-            else:
-                # No conditions available, return zero vector
-                zero_conditions = np.zeros((len(data), self.condition_dim))
-                logger.debug("No conditions found, returning zero conditions")
-                return zero_conditions
+            return zero_conditions
                 
         except Exception as e:
             logger.error(f"Failed to extract conditions: {str(e)}")
@@ -246,61 +233,82 @@ class ConditionManager:
             return None
     
     def _extract_temporal_conditions(self, data: pd.DataFrame, timestamp_col: str) -> Optional[np.ndarray]:
-        """Extract temporal features as conditions."""
+        """Extract temporal features as conditions using cyclical encoding."""
         try:
             if timestamp_col not in data.columns:
                 logger.warning(f"Timestamp column '{timestamp_col}' not found")
                 return None
             
-            # Convert to datetime if needed and ensure we have a pandas Series
             timestamp_data = data[timestamp_col]
-            if isinstance(timestamp_data, np.ndarray):
-                timestamps = pd.Series(pd.to_datetime(timestamp_data))
-            else:
+            if not pd.api.types.is_datetime64_any_dtype(timestamp_data):
                 timestamps = pd.to_datetime(timestamp_data)
+            else:
+                timestamps = timestamp_data
             
-            # Extract temporal features
-            temporal_data = []
+            if not isinstance(timestamps, pd.Series):
+                timestamps = pd.Series(timestamps)
+
+            temporal_data_parts = []
             
-            # Hour (0-23) normalized to [0, 1]
-            if 'hour' in self.temporal_features:
-                hours = timestamps.dt.hour / 23.0
-                temporal_data.append(hours.values if hasattr(hours, 'values') else hours)
-            
-            # Day of month (1-31) normalized to [0, 1]
-            if 'day' in self.temporal_features:
-                days = (timestamps.dt.day - 1) / 30.0
-                temporal_data.append(days.values if hasattr(days, 'values') else days)
-            
-            # Month (1-12) normalized to [0, 1]
-            if 'month' in self.temporal_features:
-                months = (timestamps.dt.month - 1) / 11.0
-                temporal_data.append(months.values if hasattr(months, 'values') else months)
-            
-            # Year (relative to minimum year)
-            if 'year' in self.temporal_features:
-                min_year = timestamps.dt.year.min()
-                max_year = timestamps.dt.year.max()
-                if max_year > min_year:
-                    years = (timestamps.dt.year - min_year) / (max_year - min_year)
+            date_features_to_use = self.config.get("feeder_date_features_for_conditioning", [])
+            if not date_features_to_use:
+                logger.debug("No date features specified for temporal conditioning.")
+                return None
+
+            for feature_name in date_features_to_use:
+                values: Optional[pd.Series] = None
+                period: Union[float, int, pd.Series] = 0.0
+
+                if feature_name == "hour_of_day":
+                    values = timestamps.dt.hour
+                    period = 24.0
+                elif feature_name == "day_of_week": # Monday=0, Sunday=6
+                    values = timestamps.dt.weekday
+                    period = 7.0
+                elif feature_name == "day_of_month":
+                    values = timestamps.dt.day
+                    period = timestamps.dt.days_in_month # Series, for accurate period per month
+                elif feature_name == "day_of_year":
+                    values = timestamps.dt.dayofyear
+                    period = self.config.get("feeder_max_day_of_year", 366.0) # Use configured max (e.g., 366 for leap years)
+                elif feature_name == "month":
+                    values = timestamps.dt.month
+                    period = self.config.get("feeder_max_month", 12.0)
                 else:
-                    years = np.zeros(len(timestamps))
-                temporal_data.append(years.values if hasattr(years, 'values') else years)
-            
-            # Weekday (0-6) normalized to [0, 1]
-            if 'weekday' in self.temporal_features:
-                weekdays = timestamps.dt.weekday / 6.0
-                temporal_data.append(weekdays.values if hasattr(weekdays, 'values') else weekdays)
-            
-            if temporal_data:
-                result = np.column_stack(temporal_data).astype(np.float32)
+                    logger.warning(f"Unsupported temporal feature specified: {feature_name}")
+                    continue
+                
+                if values is not None:
+                    # Ensure 'values' is a Series for consistent operations with 'period' if it's a Series
+                    if not isinstance(values, pd.Series):
+                         values = pd.Series(values)
+
+                    # Normalize values for cyclical encoding.
+                    # For 1-indexed values (like month, day_of_month, day_of_year), 
+                    # using value/period directly is common.
+                    # For 0-indexed values (like hour, day_of_week), value/period is also common.
+                    # The key is that the value should represent a position within the cycle of length 'period'.
+                    
+                    # sin_transformed = np.sin(2 * np.pi * (values - (1 if feature_name in ["day_of_month", "day_of_year", "month"] else 0)) / period)
+                    # cos_transformed = np.cos(2 * np.pi * (values - (1 if feature_name in ["day_of_month", "day_of_year", "month"] else 0)) / period)
+                    
+                    # Using values directly as they are (0-indexed or 1-indexed) with their respective periods
+                    sin_transformed = np.sin(2 * np.pi * values / period)
+                    cos_transformed = np.cos(2 * np.pi * values / period)
+                    
+                    temporal_data_parts.append(sin_transformed.values)
+                    temporal_data_parts.append(cos_transformed.values)
+
+            if temporal_data_parts:
+                result = np.column_stack(temporal_data_parts).astype(np.float32)
                 logger.debug(f"Extracted temporal conditions shape: {result.shape}")
                 return result
             else:
+                logger.debug("No temporal data parts were generated.")
                 return None
                 
         except Exception as e:
-            logger.error(f"Failed to extract temporal conditions: {str(e)}")
+            logger.error(f"Failed to extract temporal conditions: {str(e)}", exc_info=True)
             return None
     
     def _normalize_conditions(self, conditions: np.ndarray) -> np.ndarray:
@@ -347,41 +355,50 @@ class ConditionManager:
         return conditions
     
     def _calculate_condition_dimensions(self):
-        """Calculate total condition vector dimensions."""
+        """Calculate total dimension of condition vectors."""
         total_dim = 0
         
-        # Explicit conditions
-        total_dim += len(self.condition_columns)
+        # Explicit conditions (e.g., fundamental features)
+        # self.condition_columns is populated by 'fundamental_features_for_conditioning'
+        # from the feeder_config in FeederPlugin.initialize()
+        if self.condition_columns:
+            total_dim += len(self.condition_columns)
+            logger.debug(f"Explicit condition columns ({len(self.condition_columns)}): {self.condition_columns}")
         
         # Temporal conditions
         if self.use_temporal_conditions:
-            total_dim += len(self.temporal_features)
+            date_features_to_use = self.config.get("feeder_date_features_for_conditioning", [])
+            num_temporal_features = len(date_features_to_use)
+            if num_temporal_features > 0:
+                total_dim += num_temporal_features * 2 # Each temporal feature yields sin and cos
+                logger.debug(f"Temporal features ({num_temporal_features} -> {num_temporal_features * 2} dims): {date_features_to_use}")
+            
+        self.condition_dim = total_dim
+        self.condition_shape = (None, total_dim) if total_dim > 0 else None # Corrected line
         
-        # Adjust for conditioning method
-        if self.condition_method in ['embed', 'encode']:
-            total_dim = self.condition_dim
-        
-        self.condition_shape = (total_dim,) if total_dim > 0 else (0,)
-        logger.info(f"Calculated condition dimensions: {self.condition_shape}")
+        # This log message was moved to initialize() to show the final calculated dimension
+        # logger.info(f"Calculated condition dimension: {self.condition_dim}")
+
+    def get_condition_dim(self) -> int:
+        """Get the current condition dimension."""
+        return self.condition_dim
     
-    def get_condition_info(self) -> Dict[str, Any]:
-        """Get information about current condition setup."""
-        return {
-            'initialized': self.is_initialized,
-            'has_conditions': self.has_conditions,
-            'condition_columns': self.condition_columns,
-            'condition_method': self.condition_method,
-            'condition_shape': self.condition_shape,
-            'temporal_features': self.temporal_features,
-            'use_temporal_conditions': self.use_temporal_conditions
-        }
+    def get_condition_shape(self) -> Tuple[Optional[int], Optional[int]]:
+        """Get the current condition shape."""
+        return self.condition_shape
     
-    def reset(self):
-        """Reset condition manager state."""
-        self.condition_encoders = {}
-        self.condition_stats = {}
-        self.is_initialized = False
-        self.has_conditions = False
-        self.condition_shape = None
-        
-        logger.info("ConditionManager reset")
+    def get_condition_columns(self) -> List[str]:
+        """Get the list of condition columns."""
+        return self.condition_columns
+    
+    def get_condition_method(self) -> str:
+        """Get the current condition method."""
+        return self.condition_method
+    
+    def is_condition_manager_initialized(self) -> bool:
+        """Check if the condition manager is initialized."""
+        return self.is_initialized
+    
+    def has_valid_conditions(self) -> bool:
+        """Check if there are valid conditions available."""
+        return self.has_conditions

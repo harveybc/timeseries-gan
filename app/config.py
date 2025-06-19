@@ -14,8 +14,9 @@ DEFAULT_VALUES = {
     "evaluator": "default_evaluator",
     "optimizer": "default_optimizer",
     "trainer": "gan_trainer", # Ensure this line exists
-    "operation_mode": "train", # Added: Default operation mode
+    "operation_mode": "generate", # Added: Default operation mode, possible values: "train", "generate", "optimize"
     "use_generator_l2_reg": True, # Added: Enable L2 regularization for Generator by default
+    "use_evaluation": False, # Added: Enable/disable evaluation phase in generate mode
 
     # Data for evaluation and base for generation
     # "real_data_file": "examples/data/phase_3/normalized_d4.csv", # REMOVED - Redundant, use x_train_file
@@ -47,8 +48,10 @@ DEFAULT_VALUES = {
     "feeder_feature_columns_for_encoder": [], 
     "feeder_real_data_file_has_header": True,
     "feeder_datetime_col_in_real_data": "DATE_TIME",
-    "feeder_date_features_for_conditioning": ["day_of_month", "hour_of_day", "day_of_week"], # MODIFIED
-    "feeder_fundamental_features_for_conditioning": ["S&P500_Close", "vix_close"],
+    "feeder_date_features_for_conditioning": ["month", "day_of_year", "day_of_month", "hour_of_day", "day_of_week"], # MODIFIED: 5 date parts for 10 cyclical features
+    "feeder_fundamental_features_for_conditioning": [], # MODIFIED: Empty, as generator expects 10 cyclical date features
+    "feeder_max_month": 12, # ADDED
+    "feeder_max_day_of_year": 366, # ADDED (explicitly, though ConditionManager might default)
     "feeder_max_day_of_month": 31,
     "feeder_max_hour_of_day": 23,
     "feeder_max_day_of_week": 6,
@@ -60,7 +63,7 @@ DEFAULT_VALUES = {
 
     # --- GAN Training Parameters ---
     "noise_dim": 100,  # Added: Noise dimension for generator input
-    "conditional_features_dim": 10,  # Added: Conditional features dimension
+    "conditional_features_dim": 10,  # CORRECTED: Changed back to 10 to match VAE decoder expectations
     "context_vector_dim": 64,  # Added: Context vector dimension (same as feeder_context_vector_dim)
 
     # --- Parameters for GeneratorPlugin ---
@@ -75,72 +78,92 @@ DEFAULT_VALUES = {
     "save_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_generator_model.keras",
     "save_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
     
-    # Old parameter, potentially remove or ensure it's not misused.
-    # For now, ensure GeneratorPlugin uses generator_vae_decoder_model_path_param
-    "generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_cnn_small_decoder_model.keras", # Retained for now, but ensure clarity
-    "discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
+    # Default load paths for  trained models for generation
+    "load_generator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_generator_model.keras", # MODIFIED: Point to the full generator model
+    "load_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
 
+    # Output filename for the generation mode
+    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_12600_prepended_o.csv", # User's value retained
 
-    "generator_decoder_input_window_size": 144, 
-    "generator_full_feature_names_ordered": [
-        "DATE_TIME", 
+    "generator_decoder_input_window_size": 144,
+    
+    # 23-Feature Base Architecture Configuration
+    "generator_base_feature_names_ordered": [
         "OPEN", "HIGH", "LOW", "CLOSE", 
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
-        "day_of_month_sin", "day_of_month_cos",
-        "hour_of_day_sin", "hour_of_day_cos",
-        "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", 
-        "S&P500_Close", "vix_close",
-        "BC-BO", "BH-BL",
+        "vix_close", "S&P500_Close",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # Replace placeholders to maintain 51 features
-        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ], 
     "generator_decoder_output_feature_names": [
         # Based on cvae_target_feature_names from REFERENCE.md - exact 23 features
-        "OPEN", "LOW", "HIGH", "vix_close", 
-        "BC-BO", "BH-BL", 
-        "S&P500_Close",
+        "OPEN", "HIGH", "LOW", "CLOSE", 
+        "vix_close", "S&P500_Close",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
         "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ], 
     "generator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-    "generator_ti_feature_names": [
+    
+    # Post-processing features (calculated after generation, not during GAN training)
+    "generator_post_processing_ti_feature_names": [
         "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
         "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC"
     ],
-    "discriminator_full_feature_names_ordered": [
-        "DATE_TIME", 
-        "OPEN", "HIGH", "LOW", "CLOSE", 
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+    "generator_post_processing_datetime_feature_names": [
         "day_of_month_sin", "day_of_month_cos",
         "hour_of_day_sin", "hour_of_day_cos",
         "day_of_week_sin", "day_of_week_cos",
-        "day_of_year_sin", "day_of_year_cos", 
+        "day_of_year_sin", "day_of_year_cos"
+    ],
+    
+    # Configuration for 44-feature architecture  
+    "base_features_count": 23,
+    "post_processing_features_enabled": True,  # Changed to True to generate full feature sets for compatibility
+    "base_features_output_dim": 23,
+    "discriminator_input_dim": 23,  # Training: Discriminator expects 23 base features only
+    
+    # Full feature names ordered to match training data structure (45 features total)
+    # Order: DATE_TIME, Technical Indicators (15), OHLC (4), Market Data & Derived Features (26)
+    "generator_full_feature_names_ordered": [
+        # Technical Indicators first (15 features) - matches training data order
+        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
+        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", 
+        "ATR", "CCI", "WilliamsR", "Momentum", "ROC",
+        # OHLC second (4 features) - matches training data order  
+        "OPEN", "HIGH", "LOW", "CLOSE",
+        # Derived bid/ask spreads (4 features) - matches training data order
+        "BC-BO", "BH-BL", "BH-BO", "BO-BL", 
+        # External market data (2 features) - matches training data order
         "S&P500_Close", "vix_close",
-        "BC-BO", "BH-BL",
+        # Sub-periodicity data (16 features) - matches training data order
+        "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
+        "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
+        "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4", 
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
+        # Raw date features (3 features) - matches training data order (NOT cyclical sin/cos)
+        "day_of_month", "hour_of_day", "day_of_week"
+        # Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (+ DATE_TIME = 45 columns)
+    ],
+    
+    # Discriminator configuration for 23-feature architecture
+    "discriminator_base_feature_names_ordered": [
+        "OPEN", "HIGH", "LOW", "CLOSE", 
+        "vix_close", "S&P500_Close",
+        "BC-BO",
         "CLOSE_15m_tick_1", "CLOSE_15m_tick_2", "CLOSE_15m_tick_3", "CLOSE_15m_tick_4",
         "CLOSE_15m_tick_5", "CLOSE_15m_tick_6", "CLOSE_15m_tick_7", "CLOSE_15m_tick_8",
         "CLOSE_30m_tick_1", "CLOSE_30m_tick_2", "CLOSE_30m_tick_3", "CLOSE_30m_tick_4",
-        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8",
-        # Replace placeholders to maintain 51 features
-        "External_Indicator_A", "Sentiment_Score_X", "Market_Volatility_Idx" # Replaced 3 placeholders
+        "CLOSE_30m_tick_5", "CLOSE_30m_tick_6", "CLOSE_30m_tick_7", "CLOSE_30m_tick_8"
     ],
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
-    "discriminator_ti_feature_names": [
-        "RSI", "MACD", "MACD_Histogram", "MACD_Signal", "EMA",
-        "Stochastic_%K", "Stochastic_%D", "ADX", "DI+", "DI-", "ATR", "CCI", "WilliamsR", "Momentum", "ROC"
-    ],
 
     # Training parameters
-    "learning_rate": 0.001,
+    "learning_rate": 0.005,
     "beta1": 0.5,
     "beta2": 0.999,
     "epsilon": 1e-8,
@@ -150,7 +173,7 @@ DEFAULT_VALUES = {
     "max_grad_norm": 10.0,
     "loss": "mse", # Mean Squared Error
 
-    # Logging and output
+    # Logging and output 
     "log_interval": 100,
     "save_model_interval": 5000,
     "output_dir": "examples/results/phase_4_3/",
@@ -172,23 +195,40 @@ DEFAULT_VALUES = {
     "seq_len_eval": 288,
     "max_steps_eval": 1000,
     "eval_metric": "mse",
-    "early_stopping_patience": 10,
+    "early_stopping_patience": 120,
     "checkpointing": True,
-    "resume_from_checkpoint": False,
+    "resume_from_checkpoint": True,
     "fp16": False,
     "tf32": True,
     "autocast": True,
+    
 
     # Added: L2 Regularization for Generator
-    "generator_l2_reg": 1e-5,
+    "l2_regularization": 1e-5,
+
+    # Added: Discriminator Architecture Parameters - Updated for 44-feature architecture
+    "discriminator_conv_filters": [64,32],       # Decreasing filter sizes for proper dimensionality reduction
+    "discriminator_conv_kernel_size": 3,             # Larger kernel for better feature extraction
+    "discriminator_conv_strides": [2, 2,],         # Stride=2 for downsampling at each layer
+    "discriminator_lstm_units": 32,                  # Reduced LSTM units 
+    "discriminator_dense_units": [16, 8],            # Decreasing dense layer sizes
+    "discriminator_dropout_rate": 0.0,
+    "num_features": 23,                              # Training: Use 23 base features for GAN training
+
+    # Added: MMD (Maximum Mean Discrepancy) Loss Parameters
+    "enable_mmd_loss": True,          # Enable/disable MMD loss
+    "mmd_lambda_g": 0.001,            # Weight for MMD loss in generator
+    "mmd_lambda_d": 0.0001,           # Weight for MMD loss in discriminator (optional)
+    "mmd_gamma": None,               # RBF kernel bandwidth (None = auto)
+    "mmd_sample_size": 128,          # Number of samples for MMD computation (performance)
 
     # Added: ReduceLROnPlateau parameters
     "enable_reduce_lr_on_plateau": True,
     "lr_monitor_metric_g": "g_loss", # Metric for generator's LR scheduler
     "lr_monitor_metric_d": "d_loss", # Metric for discriminator's LR scheduler
-    "lr_reduction_factor": 0.1,   # Factor by which LR is reduced
-    "lr_patience": 10,            # Epochs with no improvement before LR is reduced
-    "lr_min_delta": 0.0001,       # Minimum change to qualify as an improvement
+    "lr_reduction_factor": 0.5,   # Factor by which LR is reduced
+    "lr_patience": 30,            # Epochs with no improvement before LR is reduced
+    "lr_min_delta": 1e-5,       # Minimum change to qualify as an improvement
     "min_lr_g": 1e-7,             # Minimum LR for generator
     "min_lr_d": 1e-7,             # Minimum LR for discriminator
 }

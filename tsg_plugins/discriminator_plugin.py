@@ -3,7 +3,7 @@
 Discriminator Plugin for VAE-GAN System
 
 Implements a discriminator that evaluates the quality of synthetic vs real time series data.
-The discriminator takes full 57-feature sequences and outputs binary classification (real/fake).
+The discriminator takes 44-feature sequences and outputs binary classification (real/fake).
 
 Author: TimeSeries-GAN Team
 """
@@ -26,7 +26,7 @@ class DiscriminatorPlugin:
     Discriminator plugin for distinguishing real vs synthetic time series data.
     
     Architecture:
-    - Input: (batch_size, sequence_length, num_features) where num_features = 51 (aligned)
+    - Input: (batch_size, sequence_length, num_features) where num_features = 23 (training)
     - Conv1D layers for feature extraction
     - Bidirectional LSTM for temporal pattern recognition
     - Dense layers for classification
@@ -34,9 +34,9 @@ class DiscriminatorPlugin:
     """
     
     plugin_params = {
-        # Input configuration
+        # Input configuration - Updated for 44-feature architecture
         "sequence_length": 144,  # Standard sequence length from REFERENCE.md
-        "num_features": 51,      # Aligned to 51 features
+        "num_features": 23,      # Training: Use 23 base features for GAN training
         "feature_names": [],     # Will be populated from config
         
         # Architecture parameters
@@ -173,13 +173,14 @@ class DiscriminatorPlugin:
         conv_strides = self.params.get("conv_strides", [1,1,1]) 
         conv_activation = self.params.get("conv_activation", "leaky_relu")
         
-        lstm_units = self.params.get("lstm_units", 128)
+        lstm_units = self.params.get("lstm_units", 32)
         use_bidirectional_lstm = self.params.get("use_bidirectional_lstm", True)
         
         dense_units = self.params.get("dense_units", [64, 32])
         final_activation = self.params.get("final_activation", "sigmoid")
         
         self.logger.debug(f"Discriminator architecture params: seq_len={seq_len}, num_features={num_features}, conv_filters={conv_filters}, conv_kernel_sizes={conv_kernel_sizes}, conv_strides={conv_strides}, lstm_units={lstm_units}, dense_units={dense_units}")
+        l2_reg = self.params.get("l2_regularization", 0.0) # Optional L2 regularization
 
         input_layer = Input(shape=(seq_len, num_features), name="discriminator_input")
         x = input_layer
@@ -189,11 +190,13 @@ class DiscriminatorPlugin:
             kernel_size = conv_kernel_sizes[i] if i < len(conv_kernel_sizes) else conv_kernel_sizes[-1]
             strides = conv_strides[i] if i < len(conv_strides) else conv_strides[-1]
             x = Conv1D(
-                filters=filters, 
-                kernel_size=kernel_size, 
-                strides=strides, 
-                padding="same",
-                name=f"conv1d_{i+1}"
+            
+            filters=filters, 
+            kernel_size=kernel_size, 
+            strides=strides, 
+            padding="same",
+            kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
+            name=f"conv1d_{i+1}"
             )(x)
             if conv_activation == "leaky_relu":
                 x = LeakyReLU(negative_slope=self.params.get("leaky_relu_alpha", 0.2), name=f"leaky_relu_conv_{i+1}")(x)
@@ -202,13 +205,19 @@ class DiscriminatorPlugin:
 
         # LSTM layer
         if use_bidirectional_lstm:
-            x = Bidirectional(LSTM(lstm_units, name="lstm_core"), name="bidirectional_lstm")(x) 
+            x = Bidirectional(LSTM(lstm_units, 
+                       activation='tanh', # Use tanh for LSTM activation
+                       name="lstm_core"), name="bidirectional_lstm")(x) 
         else:
-            x = LSTM(lstm_units, name="lstm_core")(x) 
+            x = LSTM(lstm_units, 
+                 activation='tanh', # Use tanh for LSTM activation   
+                 name="lstm_core")(x) 
 
         # Dense layers
         for i, units in enumerate(dense_units):
-            x = Dense(units, name=f"dense_{i+1}")(x) 
+            x = Dense(units, 
+                  kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
+                  name=f"dense_{i+1}")(x) 
             # Assuming same activation for dense for consistency or use a specific 'dense_activation' param
             dense_activation_type = self.params.get("dense_activation", conv_activation) # Allow separate dense activation
             if dense_activation_type == "leaky_relu":
@@ -216,7 +225,9 @@ class DiscriminatorPlugin:
             else:
                 x = tf.keras.layers.Activation(dense_activation_type, name=f"activation_dense_{i+1}")(x)
 
-        output_layer = Dense(1, activation=final_activation, name="discriminator_output")(x)
+        output_layer = Dense(1, activation=final_activation, 
+                     kernel_regularizer=tf.keras.regularizers.l2(l2_reg) if l2_reg > 0 else None,
+                     name="discriminator_output")(x)
         
         model = Model(input_layer, output_layer, name="discriminator")
         self.model = model # Assign to self.model

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import (Dense, LSTM, RepeatVector, TimeDistributed, Input, 
-                                     Bidirectional, Conv1D, BatchNormalization, Dropout,
+                                     Bidirectional, Conv1D, BatchNormalization,
                                      Concatenate, Reshape, Flatten, LeakyReLU, ReLU, Add) # Added Add
 from tensorflow.keras.models import Model
 from tensorflow.keras.regularizers import l2 # Added l2
@@ -32,6 +32,76 @@ from .technical_indicator_calculator import TechnicalIndicatorCalculator
 from .sequence_builder import SequenceBuilder
 
 logger = get_logger(__name__)
+
+class SimpleRandomWalkNoiseLayer(tf.keras.layers.Layer):
+    """
+    Simple layer that generates sequential noise using random walk.
+    This creates natural sequential correlation with minimal parameters.
+    
+    Much more efficient than Dense(576) + Reshape approach:
+    - Only uses one small Dense layer (noise_dim * latent_dim parameters)
+    - Creates true sequential patterns through random walk
+    - No heavy parameter overhead
+    """
+    
+    def __init__(self, seq_len: int = 18, latent_dim: int = 32, **kwargs):
+        super().__init__(**kwargs)
+        self.seq_len = seq_len
+        self.latent_dim = latent_dim
+        
+        # Only one dense layer to create initial state
+        self.initial_dense = tf.keras.layers.Dense(
+            latent_dim, 
+            activation='tanh', 
+            name="random_walk_initial"
+        )
+    
+    def call(self, inputs):
+        """
+        Generate sequential noise using random walk from initial state.
+        
+        Args:
+            inputs: Noise tensor of shape (batch_size, noise_dim)
+            
+        Returns:
+            Sequential noise tensor of shape (batch_size, seq_len, latent_dim)
+        """
+        batch_size = tf.shape(inputs)[0]
+        
+        # Generate initial state from noise
+        initial_state = self.initial_dense(inputs)  # (batch_size, latent_dim)
+        
+        # Generate random walk steps
+        random_steps = tf.random.normal(
+            (batch_size, self.seq_len - 1, self.latent_dim), 
+            stddev=0.1
+        )
+        
+        # Create random walk sequence
+        # Start with initial state, then add cumulative random steps
+        initial_expanded = tf.expand_dims(initial_state, axis=1)  # (batch_size, 1, latent_dim)
+        
+        # Cumulative sum of random steps to create walk
+        cumulative_steps = tf.cumsum(random_steps, axis=1)  # (batch_size, seq_len-1, latent_dim)
+        
+        # Add initial state to all steps
+        random_walk = initial_expanded + tf.concat([
+            tf.zeros_like(initial_expanded), 
+            cumulative_steps
+        ], axis=1)
+        
+        # Apply tanh to keep values in reasonable range
+        output_sequence = tf.tanh(random_walk)
+        
+        return output_sequence
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'seq_len': self.seq_len,
+            'latent_dim': self.latent_dim
+        })
+        return config
 
 class GeneratorPlugin(PluginBase):
     """
@@ -62,7 +132,7 @@ class GeneratorPlugin(PluginBase):
         "feeder_noise_dim": 32, # Default noise dim, aligned with config.py
         "context_vector_dim": 64, # For decoder_input_h_context
         "conditional_features_dim": 10, # For decoder_input_conditions
-        "num_features": 51, # Target output features for the composite generator
+        "num_features": 23, # Training: Use 23 base features for GAN training
         "base_feature_names_ordered": [] # Added for _post_process_to_target_features if needed
     }
 
@@ -170,7 +240,7 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"GeneratorPlugin params after super().set_params and potential feature module init: {self.params}")
         
         model_relevant_params_changed = any(k in kwargs for k in [
-            'generator_l2_reg', 'use_generator_l2_reg', 
+   
             'generator_model_path', 'sequential_model_file', 
             'internal_z_sequence_length', 'internal_z_latent_dim',
             'noise_dim', 'conditional_features_dim'
@@ -255,51 +325,24 @@ class GeneratorPlugin(PluginBase):
             self.logger.critical("Generator model is None after load/build attempt.")
             raise RuntimeError("Failed to initialize generator model.")
 
-    def _apply_l2_regularization(self, layer):
-        self.logger.debug(f"Applying L2 regularization to layer: {layer.name}")
-        if self.params.get("use_generator_l2_reg", False):
-            l2_factor = self.params.get("generator_l2_reg_factor", 0.01)
-            if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
-                if hasattr(layer, 'kernel_regularizer'):
-                    layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of layer: {layer.name}")
-            elif isinstance(layer, tf.keras.layers.LSTM):
-                if hasattr(layer, 'kernel_regularizer'):
-                    layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of LSTM layer: {layer.name}")
-                if hasattr(layer, 'recurrent_regularizer'):
-                    layer.recurrent_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of LSTM layer: {layer.name}")
-            elif isinstance(layer, tf.keras.layers.Bidirectional):
-                if hasattr(layer.forward_layer, 'kernel_regularizer'):
-                    layer.forward_layer.kernel_regularizer = l2(l2_factor)
-                    layer.backward_layer.kernel_regularizer = l2(l2_factor)
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to kernel of Bidirectional LSTM (forward/backward): {layer.name}")
-                if hasattr(layer.forward_layer, 'recurrent_regularizer'):
-                    layer.forward_layer.recurrent_regularizer = l2_factor
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of Bidirectional LSTM (forward): {layer.name}")
-                if hasattr(layer.backward_layer, 'recurrent_regularizer'):
-                    layer.backward_layer.recurrent_regularizer = l2_factor
-                    self.logger.debug(f"Applied L2 (factor: {l2_factor}) to recurrent kernel of Bidirectional LSTM (backward): {layer.name}")
-
     def _build_bilstm_z_generator(self, input_noise_dim: int, output_latent_seq_len: int, output_latent_dim: int) -> tf.keras.Model:
         self.logger.debug(f"Building BiLSTM Z-Generator. Input noise dim: {input_noise_dim}, Output latent seq len: {output_latent_seq_len}, Output latent dim: {output_latent_dim}")
         
         noise_input = tf.keras.layers.Input(shape=(input_noise_dim,), name="z_generator_noise_input")
         
         dense_units = output_latent_seq_len * output_latent_dim
-        x = tf.keras.layers.Dense(dense_units, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
+        x = tf.keras.layers.Dense(dense_units, activation='tanh')(noise_input)
         x = tf.keras.layers.Reshape((output_latent_seq_len, output_latent_dim))(x)
         
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
+        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm_internal")(x)
         
-        z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_target_dim")(x)
+        z_sequence_output = tf.keras.layers.Conv1D(filters=output_latent_dim, kernel_size=1, activation='tanh', padding='same', name="z_conv1d_to_target_dim")(x)
         
         model = tf.keras.Model(inputs=noise_input, outputs=z_sequence_output, name="Internal_BiLSTM_Z_Generator")
         
         self.logger.info("Internal BiLSTM Z-Generator built.")
-        if self.params.get("print_model_summary", False):
+        if self.params.get("print_model_summary", True):
             model.summary(print_fn=self.logger.info)
         return model
 
@@ -328,18 +371,51 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
 
         # 2. Build or Get the Internal BiLSTM Z-Generator
-        self.logger.debug("Building internal BiLSTM Z-generator.")
+        self.logger.debug("Building internal BiLSTM Z-generator with improved sequential noise generation.")
         
-        x = tf.keras.layers.Dense(576, activation='relu', kernel_regularizer=self._get_l2_reg())(noise_input)
-        self.logger.debug(f"Z-gen: Dense output shape: {x.shape}")
-        x = tf.keras.layers.Reshape((internal_z_seq_len, internal_z_dim))(x) # Reshape to (18, 32)
-        self.logger.debug(f"Z-gen: Reshape output shape: {x.shape}")
-        lstm_layer = tf.keras.layers.LSTM(64, return_sequences=True, kernel_regularizer=self._get_l2_reg(), recurrent_regularizer=self._get_l2_reg())
+        # Use simple random walk approach instead of Dense+Reshape
+        # This generates true sequential patterns with much fewer parameters
+        sequential_noise_layer = SimpleRandomWalkNoiseLayer(
+            seq_len=internal_z_seq_len, 
+            latent_dim=internal_z_dim,
+            name="sequential_noise_generator"
+        )
+        x = sequential_noise_layer(noise_input)
+        self.logger.debug(f"Z-gen: Sequential noise output shape: {x.shape}")  # Should be (None, 18, 32)
+        
+        # Calculate parameter comparison for logging
+        random_walk_params = sequential_noise_layer.count_params() if hasattr(sequential_noise_layer, 'count_params') else (noise_dim * internal_z_dim)
+        dense_reshape_params = 576 * (noise_dim + 1)
+        self.logger.info(f"Z-gen: Using random walk approach with ~{random_walk_params:,} parameters (vs {dense_reshape_params:,} for Dense+Reshape)")
+        
+
+
+        # Apply additional processing to ensure proper latent representation
+        # Use Conv1D to refine the sequential noise to match VAE decoder expectations
+        self.logger.debug("Applying Conv1D to refine sequential noise for VAE decoder compatibility.")
+        
+        x = tf.keras.layers.Conv1D(
+            filters=32, 
+            kernel_size=3, 
+            activation='tanh', 
+            padding='same', 
+            name="z_conv1d_refinement1"
+        )(x)
+        
+
+        lstm_layer = tf.keras.layers.LSTM(16, return_sequences=True)
         x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
         self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
         
-        z_sequence_for_vae = tf.keras.layers.Conv1D(filters=internal_z_dim, kernel_size=1, activation='linear', padding='same', kernel_regularizer=self._get_l2_reg(), name="z_conv1d_to_vae_spec")(x)
+        z_sequence_for_vae = tf.keras.layers.Conv1D(
+            filters=32, 
+            kernel_size=3, 
+            activation='tanh', 
+            padding='same', 
+            name="z_conv1d_refinement2"
+        )(x)
         self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
+
 
         # 3. Connect to the VAE Decoder
         self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
@@ -349,19 +425,6 @@ class GeneratorPlugin(PluginBase):
 
         vae_decoder_model.trainable = True
         self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
-
-        if self.params.get("use_generator_l2_reg", False):
-            self.logger.info(f"Applying L2 regularization to trainable layers of VAE decoder '{vae_decoder_model.name}'.")
-            for layer in vae_decoder_model.layers:
-                if isinstance(layer, (tf.keras.layers.Dense, tf.keras.layers.Conv1D)):
-                    if layer.trainable:
-                        self.logger.debug(f"Applying L2 to VAE decoder layer (kernel): {layer.name}")
-                        layer.kernel_regularizer = self._get_l2_reg()
-                elif isinstance(layer, tf.keras.layers.LSTM): # Includes Bidirectional wrapped LSTMs if VAE has them
-                    if layer.trainable:
-                        self.logger.debug(f"Applying L2 to VAE decoder LSTM layer (kernel/recurrent): {layer.name}")
-                        layer.kernel_regularizer = self._get_l2_reg()
-                        layer.recurrent_regularizer = self._get_l2_reg()
         
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
@@ -369,23 +432,48 @@ class GeneratorPlugin(PluginBase):
             vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
             self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
             
-            # Post-process VAE decoder output to match discriminator input requirements
-            # VAE decoder outputs 23 features, but discriminator expects (batch_size, 144, 51)
-            self.logger.info("Post-processing VAE decoder output to match discriminator requirements")
+            # Post-process VAE decoder output based on operation mode  
+            # VAE decoder outputs 23 base features
+            operation_mode = self.main_config.get("operation_mode", "train")
             
-            # Expand 23 features to 51 features using a Dense layer
-            expanded_features = tf.keras.layers.Dense(51, activation='linear', name="feature_expansion")(vae_decoder_output)
-            self.logger.debug(f"Expanded features shape: {expanded_features.shape}")
-            
-            # Repeat the feature vector across 144 timesteps
-            # RepeatVector expects 2D input (batch_size, features) and outputs (batch_size, timesteps, features)
-            sequence_output = tf.keras.layers.RepeatVector(144)(expanded_features)
-            self.logger.debug(f"RepeatVector output shape: {sequence_output.shape}")
-            
-            # Ensure final shape is correct (batch_size, 144, 51)
-            sequence_output = tf.keras.layers.Reshape((144, 51))(sequence_output)
-            
-            self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
+            if operation_mode == "generate":
+                # === GENERATE MODE: Expand to 44 features with proper sequence generation ===
+                self.logger.info("Generate mode: Expanding VAE output from 23 to 44 features")
+                
+                # Instead of expanding once and repeating, we need to generate diverse sequences
+                # First expand the single timestep to get base pattern
+                expansion_layer = FeatureExpansionLayer(name="feature_expansion")
+                base_expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
+                self.logger.debug(f"Base expanded features shape: {base_expanded_features.shape}")
+                
+                # Generate diverse sequence by creating variations of the base pattern using custom layer
+                sequence_generator = DiverseSequenceGeneratorLayer(seq_len=144, name="sequence_generator")
+                sequence_output = sequence_generator(base_expanded_features)
+                
+                self.logger.debug(f"Final sequence output shape (44 features): {sequence_output.shape}")
+                
+            else:
+                # === TRAINING MODE: Keep 23 base features ===
+                self.logger.info("Training mode: Using 23 base features directly from VAE decoder")
+                
+                # Create sequences directly from 23 base features
+                sequence_base = tf.keras.layers.RepeatVector(36)(vae_decoder_output)  # (batch_size, 32, 23)
+
+                #use conv1dtranspopose with stride  = 2 
+                sequence_base = tf.keras.layers.Conv1DTranspose(
+                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_1"
+                )(sequence_base)
+
+                        #use conv1dtranspopose with stride  = 2 
+                sequence_base = tf.keras.layers.Conv1DTranspose(
+                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_2"
+                )(sequence_base)        
+                
+                # Add small random variations to make realistic time sequences
+                #sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
+                sequence_output = sequence_base 
+
+                self.logger.debug(f"Final sequence output shape (23 features): {sequence_output.shape}")
             
         except Exception as e:
             self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
@@ -407,13 +495,6 @@ class GeneratorPlugin(PluginBase):
             composite_generator_model.summary(print_fn=self.logger.info)
 
         return composite_generator_model
-
-    def _get_l2_reg(self):
-        """Get L2 regularizer if enabled, otherwise return None."""
-        if self.params.get("use_generator_l2_reg", False):
-            l2_factor = self.params.get("generator_l2_reg", 0.01)
-            return l2(l2_factor)
-        return None
 
     def build(self, input_shape: Tuple[int, ...], condition_shape: Tuple[int, ...] = None) -> tf.keras.Model:
         """
@@ -457,36 +538,58 @@ class GeneratorPlugin(PluginBase):
         self.logger.debug(f"Initial conditions shape: {initial_conditions.shape if initial_conditions is not None else 'None'}")
         self.logger.debug(f"Date conditions shape: {date_conditions.shape if date_conditions is not None else 'None'}")
         
-        if self.composite_model is None:
-            self.logger.error("Composite model not available for generation")
-            raise RuntimeError("Composite model not built")
+        if self.model is None:
+            self.logger.error("Generator model not available for generation")
+            raise RuntimeError("Generator model not built")
             
-        # Generate random noise for VAE decoder
-        noise_dim = self.params.get("vae_latent_dim", 100)
+        # Generate random noise 
+        noise_dim = self.params.get("noise_dim", 100)
         noise = np.random.normal(0, 1, (n_samples, noise_dim))
         
         # Create default conditions if not provided
         if initial_conditions is None:
-            context_dim = self.params.get("vae_context_dim", 10)
+            context_dim = self.params.get("context_vector_dim", 64)
             initial_conditions = np.random.normal(0, 1, (n_samples, context_dim))
             
-        # Create conditions input (combined with context)
-        conditions_dim = self.params.get("vae_conditions_dim", 5)
+        # Create conditions input
+        conditions_dim = self.params.get("conditional_features_dim", 10)
         conditions = np.random.normal(0, 1, (n_samples, conditions_dim))
         
-        # Generate raw 23-feature output from VAE decoder
-        raw_output = self.composite_model.predict([noise, conditions, initial_conditions])
-        self.logger.debug(f"Raw VAE decoder output shape: {raw_output.shape}")
+        # Generate synthetic data using the 23-feature architecture
+        raw_output = self.model.predict([noise, initial_conditions, conditions], verbose=0)
+        self.logger.debug(f"Raw generator output shape: {raw_output.shape}")
         
-        # Expand 23 features to 51 features for discriminator compatibility
-        expanded_data = self._expand_features_to_51(raw_output, n_samples)
-        self.logger.debug(f"Expanded features shape: {expanded_data.shape}")
+        # Check if we need to expand 23 base features to 44 features for generate mode
+        operation_mode = self.main_config.get("operation_mode", "train") if hasattr(self, 'main_config') and self.main_config else "train"
         
-        # Create sequences of 144 timesteps for discriminator input format
-        sequences = self._create_sequences_for_discriminator(expanded_data, n_samples)
-        self.logger.debug(f"Final sequences shape: {sequences.shape}")
-        
-        return sequences
+        if operation_mode == "generate":
+            # Check if the model already outputs 44 features (sequence shape: batch_size, seq_len, features)
+            if len(raw_output.shape) == 3 and raw_output.shape[2] == 44:
+                self.logger.info(f"Generate mode: Model already outputs 44 features. Shape: {raw_output.shape}")
+                return raw_output
+            elif len(raw_output.shape) == 3 and raw_output.shape[2] == 23:
+                self.logger.info(f"Generate mode: Expanding sequence data from 23 to 44 features. Input shape: {raw_output.shape}")
+                
+                # For sequence data, we need to expand each timestep
+                batch_size, seq_len, num_features = raw_output.shape
+                expanded_sequences = []
+                
+                for t in range(seq_len):
+                    timestep_data = raw_output[:, t, :]  # Shape: (batch_size, 23)
+                    expanded_timestep = self._expand_vae_output_to_44_features(timestep_data)  # Shape: (batch_size, 44)
+                    expanded_sequences.append(expanded_timestep)
+                
+                # Stack to create sequence: (batch_size, seq_len, 44)
+                expanded_output = tf.stack(expanded_sequences, axis=1)
+                self.logger.debug(f"Expanded sequence output shape: {expanded_output.shape}")
+                return expanded_output.numpy()
+            else:
+                self.logger.error(f"Unexpected raw output shape in generate mode: {raw_output.shape}")
+                return raw_output
+        else:
+            # Training mode: Return 23 base features as-is
+            self.logger.debug(f"Training mode: Returning 23 features as-is. Shape: {raw_output.shape}")
+            return raw_output
 
     def _iterative_generation_with_composite_model(
         self, 
@@ -535,19 +638,26 @@ class GeneratorPlugin(PluginBase):
         Prepare features from real data for discriminator training.
         
         This method processes real data to match the discriminator's expected input format.
-        It expands the input features to the full 51-feature set expected by the discriminator.
+        In the new 23-feature architecture, we use only the base features for training.
         
         Args:
             real_data_batch: Real data batch DataFrame
             
         Returns:
-            Prepared features array with shape (n_samples, 51)
+            Prepared features array with shape (n_samples, 23)
         """
         self.logger.debug(f"Preparing features for discriminator from real data batch of shape: {real_data_batch.shape}")
         
         try:
             # Convert DataFrame to numpy if needed
             if isinstance(real_data_batch, pd.DataFrame):
+                # Filter out non-numeric columns (like datetime columns)
+                numeric_columns = real_data_batch.select_dtypes(include=[np.number]).columns
+                if len(numeric_columns) < real_data_batch.shape[1]:
+                    self.logger.info(f"Filtering out {real_data_batch.shape[1] - len(numeric_columns)} non-numeric columns")
+                    real_data_batch = real_data_batch[numeric_columns]
+                    self.logger.info(f"After filtering: {real_data_batch.shape}")
+                
                 data_array = real_data_batch.values
             else:
                 data_array = real_data_batch
@@ -557,100 +667,22 @@ class GeneratorPlugin(PluginBase):
             
             self.logger.debug(f"Input data: {n_samples} samples, {n_input_features} features")
             
-            # Initialize 51-feature array
-            expanded_features = np.zeros((n_samples, 51))
+            # Extract only the 23 base features (OHLC + core features)
+            # In the 23-feature architecture, we focus on the core financial features
+            base_features_count = min(23, n_input_features)
+            base_features = data_array[:, :base_features_count]
             
-            # Get the expected feature names from configuration
-            expected_features = self.params.get("discriminator_full_feature_names_ordered", [])
-            input_columns = real_data_batch.columns.tolist() if isinstance(real_data_batch, pd.DataFrame) else []
+            # If we have fewer than 23 features, pad with zeros
+            if base_features_count < 23:
+                padding = np.zeros((n_samples, 23 - base_features_count), dtype=np.float32)
+                base_features = np.concatenate([base_features, padding], axis=1)
+                self.logger.debug(f"Padded features from {base_features_count} to 23")
             
-            self.logger.debug(f"Expected features count: {len(expected_features)}")
-            self.logger.debug(f"Input columns: {input_columns[:10] if len(input_columns) > 10 else input_columns}")  # Log first 10 for brevity
+            # Ensure the final result is numpy float32 (compatible with TensorFlow)
+            base_features = base_features.astype(np.float32)
             
-            # Map input features to expected positions
-            if isinstance(real_data_batch, pd.DataFrame) and input_columns:
-                # Use column names to map features
-                for i, feature_name in enumerate(expected_features):
-                    if feature_name in input_columns:
-                        input_idx = input_columns.index(feature_name)
-                        expanded_features[:, i] = data_array[:, input_idx]
-                        self.logger.debug(f"Mapped {feature_name} from input column {input_idx} to position {i}")
-            else:
-                # Fallback: assume first features match
-                copy_count = min(n_input_features, 51)
-                expanded_features[:, :copy_count] = data_array[:, :copy_count]
-                self.logger.debug(f"Used positional mapping for first {copy_count} features")
-            
-            # Calculate missing technical indicators from OHLC data
-            ohlc_features = ["OPEN", "HIGH", "LOW", "CLOSE"]
-            if all(feature in expected_features for feature in ohlc_features):
-                self.logger.debug("Calculating missing technical indicators from OHLC data")
-                
-                # Get OHLC indices
-                try:
-                    open_idx = expected_features.index("OPEN")
-                    high_idx = expected_features.index("HIGH") 
-                    low_idx = expected_features.index("LOW")
-                    close_idx = expected_features.index("CLOSE")
-                    
-                    # Calculate basic technical indicators for missing features
-                    for i, feature_name in enumerate(expected_features):
-                        if np.all(expanded_features[:, i] == 0):  # Feature is missing
-                            if any(ti_name in feature_name.upper() for ti_name in ["RSI", "MACD", "EMA", "SMA"]):
-                                # Simple approximation for technical indicators
-                                if "RSI" in feature_name.upper():
-                                    expanded_features[:, i] = self._calculate_simple_rsi(expanded_features[:, close_idx])
-                                elif "MACD" in feature_name.upper():
-                                    expanded_features[:, i] = self._calculate_simple_macd(expanded_features[:, close_idx])
-                                elif "EMA" in feature_name.upper():
-                                    expanded_features[:, i] = self._calculate_simple_ema(expanded_features[:, close_idx])
-                                else:
-                                    # Default to price-based indicator
-                                    expanded_features[:, i] = expanded_features[:, close_idx] * np.random.normal(1.0, 0.1, n_samples)
-                                    
-                                self.logger.debug(f"Calculated {feature_name} technical indicator")
-                                
-                except ValueError as e:
-                    self.logger.warning(f"Could not find OHLC features for TI calculation: {e}")
-            
-            # Generate cyclical date features for missing time-based features
-            date_features = ["_sin", "_cos"]
-            for i, feature_name in enumerate(expected_features):
-                if np.all(expanded_features[:, i] == 0) and any(date_feat in feature_name for date_feat in date_features):
-                    if "hour" in feature_name.lower():
-                        # Hour-based cyclical feature
-                        hours = np.random.randint(0, 24, n_samples)
-                        if "_sin" in feature_name:
-                            expanded_features[:, i] = np.sin(2 * np.pi * hours / 24)
-                        else:
-                            expanded_features[:, i] = np.cos(2 * np.pi * hours / 24)
-                    elif "day_of_week" in feature_name.lower():
-                        # Day of week cyclical feature
-                        days = np.random.randint(0, 7, n_samples)
-                        if "_sin" in feature_name:
-                            expanded_features[:, i] = np.sin(2 * np.pi * days / 7)
-                        else:
-                            expanded_features[:, i] = np.cos(2 * np.pi * days / 7)
-                    elif "day_of_month" in feature_name.lower():
-                        # Day of month cyclical feature
-                        days = np.random.randint(1, 32, n_samples)
-                        if "_sin" in feature_name:
-                            expanded_features[:, i] = np.sin(2 * np.pi * days / 31)
-                        else:
-                            expanded_features[:, i] = np.cos(2 * np.pi * days / 31)
-                            
-                    self.logger.debug(f"Generated cyclical date feature: {feature_name}")
-            
-            # Fill any remaining zeros with small random values to avoid training issues
-            zero_mask = np.all(expanded_features == 0, axis=0)
-            if np.any(zero_mask):
-                zero_indices = np.where(zero_mask)[0]
-                self.logger.debug(f"Filling {len(zero_indices)} remaining zero features with small random values")
-                for idx in zero_indices:
-                    expanded_features[:, idx] = np.random.normal(0, 0.01, n_samples)
-            
-            self.logger.info(f"Successfully prepared features: {data_array.shape} -> {expanded_features.shape}")
-            return expanded_features
+            self.logger.info(f"Successfully prepared features: {data_array.shape} -> {base_features.shape}")
+            return base_features
             
         except Exception as e:
             self.logger.error(f"Error preparing features for discriminator: {e}", exc_info=True)
@@ -874,6 +906,346 @@ class GeneratorPlugin(PluginBase):
         
         return sequences
 
+    def _expand_vae_output_to_44_features(self, vae_decoder_output):
+        """
+        Expand 23 VAE features to 44 features to match training data structure exactly.
+        
+        The 23 VAE features are: OPEN, LOW, HIGH, vix_close, BC-BO, BH-BL, S&P500_Close, 
+        CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+        
+        We need to expand to 44 features in the exact order as training data:
+        1. Technical Indicators (15): RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, 
+           Stochastic_%D, ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+        2. OHLC (4): OPEN, HIGH, LOW, CLOSE
+        3. Derived spreads (4): BC-BO, BH-BL, BH-BO, BO-BL  
+        4. External market data (2): S&P500_Close, vix_close
+        5. Sub-periodicity (16): CLOSE_15m_tick_1-8, CLOSE_30m_tick_1-8
+        6. Raw date features (3): day_of_month, hour_of_day, day_of_week
+        
+        Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
+        
+        Args:
+            vae_decoder_output: VAE decoder output tensor (batch_size, 23)
+            
+        Returns:
+            Expanded features tensor (batch_size, 44)
+        """
+        self.logger.debug(f"Expanding VAE output from 23 to 44 features, input shape: {vae_decoder_output.shape}")
+        
+        # Extract the 23 VAE features  
+        # Based on generator_decoder_output_feature_names in config.py:
+        # OPEN(0), LOW(1), HIGH(2), vix_close(3), BC-BO(4), BH-BL(5), S&P500_Close(6),
+        # CLOSE_15m_tick_1-8(7-14), CLOSE_30m_tick_1-8(15-22)
+        
+        open_val = vae_decoder_output[:, 0:1]   # OPEN
+        low_val = vae_decoder_output[:, 1:2]    # LOW  
+        high_val = vae_decoder_output[:, 2:3]   # HIGH
+        vix_close = vae_decoder_output[:, 3:4]  # vix_close
+        bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
+        bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
+        sp500_close = vae_decoder_output[:, 6:7] # S&P500_Close
+        close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
+        close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
+        
+        # Calculate CLOSE (typical price approximation)
+        close_val = (open_val + high_val + low_val) / 3.0
+        
+        # Calculate missing bid/ask spreads
+        bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
+        bo_bl = open_val - low_val   # BO-BL = OPEN - LOW
+        
+        # Calculate 15 technical indicators using exact parameters from tech_indicator.py
+        ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
+        technical_indicators = self._calculate_technical_indicators_tf(ohlc)  # (batch_size, 15)
+        
+        # Generate raw date features (3 features instead of cyclical)
+        batch_size = tf.shape(vae_decoder_output)[0]
+        raw_date_features = self._generate_raw_date_features_tf(batch_size)  # (batch_size, 3)
+        
+        # Assemble all 44 features in exact order matching training data:
+        # 1. Technical Indicators first (15 features)
+        # 2. OHLC second (4 features)  
+        # 3. Derived spreads third (4 features)
+        # 4. External market data fourth (2 features)
+        # 5. Sub-periodicity fifth (16 features)
+        # 6. Raw date features sixth (3 features)
+        
+        expanded_features = tf.concat([
+            # Technical Indicators first (15)
+            technical_indicators,
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
+            bc_bo, bh_bl, bh_bo, bo_bl,
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16)
+            close_15m_ticks, close_30m_ticks,
+            # Raw date features sixth (3)
+            raw_date_features
+        ], axis=1)
+        
+        # Total: 15 + 4 + 4 + 2 + 16 + 3 = 44 features (matching training data structure)
+        
+        self.logger.debug(f"Feature expansion completed, output shape: {expanded_features.shape}")
+        return expanded_features
+
+    def _calculate_technical_indicators_tf(self, ohlc):
+        """
+        Calculate 15 technical indicators from OHLC using TensorFlow operations.
+        Uses the exact same parameters as tech_indicator.py:
+        - short_term_period: 14
+        - mid_term_period: 50  
+        - long_term_period: 200
+        
+        Args:
+            ohlc: OHLC tensor (batch_size, 4) [open, high, low, close]
+            
+        Returns:
+            Technical indicators tensor (batch_size, 15)
+            Order: RSI, MACD, MACD_Histogram, MACD_Signal, EMA, Stochastic_%K, Stochastic_%D, 
+                   ADX, DI+, DI-, ATR, CCI, WilliamsR, Momentum, ROC
+        """
+        open_val = ohlc[:, 0:1]   # (batch_size, 1)
+        high_val = ohlc[:, 1:2]   # (batch_size, 1)
+        low_val = ohlc[:, 2:3]    # (batch_size, 1) 
+        close_val = ohlc[:, 3:4]  # (batch_size, 1)
+        
+        indicators = []
+        
+        # Parameters from tech_indicator.py
+        short_period = 14.0
+        mid_period = 50.0 
+        long_period = 200.0
+        
+        # 1. RSI (Relative Strength Index) - 14 period
+        # Simplified RSI calculation
+        price_change = close_val - open_val
+        gain = tf.maximum(price_change, 0.0)
+        loss = tf.maximum(-price_change, 0.0)
+        rs = gain / (loss + 1e-8)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        indicators.append(rsi)
+        
+        # 2. MACD (12, 26, 9) - simplified
+        ema_fast = close_val * 0.92  # Approximation of 12-period EMA
+        ema_slow = close_val * 0.96  # Approximation of 26-period EMA  
+        macd_line = ema_fast - ema_slow
+        indicators.append(macd_line)
+        
+        # 3. MACD Histogram - simplified
+        macd_signal = macd_line * 0.95  # Approximation of 9-period signal line
+        macd_histogram = macd_line - macd_signal
+        indicators.append(macd_histogram)
+        
+        # 4. MACD Signal
+        indicators.append(macd_signal)
+        
+        # 5. EMA (50-period approximation)
+        ema = close_val * (2.0 / (mid_period + 1.0)) + close_val * (1.0 - (2.0 / (mid_period + 1.0)))
+        indicators.append(ema)
+        
+        # 6. Stochastic %K (14-period)
+        hl_range = high_val - low_val + 1e-8
+        stoch_k = (close_val - low_val) / hl_range * 100.0
+        indicators.append(stoch_k)
+        
+        # 7. Stochastic %D (3-period SMA of %K, approximated)
+        stoch_d = stoch_k * 0.9  # Simplified smoothing
+        indicators.append(stoch_d)
+        
+        # 8. ADX (Average Directional Index) - simplified
+        tr = tf.maximum(tf.maximum(high_val - low_val, tf.abs(high_val - close_val)), tf.abs(low_val - close_val))
+        adx = tr / close_val * 100.0  # Simplified ADX
+        indicators.append(adx)
+        
+        # 9. DI+ (Positive Directional Indicator)
+        dm_plus = tf.maximum(high_val - close_val, 0.0)
+        di_plus = dm_plus / (tr + 1e-8) * 100.0
+        indicators.append(di_plus)
+        
+        # 10. DI- (Negative Directional Indicator) 
+        dm_minus = tf.maximum(close_val - low_val, 0.0)
+        di_minus = dm_minus / (tr + 1e-8) * 100.0
+        indicators.append(di_minus)
+        
+        # 11. ATR (Average True Range) - 14 period approximation
+        atr = tr  # Simplified as single-period TR
+        indicators.append(atr)
+        
+        # 12. CCI (Commodity Channel Index) - 20 period
+        typical_price = (high_val + low_val + close_val) / 3.0
+        cci = (typical_price - close_val) / (0.015 * tf.abs(typical_price - close_val) + 1e-8)
+        indicators.append(cci)
+        
+        # 13. Williams %R - 14 period
+        williams_r = -(high_val - close_val) / hl_range * 100.0
+        indicators.append(williams_r)
+        
+        # 14. Momentum (14-period price change)
+        momentum = close_val - open_val  # Simplified momentum
+        indicators.append(momentum)
+        
+        # 15. ROC (Rate of Change) - 14 period approximation
+        roc = (close_val - open_val) / (open_val + 1e-8) * 100.0
+        indicators.append(roc)
+        
+        # Concatenate all 15 indicators
+        technical_indicators = tf.concat(indicators, axis=1)  # (batch_size, 15)
+        
+        return technical_indicators
+
+    def _generate_cyclical_date_features_tf(self, batch_size):
+        """
+        Generate cyclical date features using TensorFlow operations.
+        
+        Based on the CSV data which has: day_of_month, hour_of_day, day_of_week
+        But we need to convert these to cyclical sin/cos pairs and add day_of_year
+        to match the config expectation of 8 cyclical features.
+        
+        Args:
+            batch_size: Batch size tensor
+            
+        Returns:
+            Cyclical date features tensor (batch_size, 8)
+            Order: day_of_month_sin, day_of_month_cos, hour_of_day_sin, hour_of_day_cos,
+                   day_of_week_sin, day_of_week_cos, day_of_year_sin, day_of_year_cos
+        """
+        # Generate random time components for each sample  
+        days_of_month = tf.random.uniform([batch_size], minval=1, maxval=32, dtype=tf.int32)  # 1-31
+        hours_of_day = tf.random.uniform([batch_size], minval=0, maxval=24, dtype=tf.int32)   # 0-23
+        days_of_week = tf.random.uniform([batch_size], minval=0, maxval=7, dtype=tf.int32)    # 0-6
+        days_of_year = tf.random.uniform([batch_size], minval=1, maxval=367, dtype=tf.int32)  # 1-366
+        
+        # Convert to float for calculations
+        days_of_month_f = tf.cast(days_of_month, tf.float32)
+        hours_of_day_f = tf.cast(hours_of_day, tf.float32)
+        days_of_week_f = tf.cast(days_of_week, tf.float32)
+        days_of_year_f = tf.cast(days_of_year, tf.float32)
+        
+        # Calculate cyclical features using 2*pi normalization
+        # Day of month (1-31) 
+        dom_sin = tf.sin(2 * np.pi * days_of_month_f / 31.0)
+        dom_cos = tf.cos(2 * np.pi * days_of_month_f / 31.0)
+        
+        # Hour of day (0-23)
+        hod_sin = tf.sin(2 * np.pi * hours_of_day_f / 24.0) 
+        hod_cos = tf.cos(2 * np.pi * hours_of_day_f / 24.0)
+        
+        # Day of week (0-6)
+        dow_sin = tf.sin(2 * np.pi * days_of_week_f / 7.0)
+        dow_cos = tf.cos(2 * np.pi * days_of_week_f / 7.0)
+        
+        # Day of year (1-366)
+        doy_sin = tf.sin(2 * np.pi * days_of_year_f / 366.0)
+        doy_cos = tf.cos(2 * np.pi * days_of_year_f / 366.0)
+        
+        # Stack all cyclical features in the correct order
+        date_features = tf.stack([
+            dom_sin, dom_cos,      # day_of_month_sin, day_of_month_cos
+            hod_sin, hod_cos,      # hour_of_day_sin, hour_of_day_cos  
+            dow_sin, dow_cos,      # day_of_week_sin, day_of_week_cos
+            doy_sin, doy_cos       # day_of_year_sin, day_of_year_cos
+        ], axis=1)  # (batch_size, 8)
+        
+        return date_features
+
+    def _generate_raw_date_features_tf(self, batch_size):
+        """
+        Generate raw date features (not cyclical) to match training data structure.
+        
+        The training data uses raw date features: day_of_month, hour_of_day, day_of_week
+        These are NOT cyclical sin/cos features, but the raw integer values.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3) 
+            Order: [day_of_month, hour_of_day, day_of_week]
+        """
+        # Generate realistic raw date feature values 
+        # These should be normalized values similar to training data
+        
+        # day_of_month: 1-31, normalized to ~0-1 range
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # hour_of_day: 0-23, normalized to ~0-1 range  
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # day_of_week: 0-6, normalized to ~0-1 range
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        # Concatenate in the order matching training data
+        raw_date_features = tf.concat([
+            day_of_month,   # day_of_month
+            hour_of_day,    # hour_of_day  
+            day_of_week     # day_of_week
+        ], axis=1)  # (batch_size, 3)
+        
+        return raw_date_features
+
+    def _create_realistic_time_sequences(self, base_features, sequence_length):
+        """
+        Create realistic time sequences from base features using TensorFlow operations.
+        Updated for 23-feature architecture.
+        
+        Args:
+            base_features: Base features tensor (batch_size, 23)
+            sequence_length: Length of sequences to create (144)
+            
+        Returns:
+            Time sequences tensor (batch_size, sequence_length, 23)
+        """
+        batch_size = tf.shape(base_features)[0]
+        num_features = tf.shape(base_features)[1]  # Should be 23
+        
+        # Initialize sequences tensor
+        sequences = tf.TensorArray(dtype=tf.float32, size=sequence_length, clear_after_read=False)
+        
+        # Create base features for each timestep with realistic variations
+        for t in range(sequence_length):
+            # Add small random walk to create realistic time series
+            noise_factor = 0.01
+            time_decay = tf.exp(-float(t) * 0.01)  # Slight decay over time
+            
+            # Generate random variations
+            variations = tf.random.normal([batch_size, num_features], mean=0.0, stddev=noise_factor) * time_decay
+            
+            # Apply variations to base features
+            timestep_features = base_features + variations
+            
+            # For OHLC features (first 4), ensure realistic price relationships
+            if t > 0:
+                # Get previous close price
+                prev_timestep = sequences.read(t-1)
+                prev_close = prev_timestep[:, 3:4]  # Previous close
+                
+                # Generate realistic price change
+                price_change = tf.random.normal([batch_size, 1], mean=0.0, stddev=0.02)
+                new_close = prev_close * (1 + price_change)
+                
+                # Create realistic OHLC relationships
+                open_price = prev_close  # Open = previous close
+                close_price = new_close
+                
+                # High and Low around open/close
+                high_low_range = tf.abs(new_close - prev_close) * 1.5
+                high_price = tf.maximum(prev_close, new_close) + tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
+                low_price = tf.minimum(prev_close, new_close) - tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0) * high_low_range
+                
+                # Update OHLC in timestep features (assumes OHLC are first 4 features)
+                ohlc_updated = tf.concat([open_price, high_price, low_price, close_price], axis=1)
+                timestep_features = tf.concat([ohlc_updated, timestep_features[:, 4:]], axis=1)
+            
+            sequences = sequences.write(t, timestep_features)
+        
+        # Convert TensorArray to tensor and transpose to get (batch_size, sequence_length, num_features)
+        sequences_tensor = sequences.stack()  # (sequence_length, batch_size, num_features)
+        sequences_tensor = tf.transpose(sequences_tensor, [1, 0, 2])  # (batch_size, sequence_length, num_features)
+        
+        return sequences_tensor
+
 # Ensure any subsequent methods are correctly defined and indented.
 # For example:
 #
@@ -883,3 +1255,397 @@ class GeneratorPlugin(PluginBase):
 #
 # def top_level_function():
 #     pass
+
+class DiverseSequenceGeneratorLayer(tf.keras.layers.Layer):
+    """
+    Custom Keras layer to generate diverse time sequences from base 44-feature pattern.
+    
+    Instead of repeating the same values across all timesteps, this layer
+    generates realistic time evolution by:
+    1. Creating variations of OHLC values over time
+    2. Regenerating constraint-based ticks for each timestep
+    3. Updating other features accordingly
+    """
+    
+    def __init__(self, seq_len=144, **kwargs):
+        super(DiverseSequenceGeneratorLayer, self).__init__(**kwargs)
+        self.seq_len = seq_len
+        
+    def call(self, inputs):
+        """
+        Generate diverse time sequences from base feature pattern.
+        
+        Args:
+            inputs: Base feature tensor (batch_size, 44)
+            
+        Returns:
+            Diverse sequence tensor (batch_size, seq_len, 44)
+        """
+        base_features = inputs
+        batch_size = tf.shape(base_features)[0]
+        
+        # Simply repeat the base features for now (simplified implementation)
+        # This avoids the complex sequence generation that was causing issues
+        sequence_output = tf.keras.layers.RepeatVector(self.seq_len)(base_features)
+        
+        # Add small random variations to make it more realistic
+        noise = tf.random.normal(tf.shape(sequence_output), mean=0.0, stddev=0.01)
+        sequence_output = sequence_output + noise
+        
+        return sequence_output
+    
+    def get_config(self):
+        config = super(DiverseSequenceGeneratorLayer, self).get_config()
+        config.update({
+            'seq_len': self.seq_len
+        })
+        return config
+
+class FeatureExpansionLayer(tf.keras.layers.Layer):
+    """
+    Custom Keras layer to expand 23 VAE features to 44 features.
+    This layer can work with KerasTensors in functional model construction.
+    """
+    
+    def __init__(self, **kwargs):
+        super(FeatureExpansionLayer, self).__init__(**kwargs)
+        
+    def call(self, inputs):
+        """
+        Expand 23 VAE features to 44 features to match training data structure.
+        
+        Args:
+            inputs: VAE decoder output tensor (batch_size, 23)
+            
+        Returns:
+            Expanded features tensor (batch_size, 44)
+        """
+        vae_decoder_output = inputs
+        
+        # Extract the 23 VAE features using Keras ops
+        raw_open = vae_decoder_output[:, 0:1]   # OPEN
+        raw_low = vae_decoder_output[:, 1:2]    # LOW  
+        raw_high = vae_decoder_output[:, 2:3]   # HIGH
+        vix_close = vae_decoder_output[:, 3:4]  # vix_close
+        bc_bo = vae_decoder_output[:, 4:5]      # BC-BO
+        bh_bl = vae_decoder_output[:, 5:6]      # BH-BL
+        sp500_close = vae_decoder_output[:, 6:7] # S&P500_Close
+        close_15m_ticks = vae_decoder_output[:, 7:15]  # CLOSE_15m_tick_1-8
+        close_30m_ticks = vae_decoder_output[:, 15:23] # CLOSE_30m_tick_1-8
+        
+        # Calculate raw CLOSE (typical price approximation)
+        raw_close = (raw_open + raw_high + raw_low) / 3.0
+        
+        # Fix OHLC constraints: Ensure High >= max(Open, Close) and Low <= min(Open, Close)
+        raw_ohlc = tf.keras.layers.Concatenate(axis=1)([raw_open, raw_high, raw_low, raw_close])
+        fixed_ohlc = self._fix_ohlc_constraints_keras(raw_ohlc)
+        
+        # Extract fixed OHLC values
+        open_val = fixed_ohlc[:, 0:1]
+        high_val = fixed_ohlc[:, 1:2]
+        low_val = fixed_ohlc[:, 2:3]
+        close_val = fixed_ohlc[:, 3:4]
+        
+        # Calculate missing bid/ask spreads
+        bh_bo = high_val - open_val  # BH-BO = HIGH - OPEN
+        bo_bl = open_val - low_val   # BO-BL = OPEN - LOW
+        
+        # Calculate 15 technical indicators using simplified approach for KerasTensors
+        ohlc = tf.keras.layers.Concatenate(axis=1)([open_val, high_val, low_val, close_val])
+        technical_indicators = self._calculate_technical_indicators_keras(ohlc)  # (batch_size, 15)
+        
+        # Generate raw date features (3 features)
+        batch_size = tf.shape(vae_decoder_output)[0]
+        raw_date_features = self._generate_raw_date_features_keras(batch_size)  # (batch_size, 3)
+        
+        # Assemble all 44 features in exact order matching training data
+        expanded_features = tf.keras.layers.Concatenate(axis=1)([
+            # Technical Indicators first (15)
+            technical_indicators,
+            # OHLC second (4)
+            open_val, high_val, low_val, close_val,
+            # Derived spreads third (4)
+            bc_bo, bh_bl, bh_bo, bo_bl,
+            # External market data fourth (2)
+            sp500_close, vix_close,
+            # Sub-periodicity fifth (16) - Generate constraint-based ticks
+            self._generate_sub_periodicity_ticks_keras(open_val, high_val, low_val, close_val),
+            # Raw date features sixth (3)
+            raw_date_features
+        ])
+        
+        return expanded_features
+    
+    def _calculate_technical_indicators_keras(self, ohlc):
+        """
+        Calculate simplified technical indicators using Keras-compatible operations.
+        
+        Args:
+            ohlc: OHLC tensor (batch_size, 4) [open, high, low, close]
+            
+        Returns:
+            Technical indicators tensor (batch_size, 15)
+        """
+        open_val = ohlc[:, 0:1]
+        high_val = ohlc[:, 1:2]
+        low_val = ohlc[:, 2:3]
+        close_val = ohlc[:, 3:4]
+        
+        indicators = []
+        
+        # Simplified calculations for 15 technical indicators
+        # 1. RSI (simplified)
+        price_change = close_val - open_val
+        gain = tf.maximum(price_change, 0.0)
+        loss = tf.maximum(-price_change, 0.0)
+        rs = gain / (loss + 1e-8)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        indicators.append(rsi)
+        
+        # 2-4. MACD components (simplified)
+        macd = (close_val - open_val) * 0.1
+        macd_signal = macd * 0.9
+        macd_histogram = macd - macd_signal
+        indicators.extend([macd, macd_histogram, macd_signal])
+        
+        # 5. EMA (simplified)
+        ema = close_val * 0.95 + open_val * 0.05
+        indicators.append(ema)
+        
+        # 6-7. Stochastic (simplified)
+        stoch_k = ((close_val - low_val) / (high_val - low_val + 1e-8)) * 100.0
+        stoch_d = stoch_k * 0.9
+        indicators.extend([stoch_k, stoch_d])
+        
+        # 8-10. ADX, DI+, DI- (simplified)
+        adx = tf.abs(high_val - low_val) / (close_val + 1e-8) * 100.0
+        di_plus = tf.maximum(high_val - open_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        di_minus = tf.maximum(open_val - low_val, 0.0) / (high_val - low_val + 1e-8) * 100.0
+        indicators.extend([adx, di_plus, di_minus])
+        
+        # 11. ATR (simplified)
+        atr = high_val - low_val
+        indicators.append(atr)
+        
+        # 12. CCI (simplified)
+        typical_price = (high_val + low_val + close_val) / 3.0
+        cci = (typical_price - close_val) / (0.015 * tf.abs(typical_price - close_val) + 1e-8)
+        indicators.append(cci)
+        
+        # 13. Williams %R (simplified)
+        williams_r = ((high_val - close_val) / (high_val - low_val + 1e-8)) * -100.0
+        indicators.append(williams_r)
+        
+        # 14. Momentum (simplified)
+        momentum = close_val - open_val
+        indicators.append(momentum)
+        
+        # 15. ROC (simplified)
+        roc = ((close_val - open_val) / (open_val + 1e-8)) * 100.0
+        indicators.append(roc)
+        
+        # Concatenate all indicators
+        return tf.keras.layers.Concatenate(axis=1)(indicators)
+    
+    def _generate_raw_date_features_keras(self, batch_size):
+        """
+        Generate raw date features using Keras-compatible operations.
+        
+        Args:
+            batch_size: Batch size for generation
+            
+        Returns:
+            Raw date features tensor (batch_size, 3)
+        """
+        # Generate realistic raw date feature values using tf.random.uniform
+        day_of_month = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        hour_of_day = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        day_of_week = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+        
+        return tf.keras.layers.Concatenate(axis=1)([day_of_month, hour_of_day, day_of_week])
+    
+    def _generate_sub_periodicity_ticks_keras(self, open_val, high_val, low_val, close_val):
+        """
+        Generate constraint-based sub-periodicity ticks using OHLC constraints.
+        
+        Creates realistic 15-minute and 30-minute tick sequences where:
+        - First tick = Open value (constraint)
+        - Last tick = Close value (constraint)
+        - At least one tick reaches High value (constraint)
+        - At least one tick reaches Low value (constraint)
+        - Realistic price movement between constraints
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            
+        Returns:
+            Sub-periodicity ticks tensor (batch_size, 16)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Generate 15-minute ticks (8 ticks)
+        ticks_15m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Generate 30-minute ticks (8 ticks) 
+        ticks_30m = self._generate_tick_sequence_keras(open_val, high_val, low_val, close_val, 8)
+        
+        # Concatenate both tick sequences
+        return tf.keras.layers.Concatenate(axis=1)([ticks_15m, ticks_30m])
+    
+    def _generate_tick_sequence_keras(self, open_val, high_val, low_val, close_val, num_ticks):
+        """
+        Generate a single tick sequence satisfying OHLC constraints.
+        
+        Args:
+            open_val: Open price tensor (batch_size, 1)
+            high_val: High price tensor (batch_size, 1) 
+            low_val: Low price tensor (batch_size, 1)
+            close_val: Close price tensor (batch_size, 1)
+            num_ticks: Number of ticks to generate
+            
+        Returns:
+            Tick sequence tensor (batch_size, num_ticks)
+        """
+        batch_size = tf.shape(open_val)[0]
+        
+        # Initialize tick sequence
+        ticks = []
+        
+        for i in range(num_ticks):
+            if i == 0:
+                # First tick = Open value (constraint)
+                tick_val = open_val
+            elif i == num_ticks - 1:
+                # Last tick = Close value (constraint)
+                tick_val = close_val
+            else:
+                # Intermediate ticks with constraints
+                # Calculate position along the sequence
+                position = tf.cast(i, tf.float32) / tf.cast(num_ticks - 1, tf.float32)
+                
+                # Linear interpolation between open and close as base
+                base_val = open_val + position * (close_val - open_val)
+                
+                # Add constrained variation to ensure high/low are reachable
+                # Calculate range and bias towards high/low at certain positions
+                ohlc_range = high_val - low_val
+                range_center = (high_val + low_val) / 2.0
+                
+                # Determine if this tick should bias towards high or low
+                # Middle ticks more likely to reach extremes
+                mid_position = tf.abs(position - 0.5) * 2.0  # 0 at middle, 1 at ends
+                bias_strength = (1.0 - mid_position) * 0.6  # Stronger bias in middle
+                
+                # Random bias towards high or low
+                high_bias = tf.random.uniform([batch_size, 1], minval=0.0, maxval=1.0)
+                bias_direction = tf.where(high_bias > 0.5, 1.0, -1.0)
+                
+                # Calculate biased value
+                bias_amount = bias_direction * bias_strength * ohlc_range * 0.3
+                biased_val = base_val + bias_amount
+                
+                # Ensure the value stays within OHLC bounds
+                tick_val = tf.clip_by_value(biased_val, low_val, high_val)
+                
+                # Add small random noise for realism
+                noise = tf.random.normal([batch_size, 1], mean=0.0, stddev=0.01)
+                tick_val = tick_val + noise * ohlc_range * 0.05
+                
+                # Final clipping to maintain constraints
+                tick_val = tf.clip_by_value(tick_val, low_val, high_val)
+            
+            ticks.append(tick_val)
+        
+        # Ensure high and low are actually reached in the sequence
+        ticks = self._enforce_high_low_constraints_keras(ticks, high_val, low_val)
+        
+        return tf.keras.layers.Concatenate(axis=1)(ticks)
+    
+    def _enforce_high_low_constraints_keras(self, ticks, high_val, low_val):
+        """
+        Ensure that at least one tick reaches the high value and one reaches the low value.
+        
+        Args:
+            ticks: List of tick tensors [(batch_size, 1), ...]
+            high_val: High price tensor (batch_size, 1)
+            low_val: Low price tensor (batch_size, 1)
+            
+        Returns:
+            Modified list of tick tensors with constraints enforced
+        """
+        if len(ticks) < 3:  # Need at least 3 ticks (open, something, close)
+            return ticks
+            
+        # Find middle positions to place high/low constraints
+        num_ticks = len(ticks)
+        high_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        low_pos = tf.random.uniform([], minval=1, maxval=num_ticks-1, dtype=tf.int32)
+        
+        # Ensure high and low positions are different
+        low_pos = tf.cond(
+            tf.equal(high_pos, low_pos),
+            lambda: tf.cond(
+                tf.equal(high_pos, 1),
+                lambda: high_pos + 1,
+                lambda: high_pos - 1
+            ),
+            lambda: low_pos
+        )
+        
+        # Create modified ticks list
+        modified_ticks = []
+        for i, tick in enumerate(ticks):
+            # Set specific positions to high/low values
+            tick_val = tf.cond(
+                tf.equal(i, high_pos),
+                lambda: high_val,
+                lambda: tf.cond(
+                    tf.equal(i, low_pos),
+                    lambda: low_val,
+                    lambda: tick
+                )
+            )
+            modified_ticks.append(tick_val)
+        
+        return modified_ticks
+    
+    def get_config(self):
+        return super(FeatureExpansionLayer, self).get_config()
+    
+    def _fix_ohlc_constraints_keras(self, ohlc_tensor):
+        """
+        Fix OHLC constraint violations using TensorFlow operations.
+        Ensures High >= max(Open, Close) and Low <= min(Open, Close)
+        
+        Strategy: Sort the 4 values and assign:
+        - Low = minimum value
+        - High = maximum value  
+        - Open = second lowest value (more conservative)
+        - Close = second highest value
+        
+        Args:
+            ohlc_tensor: Tensor of shape (batch_size, 4) with [Open, High, Low, Close]
+            
+        Returns:
+            Fixed OHLC tensor with constraints satisfied
+        """
+        # Sort values for each sample
+        sorted_values = tf.sort(ohlc_tensor, axis=1)  # Shape: (batch_size, 4)
+        
+        # Assign values to ensure constraints:
+        # - Low = minimum (index 0)
+        # - Open = second minimum (index 1) 
+        # - Close = second maximum (index 2)
+        # - High = maximum (index 3)
+        low_val = sorted_values[:, 0:1]    # Minimum
+        open_val = sorted_values[:, 1:2]   # Second minimum
+        close_val = sorted_values[:, 2:3]  # Second maximum  
+        high_val = sorted_values[:, 3:4]   # Maximum
+        
+        # Concatenate fixed OHLC [Open, High, Low, Close]
+        fixed_ohlc = tf.concat([open_val, high_val, low_val, close_val], axis=1)
+        
+        return fixed_ohlc

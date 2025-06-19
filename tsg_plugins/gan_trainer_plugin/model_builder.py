@@ -142,35 +142,49 @@ class ModelBuilder:
             # Input layer
             input_layer = Input(shape=(seq_len, num_features), name="discriminator_input")
             
-            # Convolutional layers
+            # Convolutional layers with proper dimensionality reduction
             x = input_layer
-            conv_filters = self.params.get("discriminator_conv_filters", [64, 128])
-            kernel_size = self.params.get("discriminator_conv_kernel_size", 3)
+            conv_filters = self.params.get("discriminator_conv_filters", [32, 16, 8])  # Decreasing filters
+            conv_strides = self.params.get("discriminator_conv_strides", [2, 2, 2])    # Stride=2 for downsampling
+            kernel_size = self.params.get("discriminator_conv_kernel_size", 5)
             dropout_rate = self.params.get("discriminator_dropout_rate", 0.3)
             
-            for i, filters in enumerate(conv_filters):
+            self.logger.info(f"Building discriminator with decreasing conv filters: {conv_filters}")
+            self.logger.info(f"Using conv strides for downsampling: {conv_strides}")
+            
+            for i, (filters, stride) in enumerate(zip(conv_filters, conv_strides)):
                 x = Conv1D(
                     filters=filters,
                     kernel_size=kernel_size,
+                    strides=stride,  # Add stride for downsampling
                     padding='same',
                     name=f"conv1d_{i+1}"
                 )(x)
-                x = LeakyReLU(alpha=0.2, name=f"leaky_relu_{i+1}")(x)
-                x = BatchNormalization(name=f"batch_norm_{i+1}")(x)
-                x = Dropout(dropout_rate, name=f"dropout_{i+1}")(x)
+                x = LeakyReLU(alpha=0.2, name=f"leaky_relu_conv_{i+1}")(x)
+                x = BatchNormalization(name=f"batch_norm_conv_{i+1}")(x)
+                x = Dropout(dropout_rate, name=f"dropout_conv_{i+1}")(x)
+                
+                # Log the shape after each conv layer
+                self.logger.debug(f"After conv1d_{i+1}: expected output shape with {filters} filters, stride {stride}")
             
-            # LSTM layer
-            lstm_units = self.params.get("discriminator_lstm_units", 64)
-            x = LSTM(
-                units=lstm_units,
-                return_sequences=False,
-                name="lstm_layer"
+            # Bidirectional LSTM layer for sequence processing
+            lstm_units = self.params.get("discriminator_lstm_units", 32)
+            x = tf.keras.layers.Bidirectional(
+                LSTM(
+                    units=lstm_units,
+                    return_sequences=False,  # Return only the last output
+                    name="discriminator_lstm"
+                ),
+                name="bidirectional_lstm"
             )(x)
             x = Dropout(dropout_rate, name="lstm_dropout")(x)
             
-            # Dense layers
-            x = Dense(64, activation='relu', name="dense_1")(x)
-            x = Dropout(dropout_rate, name="dense_dropout")(x)
+            # Dense layers with decreasing units
+            dense_units = self.params.get("discriminator_dense_units", [16, 8])
+            for i, units in enumerate(dense_units):
+                x = Dense(units, activation='relu', name=f"dense_{i+1}")(x)
+                x = LeakyReLU(alpha=0.2, name=f"leaky_relu_dense_{i+1}")(x)
+                x = Dropout(dropout_rate, name=f"dropout_dense_{i+1}")(x)
             
             # Output layer - binary classification (real/fake)
             output = Dense(1, activation='sigmoid', name="discriminator_output")(x)

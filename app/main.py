@@ -18,6 +18,8 @@ from app.config_handler import load_config, remote_load_config, save_config
 from app.plugin_loader import load_plugin
 from app.config_merger import merge_config, process_unknown_args
 from app.data_processor import run_pipeline
+from app.pipeline.generate_pipeline import GeneratePipeline # Added import for GeneratePipeline
+# import tensorflow as tf # TensorFlow import moved to where it's used to avoid import errors if not strictly needed at module level
 
 # Add the project root directory to sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -74,13 +76,59 @@ def main():
     
     # Set final parameters for all plugins
     print("Setting final parameters for all plugins...")
-    for plugin in plugins.values():
-        if plugin:
-            plugin.set_params(**current_config)
+    for plugin_name, plugin_instance in plugins.items(): # Modified to iterate over items
+        if plugin_instance:
+            plugin_instance.set_params(**current_config) # Passing full config for now
+
+    # OPERATION MODE DISPATCH
+    operation_mode = current_config.get("operation_mode", "train") # Default to train
     
-    # Run the unified pipeline
-    print("Dispatching to unified pipeline...")
-    run_pipeline(current_config, **plugins)
+    if operation_mode == "generate":
+        print(f"Operation Mode: {operation_mode}")
+        if not current_config.get("load_generator_sequential_model_file") or \
+           not current_config.get("load_discriminator_sequential_model_file"): # Discriminator path also checked as per initial reqs
+            print("Error: For 'generate' mode, 'load_generator_sequential_model_file' and "
+                  "'load_discriminator_sequential_model_file' must be specified in the config.")
+            sys.exit(1)
+
+        generator_model_path = current_config["load_generator_sequential_model_file"]
+        discriminator_model_path = current_config["load_discriminator_sequential_model_file"]
+
+        if not os.path.exists(generator_model_path):
+            print(f"Error: Generator model file not found: {generator_model_path}")
+            sys.exit(1)
+        
+        if not os.path.exists(discriminator_model_path):
+            print(f"Error: Discriminator model file not found: {discriminator_model_path}")
+            # sys.exit(1) # Commenting out exit for discriminator, as it might not be strictly needed for basic generation
+            print(f"Warning: Discriminator model file {discriminator_model_path} not found. Proceeding with generation if discriminator is not essential.")
+
+
+        print("Initializing Generate Pipeline directly...")
+        feeder_plugin = plugins.get('feeder_plugin')
+        generator_plugin_instance = plugins.get('generator_plugin')
+        evaluator_plugin = plugins.get('evaluator_plugin') 
+
+        if not feeder_plugin:
+            print("Error: FeederPlugin is required for generate mode but was not loaded.")
+            sys.exit(1)
+        if not generator_plugin_instance:
+            print("Error: GeneratorPlugin is required for generate mode but was not loaded.")
+            sys.exit(1)
+            
+        # The GeneratePipeline will be responsible for loading the models using the paths from config.
+        # We no longer load them directly in main.py to keep concerns separated.
+        # GeneratorPlugin instance is passed, and GeneratePipeline can use its config to get model paths.
+
+        generate_pipeline = GeneratePipeline(current_config, feeder_plugin, generator_plugin_instance, evaluator_plugin)
+        print("Executing generate pipeline...")
+        generate_pipeline.execute()
+        print("Finished executing generate pipeline.")
+
+    else:
+        # Run the unified pipeline for other modes (train, optimize, etc.)
+        print(f"Dispatching to unified pipeline for operation mode: {operation_mode}...")
+        run_pipeline(current_config, **plugins)
     
     # Save final configuration if requested
     if hasattr(args, 'save_config') and args.save_config:
