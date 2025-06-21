@@ -389,7 +389,7 @@ class GeneratorPlugin(PluginBase):
         
         # 4. Create the simplified composite model
         composite_generator = tf.keras.Model(
-            inputs=[noise_input, context_input, conditional_input],
+            inputs=[noise_input, conditional_input, context_input],
             outputs=sequence_output,
             name="simplified_composite_generator"
         )
@@ -400,7 +400,7 @@ class GeneratorPlugin(PluginBase):
         self.logger.info(f"Simplified Composite Generator created:")
         self.logger.info(f"  - Total parameters: {total_params:,}")
         self.logger.info(f"  - Trainable parameters: {trainable_params:,}")
-        self.logger.info(f"  - Input shapes: noise{noise_input.shape}, context{context_input.shape}, conditions{conditional_input.shape}")
+        self.logger.info(f"  - Input shapes: noise{noise_input.shape}, conditions{conditional_input.shape}, context{context_input.shape}")
         self.logger.info(f"  - Output shape: {sequence_output.shape}")
         
         return composite_generator
