@@ -42,67 +42,6 @@ logger = get_logger(__name__)
 #     """UNUSED - Complex layer that was causing convergence issues""" 
 #     pass
 
-# class FeatureExpansionLayer(tf.keras.layers.Layer):
-#     """UNUSED - Complex layer that was causing convergence issues"""
-#     pass
-        super().__init__(**kwargs)
-        self.seq_len = seq_len
-        self.latent_dim = latent_dim
-        
-        # Only one dense layer to create initial state
-        self.initial_dense = tf.keras.layers.Dense(
-            latent_dim, 
-            activation='tanh', 
-            name="random_walk_initial"
-        )
-    
-    def call(self, inputs):
-        """
-        Generate sequential noise using random walk from initial state.
-        
-        Args:
-            inputs: Noise tensor of shape (batch_size, noise_dim)
-            
-        Returns:
-            Sequential noise tensor of shape (batch_size, seq_len, latent_dim)
-        """
-        batch_size = tf.shape(inputs)[0]
-        
-        # Generate initial state from noise
-        initial_state = self.initial_dense(inputs)  # (batch_size, latent_dim)
-        
-        # Generate random walk steps
-        random_steps = tf.random.normal(
-            (batch_size, self.seq_len - 1, self.latent_dim), 
-            stddev=0.1
-        )
-        
-        # Create random walk sequence
-        # Start with initial state, then add cumulative random steps
-        initial_expanded = tf.expand_dims(initial_state, axis=1)  # (batch_size, 1, latent_dim)
-        
-        # Cumulative sum of random steps to create walk
-        cumulative_steps = tf.cumsum(random_steps, axis=1)  # (batch_size, seq_len-1, latent_dim)
-        
-        # Add initial state to all steps
-        random_walk = initial_expanded + tf.concat([
-            tf.zeros_like(initial_expanded), 
-            cumulative_steps
-        ], axis=1)
-        
-        # Apply tanh to keep values in reasonable range
-        output_sequence = tf.tanh(random_walk)
-        
-        return output_sequence
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'seq_len': self.seq_len,
-            'latent_dim': self.latent_dim
-        })
-        return config
-
 class GeneratorPlugin(PluginBase):
     """
     Generator Plugin for the TimeSeries GAN.
@@ -1214,17 +1153,7 @@ class GeneratorPlugin(PluginBase):
         
         return sequences_tensor
 
-# Ensure any subsequent methods are correctly defined and indented.
-# For example:
-#
-# class SomeOtherClass:
-#     def another_method(self):
-#         pass
-#
-# def top_level_function():
-#     pass
-
-class DiverseSequenceGeneratorLayer(tf.keras.layers.Layer):
+# End of GeneratorPlugin class
     """
     Custom Keras layer to generate diverse time sequences from base 44-feature pattern.
     
