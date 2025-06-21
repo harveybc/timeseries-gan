@@ -32,7 +32,7 @@ DEFAULT_VALUES = {
     "dataset_periodicity": "1h", 
 
      # Generation parameters
-    "n_samples": 25200,
+    "n_samples": 50400,
     "max_steps_train": 25200,
     "latent_shape": [18, 32], 
     "batch_size": 32, 
@@ -83,7 +83,7 @@ DEFAULT_VALUES = {
     "load_discriminator_sequential_model_file": "examples/results/phase_4_3/phase_4_3_discriminator_model.keras",
 
     # Output filename for the generation mode
-    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_25200_prepended_o.csv", # User's value retained
+    "generated_data_file": "examples/results/phase_4_3/normalized_d4_25200_synthetic_50400_prepended_o.csv", # User's value retained
 
     "generator_decoder_input_window_size": 288,
     
