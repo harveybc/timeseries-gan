@@ -163,7 +163,7 @@ DEFAULT_VALUES = {
     "discriminator_ohlc_feature_names": ["OPEN", "HIGH", "LOW", "CLOSE"],
 
     # Training parameters
-    "learning_rate": 0.005,
+    "learning_rate": 0.001,
     "beta1": 0.5,
     "beta2": 0.999,
     "epsilon": 1e-8,
