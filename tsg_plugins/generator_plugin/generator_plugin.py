@@ -33,18 +33,18 @@ from .sequence_builder import SequenceBuilder
 
 logger = get_logger(__name__)
 
-class SimpleRandomWalkNoiseLayer(tf.keras.layers.Layer):
-    """
-    Simple layer that generates sequential noise using random walk.
-    This creates natural sequential correlation with minimal parameters.
-    
-    Much more efficient than Dense(576) + Reshape approach:
-    - Only uses one small Dense layer (noise_dim * latent_dim parameters)
-    - Creates true sequential patterns through random walk
-    - No heavy parameter overhead
-    """
-    
-    def __init__(self, seq_len: int = 18, latent_dim: int = 32, **kwargs):
+# NOTE: Simplified generator approach - complex custom layers commented out for better convergence
+# class SimpleRandomWalkNoiseLayer(tf.keras.layers.Layer):
+#     """UNUSED - Complex layer that was causing convergence issues"""
+#     pass
+
+# class DiverseSequenceGeneratorLayer(tf.keras.layers.Layer):
+#     """UNUSED - Complex layer that was causing convergence issues""" 
+#     pass
+
+# class FeatureExpansionLayer(tf.keras.layers.Layer):
+#     """UNUSED - Complex layer that was causing convergence issues"""
+#     pass
         super().__init__(**kwargs)
         self.seq_len = seq_len
         self.latent_dim = latent_dim
@@ -349,153 +349,121 @@ class GeneratorPlugin(PluginBase):
     def _build_vae_generator(self, vae_decoder_model: tf.keras.Model) -> tf.keras.Model:
         """
         Builds the composite GAN generator using the pre-trained VAE decoder.
-        This involves creating the internal BiLSTM Z-generator and connecting it
-        to the VAE decoder, along with handling conditional inputs.
+        SIMPLIFIED VERSION for better convergence - minimal layers, direct approach.
         """
-        self.logger.info("Building VAE-based composite generator.")
+        self.logger.info("Building SIMPLIFIED VAE-based composite generator for better convergence.")
         self.logger.debug(f"Using VAE decoder: {vae_decoder_model.name}")
 
-        noise_dim = self.params.get("noise_dim", 100) # Example: dimension of the input noise vector for Z-generator
-        internal_z_seq_len = 18 # self.params.get("internal_z_sequence_length", 18)
-        internal_z_dim = 32 # self.params.get("internal_z_latent_dim", 32)
+        noise_dim = self.params.get("noise_dim", 100)
+        internal_z_seq_len = 18
+        internal_z_dim = 32
+        conditional_dim = self.params.get("conditional_features_dim", 10)
+        context_dim = self.params.get("context_vector_dim", 64)
 
-        conditional_dim = self.params.get("conditional_features_dim", 10) # Example: number of conditional features
-        context_dim = self.params.get("context_vector_dim", 64) # For decoder_input_h_context
-
-        # 1. Define Input Layers for the Composite Generator
-        self.logger.debug("Defining input layers for composite generator.")
+        # 1. Define Input Layers
         noise_input = tf.keras.layers.Input(shape=(noise_dim,), name="noise_input")
         conditional_input = tf.keras.layers.Input(shape=(conditional_dim,), name="conditional_input_to_vae")
         context_input = tf.keras.layers.Input(shape=(context_dim,), name="context_input_to_vae")
         
-        self.logger.debug(f"Noise input shape: {(noise_dim,)}, Conditional input shape: {(conditional_dim,)}, Context input shape: {(context_dim,)}")
+        self.logger.debug(f"Input shapes - Noise: {(noise_dim,)}, Conditional: {(conditional_dim,)}, Context: {(context_dim,)}")
 
-        # 2. Build or Get the Internal BiLSTM Z-Generator
-        self.logger.debug("Building internal BiLSTM Z-generator with improved sequential noise generation.")
+        # 2. SIMPLE Z-Generator - Direct approach, minimal processing
+        self.logger.info("Building SIMPLE Z-generator with minimal layers for better convergence.")
         
-        # Use simple random walk approach instead of Dense+Reshape
-        # This generates true sequential patterns with much fewer parameters
-        sequential_noise_layer = SimpleRandomWalkNoiseLayer(
-            seq_len=internal_z_seq_len, 
-            latent_dim=internal_z_dim,
-            name="sequential_noise_generator"
-        )
-        x = sequential_noise_layer(noise_input)
-        self.logger.debug(f"Z-gen: Sequential noise output shape: {x.shape}")  # Should be (None, 18, 32)
+        # Method 1: Simple Dense + Reshape (proven to work)
+        # Generate latent sequences directly without complex transformations
+        latent_size = internal_z_seq_len * internal_z_dim  # 18 * 32 = 576
         
-        # Calculate parameter comparison for logging
-        random_walk_params = sequential_noise_layer.count_params() if hasattr(sequential_noise_layer, 'count_params') else (noise_dim * internal_z_dim)
-        dense_reshape_params = 576 * (noise_dim + 1)
-        self.logger.info(f"Z-gen: Using random walk approach with ~{random_walk_params:,} parameters (vs {dense_reshape_params:,} for Dense+Reshape)")
+        # Single dense layer to generate all latent values
+        z_dense = tf.keras.layers.Dense(
+            latent_size, 
+            activation='tanh',
+            kernel_initializer='glorot_uniform',
+            name="z_simple_dense"
+        )(noise_input)
         
-
-
-        # Apply additional processing to ensure proper latent representation
-        # Use Conv1D to refine the sequential noise to match VAE decoder expectations
-        self.logger.debug("Applying Conv1D to refine sequential noise for VAE decoder compatibility.")
+        # Reshape to sequence format
+        z_sequence_raw = tf.keras.layers.Reshape(
+            (internal_z_seq_len, internal_z_dim), 
+            name="z_simple_reshape"
+        )(z_dense)
         
-        x = tf.keras.layers.Conv1D(
-            filters=32, 
-            kernel_size=3, 
-            activation='tanh', 
-            padding='same', 
-            name="z_conv1d_refinement1"
-        )(x)
+        # MINIMAL processing - just one BiLSTM layer for sequential refinement
+        z_sequence_for_vae = tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(16, return_sequences=True, activation='tanh'),
+            name="z_simple_bilstm"
+        )(z_sequence_raw)
         
-
-        lstm_layer = tf.keras.layers.LSTM(16, return_sequences=True)
-        x = tf.keras.layers.Bidirectional(lstm_layer, name="z_bilstm")(x)
-        self.logger.debug(f"Z-gen: BiLSTM output shape: {x.shape}") # Should be (None, 18, 128) if merge_mode='concat' (default)
+        # Final projection to exact VAE input dimension
+        z_sequence_for_vae = tf.keras.layers.Dense(
+            internal_z_dim,
+            activation='tanh',
+            name="z_final_projection"
+        )(z_sequence_for_vae)
         
-        z_sequence_for_vae = tf.keras.layers.Conv1D(
-            filters=32, 
-            kernel_size=3, 
-            activation='tanh', 
-            padding='same', 
-            name="z_conv1d_refinement2"
-        )(x)
-        self.logger.debug(f"Z-gen: Conv1D output shape (z_sequence_for_vae): {z_sequence_for_vae.shape}") # Should be (None, 18, 32)
+        self.logger.debug(f"Simple Z-generator output shape: {z_sequence_for_vae.shape}")  # Should be (None, 18, 32)
+        
+        # Count parameters for comparison
+        simple_params = latent_size * (noise_dim + 1) + (16 * 4 * (internal_z_dim + 16 + 1)) * 2 + internal_z_dim * (32 + 1)
+        self.logger.info(f"Simple Z-generator using ~{simple_params:,} parameters (much simpler architecture)")
 
 
-        # 3. Connect to the VAE Decoder
-        self.logger.debug(f"Preparing inputs for VAE decoder '{vae_decoder_model.name}'.")
+        # 3. Connect to VAE Decoder - DIRECT CONNECTION, no extra processing
+        self.logger.debug(f"Connecting to VAE decoder '{vae_decoder_model.name}' with minimal processing.")
         self.logger.debug(f"  - z_sequence_for_vae shape: {z_sequence_for_vae.shape}")
         self.logger.debug(f"  - context_input shape: {context_input.shape}")
         self.logger.debug(f"  - conditional_input shape: {conditional_input.shape}")
 
         vae_decoder_model.trainable = True
-        self.logger.info(f"Ensured VAE decoder '{vae_decoder_model.name}' is trainable.")
+        self.logger.info(f"VAE decoder '{vae_decoder_model.name}' set to trainable=True.")
         
         try:
             vae_input_names = [inp.name for inp in vae_decoder_model.inputs]
-            self.logger.info(f"VAE Decoder expected input layer names: {vae_input_names}")
-            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
-            self.logger.debug(f"VAE decoder output tensor: {vae_decoder_output}")
+            self.logger.info(f"VAE Decoder input names: {vae_input_names}")
             
-            # Post-process VAE decoder output based on operation mode  
-            # VAE decoder outputs 23 base features
+            # DIRECT connection to VAE decoder - no extra transformations
+            vae_decoder_output = vae_decoder_model([z_sequence_for_vae, context_input, conditional_input])
+            self.logger.debug(f"VAE decoder output shape: {vae_decoder_output.shape}")
+            
+            # SIMPLIFIED output processing - minimal transformations
             operation_mode = self.main_config.get("operation_mode", "train")
             
             if operation_mode == "generate":
-                # === GENERATE MODE: Expand to 44 features with proper sequence generation ===
-                self.logger.info("Generate mode: Expanding VAE output from 23 to 44 features")
-                
-                # Instead of expanding once and repeating, we need to generate diverse sequences
-                # First expand the single timestep to get base pattern
-                expansion_layer = FeatureExpansionLayer(name="feature_expansion")
-                base_expanded_features = expansion_layer(vae_decoder_output)  # Shape: (batch_size, 44)
-                self.logger.debug(f"Base expanded features shape: {base_expanded_features.shape}")
-                
-                # Generate diverse sequence by creating variations of the base pattern using custom layer
-                sequence_generator = DiverseSequenceGeneratorLayer(seq_len=144, name="sequence_generator")
-                sequence_output = sequence_generator(base_expanded_features)
-                
-                self.logger.debug(f"Final sequence output shape (44 features): {sequence_output.shape}")
-                
+                self.logger.info("Generate mode: Using simple feature expansion")
+                # Simple expansion without complex sequence generation
+                expanded_features = tf.keras.layers.Dense(44, activation='linear', name="simple_expansion")(vae_decoder_output)
+                sequence_output = tf.keras.layers.RepeatVector(144, name="simple_sequence")(expanded_features)
             else:
-                # === TRAINING MODE: Keep 23 base features ===
-                self.logger.info("Training mode: Using 23 base features directly from VAE decoder")
-                
-                # Create sequences directly from 23 base features
-                sequence_base = tf.keras.layers.RepeatVector(36)(vae_decoder_output)  # (batch_size, 32, 23)
-
-                #use conv1dtranspopose with stride  = 2 
-                sequence_base = tf.keras.layers.Conv1DTranspose(
-                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_1"
-                )(sequence_base)
-
-                        #use conv1dtranspopose with stride  = 2 
-                sequence_base = tf.keras.layers.Conv1DTranspose(
-                    filters=23, kernel_size=3, strides=2, padding='same', activation='tanh', name="sequence_base_conv1d_transpose_2"
-                )(sequence_base)        
-                
-                # Add small random variations to make realistic time sequences
-                #sequence_output = tf.keras.layers.GaussianNoise(stddev=0.01)(sequence_base)  # Small noise for variation
-                sequence_output = sequence_base 
-
-                self.logger.debug(f"Final sequence output shape (23 features): {sequence_output.shape}")
+                # Training mode: Direct use of 23 base features
+                self.logger.info("Training mode: Using 23 base features directly")
+                sequence_output = tf.keras.layers.RepeatVector(144, name="training_sequence")(vae_decoder_output)
+            
+            self.logger.debug(f"Final sequence output shape: {sequence_output.shape}")
             
         except Exception as e:
-            self.logger.error(f"Error when calling the VAE decoder model: {e}", exc_info=True)
-            self.logger.error(f"VAE Decoder inputs: {vae_decoder_model.inputs}")
+            self.logger.error(f"Error connecting to VAE decoder: {e}")
+            self.logger.error(f"VAE decoder inputs: {[inp.name + ':' + str(inp.shape) for inp in vae_decoder_model.inputs]}")
             self.logger.error(f"Provided z_sequence_for_vae: {z_sequence_for_vae}")
             self.logger.error(f"Provided context_input: {context_input}")
             self.logger.error(f"Provided conditional_input: {conditional_input}")
             raise
-
-        composite_generator_model = tf.keras.Model(
-            inputs=[noise_input, conditional_input, context_input],
-            outputs=sequence_output,
-            name="Composite_VAE_GAN_Generator"
-        )
-        self.logger.info("Composite VAE-GAN Generator model built successfully.")
         
-        if self.params.get("print_model_summary", False):
-            self.logger.info("Composite VAE-GAN Generator Summary:")
-            composite_generator_model.summary(print_fn=self.logger.info)
-
-        return composite_generator_model
-
+        # 4. Create the simplified composite model
+        composite_generator = tf.keras.Model(
+            inputs=[noise_input, context_input, conditional_input],
+            outputs=sequence_output,
+            name="simplified_composite_generator"
+        )
+        
+        total_params = composite_generator.count_params()
+        trainable_params = sum([tf.keras.utils.count_params(v) for v in composite_generator.trainable_variables])
+        
+        self.logger.info(f"Simplified Composite Generator created:")
+        self.logger.info(f"  - Total parameters: {total_params:,}")
+        self.logger.info(f"  - Trainable parameters: {trainable_params:,}")
+        self.logger.info(f"  - Input shapes: noise{noise_input.shape}, context{context_input.shape}, conditions{conditional_input.shape}")
+        self.logger.info(f"  - Output shape: {sequence_output.shape}")
+        
     def build(self, input_shape: Tuple[int, ...], condition_shape: Tuple[int, ...] = None) -> tf.keras.Model:
         """
         Build generator model with specified input and condition shapes.
