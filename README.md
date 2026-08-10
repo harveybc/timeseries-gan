@@ -1,95 +1,43 @@
-# Synthetic Data Generator (SDG)
+# timeseries-gan (package: `tsg`)
 
-A plugin-based framework for training and generating multi-feature time series data using a Sequential Conditional Variational Autoencoder–Generative Adversarial Network (SC-VAE-GAN).
+> **⚠️ SUPERSEDED — this repository is legacy and no longer maintained (last substantive commit: 2025-06-21).**
+>
+> Synthetic time-series generation now lives in [harveybc/synthetic-datagen](https://github.com/harveybc/synthetic-datagen), which owns the `sdg` CLI and the "Synthetic Data Generator" name.
+>
+> Use synthetic-datagen for any new work. This repository is retained for historical reference only and is not required by any current deployment.
 
-## Operation Modes
+## What this was
 
-- **Train Mode**: Train the SC-VAE-GAN on real data
-- **Generate Mode**: Generate synthetic sequences with OHLC features, technical indicators, and date features  
-- **Optimize Mode**: Hyperparameter optimization via genetic algorithms
+A plugin-based framework for training a Sequential Conditional VAE-GAN (SC-VAE-GAN) on multi-feature financial time series and generating synthetic sequences (OHLC prices, technical indicators, date features). The installed package is named `tsg` and it provides a `tsg` console script with train, generate, and (GA-based) hyperparameter-optimization modes. Plugins are loaded through setuptools entry-point groups from [`tsg_plugins/`](tsg_plugins/) (see [`setup.py`](setup.py)); deeper historical documentation is in [REFERENCE.md](REFERENCE.md).
 
-## Installation
+## Known defects and naming hazards
+
+- **Naming mismatch:** the repository is `timeseries-gan` but the package is `tsg`. Earlier versions of this README were titled "Synthetic Data Generator (SDG)" and showed `sdg ...` commands — that name and CLI now belong to [synthetic-datagen](https://github.com/harveybc/synthetic-datagen); the command installed by this repository has always been `tsg`.
+- **Colliding entry-point groups:** plugins are registered under unqualified groups (`feeder.plugins`, `generator.plugins`, `discriminator.plugins`, `evaluator.plugins`, `optimizer.plugins`, `trainer.plugins`). These names are not namespaced to this project and collide with other packages that claim the same groups (e.g. `feeder.plugins` is also used elsewhere), so installing `tsg` alongside such packages in one environment corrupts plugin discovery.
+- **Committed residue:** trained weights (`gan_epoch_500.keras`, `generator_epoch_500.keras`, `discriminator_epoch_500.keras`), debug/one-off scripts at the repository root, backup plugin files, and `__pycache__` directories were committed. Treat them as leftovers, not reference artifacts.
+
+## Historical usage — unverified in current environments
+
+The commands below reflect how the tool was originally used (with the correct `tsg` command). They have **not** been re-verified in current environments.
 
 ```bash
 git clone https://github.com/harveybc/timeseries-gan.git
 cd timeseries-gan
-pip install -r requirements.txt
-python -m build
+pip install -r requirements.txt   # historical — unverified in current environments
 pip install .
+
+tsg --trainer gan_trainer --gan_epochs 1000            # train — historical, unverified
+tsg --n_samples 1000 --output_file synthetic_data.csv  # generate — historical, unverified
 ```
 
-## Quick Start
+Sample EUR/USD data, results, and scripts from the original experiments are under [`examples/`](examples/).
 
-```bash
-# Train GAN (using default EUR/USD hourly data)
-sdg --trainer gan_trainer --gan_epochs 1000
+## Limitations
 
-# Generate synthetic data after training
-sdg --n_samples 1000 --output_file synthetic_data.csv
+- No maintenance, no issue support, no compatibility work is planned.
+- TensorFlow/Keras and CUDA pins in [`requirements.txt`](requirements.txt) target the original 2025-era environment and are unverified today.
+- The successor, synthetic-datagen, uses properly namespaced `sdg.*` plugin groups and different generation methods; nothing here is interchangeable with it.
 
-# Hyperparameter optimization
-sdg --run_hyperparameter_optimization True --population_size 10 --n_generations 5
-```
+## License
 
-For detailed usage, configuration, and system documentation, see [REFERENCE.md](REFERENCE.md).
-
-## Directory Structure
-
-```
-timeseries-gan/
-├── app/                          # Core application modules
-│   ├── config.py                 # Default configuration parameters
-│   ├── cli.py                    # Command-line interface
-│   ├── main.py                   # Entry point and orchestration
-│   ├── data_processor.py         # Main pipeline orchestrator (~170 lines)
-│   ├── plugin_loader.py          # Plugin discovery and loading
-│   ├── config_merger.py          # Configuration merging
-│   ├── pipeline/                 # Pipeline modules (under 200 lines each)
-│   │   ├── train_pipeline.py     # GAN training workflow
-│   │   ├── optimize_pipeline.py  # Hyperparameter optimization
-│   │   └── generate_pipeline.py  # Data generation and evaluation
-│   ├── data_generation/          # Data processing modules
-│   │   ├── synthetic_generator.py # Synthetic data generation
-│   │   └── real_data_processor.py # Real data processing
-│   ├── evaluation/               # Evaluation metrics
-│   │   └── metrics_evaluator.py  # Comprehensive evaluation
-│   └── utils/                    # Utility modules
-│       ├── latent_shape_inference.py # Latent shape compatibility
-│       └── output_manager.py     # Output file management
-├── tsg_plugins/                  # Plugin implementations
-│   ├── feeder_plugin/            # FULLY MODULARIZED (394 lines main)
-│   │   ├── feeder_plugin.py      # Main plugin interface and orchestration
-│   │   ├── encoder_handler.py    # Keras model loading and encoding (201 lines)
-│   │   ├── data_preprocessor.py  # Data normalization and cleaning (329 lines)
-│   │   └── condition_manager.py  # Condition extraction and processing (394 lines)
-│   ├── generator_plugin/         # FULLY MODULARIZED (360 lines main)
-│   │   ├── generator_plugin.py   # Main plugin interface
-│   │   ├── normalization_handler.py # Data normalization
-│   │   ├── model_loader.py       # Model loading
-│   │   ├── feature_processor.py  # Feature processing
-│   │   ├── technical_indicator_calculator.py # TI calculations
-│   │   ├── data_generator.py     # Data generation
-│   │   ├── sequence_builder.py   # Sequence building
-│   │   ├── feature_validator.py  # Feature validation
-│   │   ├── initial_data_handler.py # Initial data handling
-│   │   └── pandas_ta_compat.py   # Compatibility layer
-│   ├── evaluator_plugin.py       # Model evaluation (368 lines)
-│   ├── optimizer_plugin.py       # Hyperparameter optimization (299 lines)
-│   └── trainer_plugin.py         # GAN training (629 lines)
-├── examples/                     # Sample data and trained models
-│   ├── data/                     # EUR/USD datasets by processing phase
-│   ├── results/                  # Pre-trained models and results
-│   └── scripts/                  # Example scripts
-└── tests/                        # Test suites
-    ├── unit_tests/               # Unit tests for individual modules
-    └── integration_tests/        # Integration tests for plugin interactions
-```
-
-## Features
-
-- **57 Features**: OHLC prices, 15 technical indicators, date features, fundamental data
-- **Extreme Modularity**: Feeder and generator plugins fully modularized with components under 400 lines each
-- **Keras Integration**: Full migration to Keras/TensorFlow from PyTorch for better compatibility
-- **Pre-trained Models**: Ready-to-use encoder/decoder models for EUR/USD hourly data
-- **Flexible Architecture**: Plugin-based system for easy extension and customization
-- **Comprehensive Testing**: Unit and integration tests for all modular components
+MIT — see [LICENSE.txt](LICENSE.txt).
